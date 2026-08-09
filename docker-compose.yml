@@ -1,0 +1,47 @@
+# Development dependencies for Atlas.
+#
+# This file provisions the datastore only. Atlas itself runs on the host
+# during development (`make run`) so that collectors read the real /proc,
+# the real Docker socket, and the real systemd — the surfaces the platform
+# exists to observe. Running the server in a container would show it the
+# container's view of the world instead.
+#
+# Production deployment is documented in docs/operations/deployment.md.
+
+name: atlas-dev
+
+services:
+  postgres:
+    # TimescaleDB is a hard requirement (migration 0001), so the image must
+    # carry the extension. Pinned to a patch-level tag: an observability
+    # platform whose own datastore drifts between developer machines is a
+    # source of irreproducible bugs.
+    image: timescale/timescaledb:2.17.2-pg17
+    container_name: atlas-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: atlas
+      POSTGRES_USER: atlas
+      # Development-only credential. Production supplies a secret file via
+      # ATLAS_DATABASE_PASSWORD_FILE; see docs/security/security-guide.md.
+      POSTGRES_PASSWORD: atlas_dev_password
+      # Fail fast on a locale mismatch rather than at the first ORDER BY.
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    ports:
+      # Bound to loopback: a development database must not be reachable from
+      # the network the laptop happens to be on.
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      # `make db-up` waits on this, so it must mean "ready for queries",
+      # not merely "process started".
+      test: ["CMD-SHELL", "pg_isready -U atlas -d atlas"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
+volumes:
+  postgres-data:
+    name: atlas-postgres-data

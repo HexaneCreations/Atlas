@@ -1,0 +1,387 @@
+/*
+ * Atlas design tokens.
+ *
+ * Both colour schemes are supported from the start. Operations tools are read
+ * at 3am as often as at 3pm, and retrofitting a dark theme onto hard-coded
+ * colours is a far larger job than defining tokens once.
+ *
+ * Semantic custom properties (--bg, --surface, ...) hold the actual colour
+ * and flip under prefers-color-scheme. Tailwind's @theme block maps utility
+ * classes onto those properties rather than onto literal colours, so
+ * `bg-surface` resolves correctly in both themes without a `dark:` prefix on
+ * every element — the flip happens once, here, not at every call site.
+ */
+@import "tailwindcss";
+
+/*
+ * `dark:` must agree with the sidebar theme toggle.
+ *
+ * Tailwind's stock dark variant reads prefers-color-scheme and nothing else,
+ * while the tokens above are also driven by an explicit [data-theme]. The two
+ * then disagree in exactly the case that matters: a dark-OS user who switches
+ * Atlas to light kept getting every `dark:` utility, so decorative layers
+ * authored for a black surface painted grey blocks onto a white one.
+ *
+ * This redefinition matches an explicit dark choice, or the OS preference
+ * when no explicit choice has been made — the same precedence the token
+ * blocks use, so utilities and colours can no longer drift apart.
+ */
+@custom-variant dark {
+  &:where([data-theme="dark"], [data-theme="dark"] *) {
+    @slot;
+  }
+  @media (prefers-color-scheme: dark) {
+    &:where(:root:not([data-theme]), :root:not([data-theme]) *) {
+      @slot;
+    }
+  }
+}
+
+:root {
+  --bg: #fbfbfc;
+  --surface: #ffffff;
+  --surface-hover: #f4f5f7;
+  --border: #e4e6eb;
+  --text: #14161a;
+  --text-muted: #6b7280;
+  /* A third text level, one step quieter than muted. Titles carry the
+     message, muted carries the explanation, subtle carries the aside —
+     three levels is what lets a dense panel have a hierarchy at all. */
+  --text-subtle: #9aa1ad;
+
+  --primary: #6c5ce7;
+  --primary-hover: #5d4dd6;
+  --success: #16a34a;
+  --warning: #b45309;
+  --danger: #dc2626;
+  --info: #2563eb;
+
+  /* Categorical slots 1-2 (blue, orange). Validated with the dataviz
+     validator against this surface: CVD ΔE 24.7, normal-vision ΔE 33.6,
+     both above 3:1 contrast. Do not substitute without re-running it. */
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+
+  /* The signature gradient: blue into violet, the board's "Atlas Primary".
+     Used for the active nav item, primary buttons, and the logo lockup —
+     nowhere else, so it stays a signal rather than decoration. */
+  --grad-primary: linear-gradient(135deg, #4f7fff 0%, #8b5cf6 55%, #a855f7 100%);
+  --grad-aurora: linear-gradient(135deg, #7c3aed 0%, #c026d3 100%);
+  --grad-success: linear-gradient(135deg, #10b981 0%, #34d399 100%);
+  --grad-warning: linear-gradient(135deg, #f59e0b 0%, #fbbf24 100%);
+  --grad-danger: linear-gradient(135deg, #dc2626 0%, #f87171 100%);
+
+  /* Purple glow. The board puts a soft bloom behind anything active. */
+  --glow-primary: 0 0 0 1px rgb(139 124 246 / 0.25), 0 8px 32px -8px rgb(139 124 246 / 0.45);
+  --glow-soft: 0 8px 40px -12px rgb(139 124 246 / 0.25);
+
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #030308;
+    --surface: #0a0b12;
+    --surface-hover: #12141d;
+    --border: #1e2130;
+    --text: #e9eaf0;
+    --text-muted: #858da0;
+    --text-subtle: #656d7e;
+
+    --primary: #8b7cf6;
+    --primary-hover: #6c5ce7;
+    --success: #22c55e;
+    --warning: #f59e0b;
+    --danger: #ef4444;
+    --info: #3b82f6;
+
+    /* Dark steps of the same two hues, validated against the dark surface:
+       CVD ΔE 26.8, normal-vision ΔE 31.8. Not an automatic flip. */
+    --series-1: #3987e5;
+    --series-2: #d95926;
+  }
+}
+
+/* An explicit choice from the sidebar toggle overrides the OS preference in
+   either direction. Unset (the common case) leaves the media query above as
+   the only source of truth. */
+:root[data-theme="dark"] {
+  --bg: #030308;
+  --surface: #0a0b12;
+  --surface-hover: #12141d;
+  --border: #1e2130;
+  --text: #e9eaf0;
+  --text-muted: #858da0;
+  --text-subtle: #656d7e;
+  --primary: #8b7cf6;
+  --primary-hover: #6c5ce7;
+  --success: #22c55e;
+  --warning: #f59e0b;
+  --danger: #ef4444;
+  --info: #3b82f6;
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  color-scheme: dark;
+}
+
+:root[data-theme="light"] {
+  --bg: #fbfbfc;
+  --surface: #ffffff;
+  --surface-hover: #f4f5f7;
+  --border: #e4e6eb;
+  --text: #14161a;
+  --text-muted: #6b7280;
+  --text-subtle: #9aa1ad;
+  --primary: #6c5ce7;
+  --primary-hover: #5d4dd6;
+  --success: #16a34a;
+  --warning: #b45309;
+  --danger: #dc2626;
+  --info: #2563eb;
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  color-scheme: light;
+}
+
+@theme {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-hover: var(--surface-hover);
+  --color-border: var(--border);
+  --color-text: var(--text);
+  --color-text-muted: var(--text-muted);
+  --color-text-subtle: var(--text-subtle);
+
+  --color-primary: var(--primary);
+  --color-primary-hover: var(--primary-hover);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-danger: var(--danger);
+  --color-info: var(--info);
+
+  --color-series-1: var(--series-1);
+  --color-series-2: var(--series-2);
+
+  /* Typography scale, per the Atlas UI guidelines.
+     The namespace is --text-*, which is what Tailwind maps onto `text-<name>`
+     utilities; --font-size-* is silently ignored and leaves the element at its
+     inherited size. */
+  --text-hero: 3rem;
+  --text-hero--line-height: 1.1;
+  --text-page-title: 2rem;
+  --text-page-title--line-height: 1.2;
+  --text-section: 1.5rem;
+  --text-section--line-height: 1.3;
+  --text-card-title: 1.125rem;
+  --text-card-title--line-height: 1.4;
+  --text-metric: 3.25rem;
+  --text-metric--line-height: 1;
+  --text-label: 0.8125rem;
+  --text-label--line-height: 1.4;
+
+  --font-family-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-family-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-family-sans);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .animate-pulse-dot {
+    animation: pulse 2s ease-in-out infinite;
+  }
+}
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+/* ---------------------------------------------------------- Chart internals ----
+   Kept as plain CSS rather than Tailwind utilities: these target SVG
+   presentation attributes (stroke, vector-effect) that utility classes don't
+   cover cleanly, and they are used from exactly one component. */
+
+.chart__svg { width: 100%; height: 160px; display: block; overflow: visible; }
+.chart__grid { stroke: var(--border); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.chart__axis { stroke: var(--border); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.chart__tick { fill: var(--text-muted); font-size: 9px; font-variant-numeric: tabular-nums; }
+.chart__crosshair {
+  stroke: var(--text-muted);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+  vector-effect: non-scaling-stroke;
+}
+.chart__marker { stroke: var(--surface); stroke-width: 2; }
+.sparkline { width: 100%; height: 24px; display: block; }
+
+/* ------------------------------------------------------- design language ----
+   The board's signature treatments, as utilities. Kept here rather than as
+   inline styles so opacity and blend behaviour are defined once — a pattern
+   applied at a different strength in two places is what makes a system look
+   assembled rather than designed. */
+
+/* A tiling pattern beneath a surface. The element needs `relative`; the
+   pattern paints into an ::after so it never sits above content. */
+.pattern-layer::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image: var(--pattern-url);
+  background-size: 340px;
+  opacity: 0.05;
+  border-radius: inherit;
+  z-index: 0;
+}
+/* Content sits above the pattern. Without this the ::after paints last and
+   washes over everything it was meant to sit beneath.
+   Decorative layers are excluded by their aria-hidden: they are absolutely
+   positioned, and forcing position:relative on them would collapse them back
+   into the flow. */
+.pattern-layer > *:not([aria-hidden="true"]) {
+  position: relative;
+  z-index: 1;
+}
+:root[data-theme="light"] .pattern-layer::after,
+:root:not([data-theme]) .pattern-layer::after { opacity: 0.03; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) .pattern-layer::after { opacity: 0.05; }
+}
+
+/* The signature blue-into-violet fill. */
+.grad-primary { background-image: var(--grad-primary); }
+
+/* Gradient text, for the one or two places a headline earns it. */
+.grad-text {
+  background-image: var(--grad-primary);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* A soft violet bloom behind an active element. */
+.glow { box-shadow: var(--glow-primary); }
+.glow-soft { box-shadow: var(--glow-soft); }
+
+/* The board sets every micro-label in wide-tracked uppercase. */
+.eyebrow {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+/* The illustration pack is drawn for light surfaces: near-white grounds with
+   blue line art. Dropping one into a near-black page puts a bright rectangle
+   in the middle of it.
+
+   Inverting and rotating the hue 180° flips the ground to dark while
+   returning every hue to roughly where it started — the blues stay blue. It
+   is a well-worn trick, and it is the difference between using the supplied
+   artwork and abandoning it: the alternative was substituting something
+   drawn elsewhere, which the asset rules rule out. */
+.illus {
+  border-radius: 0.75rem;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) .illus { filter: invert(1) hue-rotate(180deg) saturate(0.9) brightness(0.92); }
+}
+:root[data-theme="dark"] .illus { filter: invert(1) hue-rotate(180deg) saturate(0.9) brightness(0.92); }
+
+/* ------------------------------------------------------------ elevation ----
+   Four surface levels, so a page reads as layers rather than as one flat
+   plane. The differences are deliberately small: on a near-black canvas a
+   few percent of lightness plus an inner top highlight is all it takes, and
+   anything stronger turns into the grey-box look this is meant to avoid.
+
+   The inset highlight along the top edge is what sells it — it reads as a
+   light source above the page, which is why the surfaces look lit rather
+   than merely lighter. */
+.elev-1 {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.04),
+    0 1px 2px rgb(0 0 0 / 0.3);
+}
+.elev-2 {
+  background: linear-gradient(180deg, color-mix(in oklab, var(--surface) 100%, white 3%), var(--surface));
+  border: 1px solid var(--border);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.06),
+    0 2px 4px rgb(0 0 0 / 0.32),
+    0 12px 32px -16px rgb(0 0 0 / 0.5);
+}
+.elev-3 {
+  background: linear-gradient(180deg, color-mix(in oklab, var(--surface) 100%, white 5%), var(--surface));
+  border: 1px solid color-mix(in oklab, var(--border) 100%, white 8%);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.08),
+    0 4px 8px rgb(0 0 0 / 0.35),
+    0 24px 56px -24px rgb(0 0 0 / 0.6);
+}
+
+/* Glass. Used for content sitting over imagery, where an opaque panel would
+   hide the artwork it is meant to sit within. */
+.glass {
+  background: color-mix(in oklab, var(--surface) 62%, transparent);
+  backdrop-filter: blur(20px) saturate(1.3);
+  -webkit-backdrop-filter: blur(20px) saturate(1.3);
+  border: 1px solid color-mix(in oklab, var(--border) 100%, white 10%);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.07),
+    0 8px 32px -12px rgb(0 0 0 / 0.55);
+}
+
+/* A card that responds to the pointer. Restrained: two pixels of lift and a
+   slightly brighter edge. Anything more is a toy. */
+@media (prefers-reduced-motion: no-preference) {
+  .lift {
+    transition:
+      transform 180ms cubic-bezier(0.22, 1, 0.36, 1),
+      box-shadow 180ms cubic-bezier(0.22, 1, 0.36, 1),
+      border-color 180ms ease;
+  }
+  .lift:hover {
+    transform: translateY(-2px);
+  }
+}
+.lift:hover {
+  border-color: color-mix(in oklab, var(--border) 100%, white 14%);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.08),
+    0 8px 20px rgb(0 0 0 / 0.4),
+    0 0 0 1px color-mix(in oklab, var(--primary) 18%, transparent);
+}
+
+/* An alert surface: something is wrong and the page should say so before it
+   says anything else. */
+.surface-alert {
+  background: linear-gradient(180deg, color-mix(in oklab, var(--danger) 9%, var(--surface)), var(--surface));
+  border: 1px solid color-mix(in oklab, var(--danger) 32%, var(--border));
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.05),
+    0 0 32px -12px color-mix(in oklab, var(--danger) 45%, transparent);
+}
+.surface-warn {
+  background: linear-gradient(180deg, color-mix(in oklab, var(--warning) 9%, var(--surface)), var(--surface));
+  border: 1px solid color-mix(in oklab, var(--warning) 30%, var(--border));
+}
+
+/* Scrollbar restraint for the sidebar and log panes: visible on hover only,
+   so a quiet page does not show a permanent grey bar down the side. */
+.scroll-thin {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}

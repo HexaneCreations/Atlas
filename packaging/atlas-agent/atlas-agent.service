@@ -1,0 +1,73 @@
+[Unit]
+Description=Atlas Agent — host observation for the Atlas control plane
+Documentation=https://github.com/hexane/atlas
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/atlas-agent
+EnvironmentFile=/etc/atlas-agent/atlas-agent.env
+
+# Restart unconditionally. A control-plane outage is handled inside the
+# agent (spool + backoff, see internal/core/transport/remote) and must
+# never cause this process to exit; Restart=always covers everything else
+# — an unhandled panic, an OOM kill — without a burst limit that could
+# leave a host permanently unmonitored after a bad patch of transient
+# failures.
+Restart=always
+RestartSec=5s
+
+# --- Identity -----------------------------------------------------------
+User=atlas
+Group=atlas
+# Docker container inventory needs group access to /var/run/docker.sock.
+# Referencing a group that does not exist on the host is a hard startup
+# failure (systemd exit 216/GROUP), so this is not set here — a host with
+# no 'docker' group must still start cleanly. install.sh adds it via a
+# drop-in at atlas-agent.service.d/10-docker-group.conf only when the
+# group actually exists.
+
+# --- Directories ----------------------------------------------------------
+# systemd creates and owns these; install.sh does not need to.
+StateDirectory=atlas-agent
+StateDirectoryMode=0700
+ConfigurationDirectory=atlas-agent
+ConfigurationDirectoryMode=0750
+
+# --- Hardening --------------------------------------------------------
+# Conservative by default: everything here is deny-by-default sandboxing
+# with no capability granted beyond reading /proc and the network. The one
+# exception operators may want is commented below.
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/atlas-agent
+ProtectHome=true
+PrivateTmp=true
+ProtectClock=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RemoveIPC=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# Full socket-to-process attribution on the Ports page needs CAP_SYS_PTRACE
+# to read other users' /proc/[pid]/fd entries — without it, sockets owned
+# by another user report as unattributed rather than guessed (see
+# docs/architecture/agent-design.md sec 3). Uncomment both lines to grant it:
+# CapabilityBoundingSet=CAP_SYS_PTRACE
+# AmbientCapabilities=CAP_SYS_PTRACE
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl -s --max-time 2 -o /dev/null localhost:8080/api/v1/nodes)",
+      "Bash(python3 -c ' *)"
+    ]
+  }
+}

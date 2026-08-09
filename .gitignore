@@ -1,0 +1,28 @@
+# Build output
+/bin/
+/dist/
+*.test
+*.out
+
+# Go
+vendor/
+
+# Node / frontend
+node_modules/
+web/dist/
+web/.vite/
+*.tsbuildinfo
+
+# Local configuration and secrets — never commit
+/atlas.local.yaml
+/.env
+/.env.*
+!/.env.example
+*.pem
+*.key
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json

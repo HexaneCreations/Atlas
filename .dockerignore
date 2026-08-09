@@ -1,0 +1,17 @@
+# Keep the build context small and free of anything that could be baked into
+# an image by accident.
+.git
+.github
+bin/
+dist/
+docs/
+web/node_modules/
+web/dist/
+coverage.*
+*.md
+!README.md
+.env
+.env.*
+*.pem
+*.key
+atlas.local.yaml

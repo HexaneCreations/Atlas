@@ -1,0 +1,93 @@
+# golangci-lint configuration for Atlas.
+#
+# The linter set is chosen to catch the failure modes that actually hurt a
+# long-lived observability platform: leaked resources, ignored errors,
+# unbounded loops over shared state, and security mistakes in code that reads
+# a host's most sensitive surfaces.
+
+version: "2"
+
+run:
+  timeout: 5m
+  # Integration tests must be linted too, or the code that exercises real
+  # infrastructure ends up as the least-checked code in the repository.
+  build-tags:
+    - integration
+
+linters:
+  default: standard
+  enable:
+    # Correctness
+    - bodyclose        # an unclosed HTTP body leaks a connection per request
+    - contextcheck     # a dropped context breaks every cancellation guarantee
+    - durationcheck    # multiplying two Durations is almost always a bug
+    - errorlint        # comparing errors with == misses wrapped errors
+    - nilerr           # returning nil after a non-nil error hides failures
+    - noctx            # HTTP calls without a context cannot be cancelled
+    - rowserrcheck     # an unchecked rows.Err silently truncates a result set
+    - sqlclosecheck
+    - makezero
+
+    # Security
+    - gosec
+
+    # Clarity and maintenance
+    - godot            # comments end in a period; keeps godoc rendering clean
+    - misspell
+    - revive
+    - unconvert
+    - unparam
+    - wastedassign
+
+    # Performance
+    - prealloc
+
+linters-settings:
+  errcheck:
+    # Deliberately ignored errors are written as `_ =`. Requiring the blank
+    # assignment makes "I chose to ignore this" visible in review, instead of
+    # indistinguishable from "I forgot".
+    check-blank: true
+    exclude-functions:
+      - (io.Closer).Close
+
+  govet:
+    enable-all: true
+    disable:
+      # Field alignment optimises struct padding at the cost of grouping
+      # related fields together. Readability wins for config and API types.
+      - fieldalignment
+
+  revive:
+    rules:
+      - name: exported
+        arguments:
+          - disableStutteringCheck
+      - name: package-comments
+      - name: context-as-argument
+      - name: error-return
+      - name: error-strings
+      - name: indent-error-flow
+      - name: unreachable-code
+
+  gosec:
+    excludes:
+      # Integer conversions are flagged aggressively; the real ones are caught
+      # by review and by the bounds checks in config validation.
+      - G115
+
+  misspell:
+    locale: UK
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  exclude-rules:
+    # Tests legitimately do things production code should not: ignore errors
+    # in cleanup, hard-code credentials for a throwaway container, and sleep.
+    - path: _test\.go
+      linters:
+        - gosec
+        - errcheck
+        - unparam
+        - prealloc
