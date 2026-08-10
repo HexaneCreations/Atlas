@@ -28,6 +28,14 @@ func New(cfg Config, logger *slog.Logger) (*Relay, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	// Rendezvous (docs/adr/0012-connect-by-identity.md): a Server announces
+	// its current direct + circuit addresses here, so an Agent that only
+	// knows the Server's Peer ID can look them up instead of an operator
+	// manually assembling a circuit multiaddr. In-memory only — see
+	// [libp2ptransport.Registry].
+	libp2ptransport.RegisterRendezvousHandlers(h, libp2ptransport.NewRegistry())
+
 	return &Relay{host: h, logger: logger}, nil
 }
 

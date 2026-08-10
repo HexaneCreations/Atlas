@@ -13,15 +13,19 @@ package libp2ptransport
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/libp2p/go-libp2p"
 	gostream "github.com/libp2p/go-libp2p-gostream"
 	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/host"
+	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	relayclient "github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/client"
 	relayv2 "github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/relay"
@@ -222,6 +226,203 @@ func NewRelayHost(dataDir string, listenAddrs []string) (host.Host, error) {
 		return nil, errs.Wrap(err, errs.CodeInternal, "could not start relay host").WithOp(op)
 	}
 	return h, nil
+}
+
+// rendezvousAnnounceProtocolID and rendezvousLookupProtocolID are the
+// discovery protocols an Atlas Relay speaks in addition to circuit-relay-v2
+// itself: a Server announces its current reachable addresses, and an Agent
+// looks a Server's Peer ID up to get them, instead of an operator manually
+// copy-pasting a circuit multiaddr between processes.
+const (
+	rendezvousAnnounceProtocolID = "/atlas/rendezvous/announce/1.0.0"
+	rendezvousLookupProtocolID   = "/atlas/rendezvous/lookup/1.0.0"
+)
+
+// dialCandidateTimeout bounds how long [DialWithFallback] waits on each
+// candidate before trying the next one, so an unreachable direct address
+// fails fast into the relay fallback instead of hanging on the OS-level TCP
+// connect timeout.
+const dialCandidateTimeout = 8 * time.Second
+
+type announceRequest struct {
+	DirectAddrs []string `json:"direct_addrs"`
+	CircuitAddr string   `json:"circuit_addr,omitempty"`
+}
+
+type announceResponse struct {
+	OK bool `json:"ok"`
+}
+
+type lookupRequest struct {
+	PeerID string `json:"peer_id"`
+}
+
+type lookupResponse struct {
+	DirectAddrs []string `json:"direct_addrs,omitempty"`
+	CircuitAddr string   `json:"circuit_addr,omitempty"`
+	Found       bool     `json:"found"`
+}
+
+// LookupResult is what an Agent gets back from [Lookup]: the Server's
+// currently-announced direct addresses and, if it has one, its relay circuit
+// address — [DialWithFallback] tries the former first and the latter last.
+type LookupResult struct {
+	DirectAddrs []string
+	CircuitAddr string
+	Found       bool
+}
+
+// Announce tells relay the current set of addresses h can be reached at:
+// its direct listen multiaddrs (may be empty, e.g. behind NAT) and its
+// relay circuit address (may be empty, if h has not reserved one). relay
+// authenticates the caller for free via the libp2p Noise handshake — the
+// registry key is the stream's real remote Peer ID, not anything the
+// request body claims, so one peer cannot overwrite another's record.
+func Announce(ctx context.Context, h host.Host, relay peer.AddrInfo, directAddrs []string, circuitAddr string) error {
+	const op = "libp2ptransport.Announce"
+	if len(relay.Addrs) > 0 {
+		if err := h.Connect(ctx, relay); err != nil {
+			return errs.Wrap(err, errs.CodeUnavailable, "could not connect to relay").WithOp(op)
+		}
+	}
+	s, err := h.NewStream(ctx, relay.ID, rendezvousAnnounceProtocolID)
+	if err != nil {
+		return errs.Wrap(err, errs.CodeUnavailable, "could not open rendezvous announce stream").WithOp(op)
+	}
+	defer s.Close()
+
+	if err := json.NewEncoder(s).Encode(announceRequest{DirectAddrs: directAddrs, CircuitAddr: circuitAddr}); err != nil {
+		return errs.Wrap(err, errs.CodeInternal, "could not send announce request").WithOp(op)
+	}
+	if err := s.CloseWrite(); err != nil {
+		return errs.Wrap(err, errs.CodeInternal, "could not close announce write side").WithOp(op)
+	}
+	var resp announceResponse
+	if err := json.NewDecoder(s).Decode(&resp); err != nil {
+		return errs.Wrap(err, errs.CodeUnavailable, "could not read announce response").WithOp(op)
+	}
+	if !resp.OK {
+		return errs.New(errs.CodeInternal, "relay rejected announce").WithOp(op)
+	}
+	return nil
+}
+
+// Lookup asks relay for target's currently-announced addresses.
+func Lookup(ctx context.Context, h host.Host, relay peer.AddrInfo, target peer.ID) (LookupResult, error) {
+	const op = "libp2ptransport.Lookup"
+	if len(relay.Addrs) > 0 {
+		if err := h.Connect(ctx, relay); err != nil {
+			return LookupResult{}, errs.Wrap(err, errs.CodeUnavailable, "could not connect to relay").WithOp(op)
+		}
+	}
+	s, err := h.NewStream(ctx, relay.ID, rendezvousLookupProtocolID)
+	if err != nil {
+		return LookupResult{}, errs.Wrap(err, errs.CodeUnavailable, "could not open rendezvous lookup stream").WithOp(op)
+	}
+	defer s.Close()
+
+	if err := json.NewEncoder(s).Encode(lookupRequest{PeerID: target.String()}); err != nil {
+		return LookupResult{}, errs.Wrap(err, errs.CodeInternal, "could not send lookup request").WithOp(op)
+	}
+	if err := s.CloseWrite(); err != nil {
+		return LookupResult{}, errs.Wrap(err, errs.CodeInternal, "could not close lookup write side").WithOp(op)
+	}
+	var resp lookupResponse
+	if err := json.NewDecoder(s).Decode(&resp); err != nil {
+		return LookupResult{}, errs.Wrap(err, errs.CodeUnavailable, "could not read lookup response").WithOp(op)
+	}
+	return LookupResult{DirectAddrs: resp.DirectAddrs, CircuitAddr: resp.CircuitAddr, Found: resp.Found}, nil
+}
+
+// Registry is an Atlas Relay's in-memory directory of announced Server
+// addresses. It is deliberately not persisted: a relay restart loses it,
+// and every Server re-populates it on its next reservation-renewal tick
+// (well within minutes) — see ADR-0012, relay must hold none of Atlas's own
+// state.
+type Registry struct {
+	mu      sync.RWMutex
+	records map[peer.ID]registryRecord
+}
+
+type registryRecord struct {
+	DirectAddrs []string
+	CircuitAddr string
+	UpdatedAt   time.Time
+}
+
+// NewRegistry returns an empty rendezvous registry.
+func NewRegistry() *Registry {
+	return &Registry{records: make(map[peer.ID]registryRecord)}
+}
+
+func (r *Registry) set(id peer.ID, directAddrs []string, circuitAddr string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.records[id] = registryRecord{DirectAddrs: directAddrs, CircuitAddr: circuitAddr, UpdatedAt: time.Now()}
+}
+
+func (r *Registry) get(id peer.ID) (registryRecord, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	rec, ok := r.records[id]
+	return rec, ok
+}
+
+// RegisterRendezvousHandlers wires registry into h as the Announce/Lookup
+// stream handlers — called once, on the relay host, alongside its existing
+// circuit-relay-v2 service.
+func RegisterRendezvousHandlers(h host.Host, registry *Registry) {
+	h.SetStreamHandler(rendezvousAnnounceProtocolID, func(s network.Stream) {
+		defer s.Close()
+		var req announceRequest
+		if err := json.NewDecoder(s).Decode(&req); err != nil {
+			return
+		}
+		registry.set(s.Conn().RemotePeer(), req.DirectAddrs, req.CircuitAddr)
+		_ = json.NewEncoder(s).Encode(announceResponse{OK: true})
+	})
+	h.SetStreamHandler(rendezvousLookupProtocolID, func(s network.Stream) {
+		defer s.Close()
+		var req lookupRequest
+		if err := json.NewDecoder(s).Decode(&req); err != nil {
+			return
+		}
+		id, err := peer.Decode(req.PeerID)
+		if err != nil {
+			_ = json.NewEncoder(s).Encode(lookupResponse{Found: false})
+			return
+		}
+		rec, ok := registry.get(id)
+		if !ok {
+			_ = json.NewEncoder(s).Encode(lookupResponse{Found: false})
+			return
+		}
+		_ = json.NewEncoder(s).Encode(lookupResponse{DirectAddrs: rec.DirectAddrs, CircuitAddr: rec.CircuitAddr, Found: true})
+	})
+}
+
+// DialWithFallback tries each candidate in order — direct addresses first,
+// a relay circuit address last, per the caller's construction of the slice
+// — and returns the first successful connection. Each attempt is bounded by
+// [dialCandidateTimeout] so an unreachable direct address fails fast into
+// the relay fallback instead of hanging.
+func DialWithFallback(ctx context.Context, h host.Host, candidates []peer.AddrInfo) (net.Conn, error) {
+	const op = "libp2ptransport.DialWithFallback"
+	if len(candidates) == 0 {
+		return nil, errs.New(errs.CodeInvalidArgument, "no dial candidates").WithOp(op)
+	}
+
+	var attemptErrs []error
+	for _, c := range candidates {
+		dialCtx, cancel := context.WithTimeout(ctx, dialCandidateTimeout)
+		conn, err := Dial(dialCtx, h, c)
+		cancel()
+		if err == nil {
+			return conn, nil
+		}
+		attemptErrs = append(attemptErrs, fmt.Errorf("%s: %w", c.ID, err))
+	}
+	return nil, errs.Wrap(errors.Join(attemptErrs...), errs.CodeUnavailable, "all dial candidates failed").WithOp(op)
 }
 
 // ReserveRelay reserves a slot on relay for h — the relay's promise to

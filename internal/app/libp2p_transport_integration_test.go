@@ -162,6 +162,42 @@ func TestAgentPushesTelemetryOverAtlasRelay(t *testing.T) {
 	runAgentAndAssertObserved(t, instance, circuitAddr, "atlas-relay-poc-node-"+id.New())
 }
 
+// TestAgentPushesTelemetryOverRendezvousDiscovery proves the "Automatic
+// Direct-or-Relay Connectivity" milestone end to end: the Agent is given
+// only the Relay's address and the Server's Peer ID — never a manually
+// assembled circuit multiaddr — looks the Server's addresses up via the
+// Relay's rendezvous registry, and reaches it (here, through the relay,
+// since this control plane has no direct listen address the Agent could
+// dial) to complete enrollment and telemetry.
+func TestAgentPushesTelemetryOverRendezvousDiscovery(t *testing.T) {
+	dsn := os.Getenv(testDatabaseURLEnv)
+	if dsn == "" {
+		t.Skipf("%s is not set; run `make db-up` first", testDatabaseURLEnv)
+	}
+
+	relayHost, err := libp2ptransport.NewRelayHost(t.TempDir(), []string{"/ip4/127.0.0.1/tcp/0"})
+	if err != nil {
+		t.Fatalf("start relay: %v", err)
+	}
+	t.Cleanup(func() { _ = relayHost.Close() })
+	libp2ptransport.RegisterRendezvousHandlers(relayHost, libp2ptransport.NewRegistry())
+	relayAddrs := libp2ptransport.Addrs(relayHost)
+	if len(relayAddrs) == 0 {
+		t.Fatal("relay advertised no listen addresses")
+	}
+
+	instance, circuitAddr := bootLibP2PFleetServer(t, relayAddrs[0])
+	if !strings.Contains(circuitAddr, "/p2p-circuit/") {
+		t.Fatalf("expected a circuit address, got %q", circuitAddr)
+	}
+	serverTarget, err := libp2ptransport.ParseTarget(circuitAddr)
+	if err != nil {
+		t.Fatalf("parse server peer id out of circuit addr: %v", err)
+	}
+
+	runDiscoveryAgentAndAssertObserved(t, instance, relayAddrs[0], serverTarget.ID.String(), "atlas-rendezvous-poc-node-"+id.New())
+}
+
 // runAgentAndAssertObserved starts a real libp2p-transport agent dialing
 // peerAddr and waits for the control plane to observe nodeID.
 func runAgentAndAssertObserved(t *testing.T, instance *app.App, peerAddr, nodeID string) {
@@ -233,5 +269,78 @@ func runAgentAndAssertObserved(t *testing.T, instance *app.App, peerAddr, nodeID
 	}
 	if !found {
 		t.Fatal("node was never observed by the control plane over the libp2p transport")
+	}
+}
+
+// runDiscoveryAgentAndAssertObserved is [runAgentAndAssertObserved]'s
+// rendezvous-discovery counterpart: the agent is configured with only the
+// Relay's address and the Server's Peer ID (LibP2PServerAddr left empty),
+// so it must resolve the dial target itself instead of being handed one.
+func runDiscoveryAgentAndAssertObserved(t *testing.T, instance *app.App, relayAddr, serverPeerID, nodeID string) {
+	t.Helper()
+
+	tok, err := corefleet.NewToken()
+	if err != nil {
+		t.Fatalf("generate token: %v", err)
+	}
+	spec := corefleet.TokenSpec{
+		Label: "rendezvous-poc", Environment: "test", AllowedCIDR: "0.0.0.0/0",
+		MaxUses: 1, TTL: time.Hour,
+	}
+	if err := spec.Validate(); err != nil {
+		t.Fatalf("token spec: %v", err)
+	}
+	repo := storagefleet.NewRepository(instance.Pool.DB())
+	if err := repo.CreateToken(context.Background(), tok.Hash, spec, time.Now()); err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+
+	agentCfg := agent.Config{
+		ControlPlaneURL:    "https://localhost", // unused for dialing; see runAgentAndAssertObserved
+		Token:              tok.Plaintext,
+		DataDir:            t.TempDir(),
+		NodeID:             nodeID,
+		Environment:        "test",
+		Transport:          "libp2p",
+		LibP2PRelayAddr:    relayAddr,
+		LibP2PServerPeerID: serverPeerID,
+		CollectionInterval: 2 * time.Second,
+		CollectionTimeout:  2 * time.Second,
+		InventoryInterval:  2 * time.Second,
+	}
+
+	a, err := agent.New(context.Background(), agentCfg, log.Discard())
+	if err != nil {
+		t.Fatalf("agent.New() error = %v: rendezvous discovery + enrollment over libp2p failed", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	agentDone := make(chan error, 1)
+	go func() { agentDone <- a.Run(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-agentDone:
+		case <-time.After(15 * time.Second):
+			t.Error("agent did not shut down within 15s")
+		}
+	})
+
+	base := "http://" + waitForBoundAddress(t, instance)
+	deadline := time.Now().Add(30 * time.Second)
+	var found bool
+	for time.Now().Before(deadline) {
+		resp, err := http.Get(base + "/api/v1/nodes/" + agentCfg.NodeID)
+		if err == nil {
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				found = true
+				break
+			}
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	if !found {
+		t.Fatal("node was never observed by the control plane over rendezvous-discovered libp2p transport")
 	}
 }

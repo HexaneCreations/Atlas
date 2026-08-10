@@ -32,6 +32,7 @@ import (
 	"github.com/hexane/atlas/internal/plugin/service"
 	"github.com/hexane/atlas/internal/plugin/system"
 	p2phost "github.com/libp2p/go-libp2p/core/host"
+	"github.com/libp2p/go-libp2p/core/peer"
 )
 
 // Agent collects the local host and pushes to a control plane.
@@ -78,26 +79,51 @@ func New(ctx context.Context, cfg Config, logger *slog.Logger) (*Agent, error) {
 	var dial dialContextFunc
 	var p2pHost p2phost.Host
 	if cfg.Transport == "libp2p" {
-		if cfg.LibP2PServerAddr == "" {
-			return nil, fmt.Errorf("ATLAS_AGENT_LIBP2P_SERVER_ADDR is required when ATLAS_AGENT_TRANSPORT=libp2p")
-		}
-		target, err := libp2ptransport.ParseTarget(cfg.LibP2PServerAddr)
-		if err != nil {
-			return nil, fmt.Errorf("parse libp2p server address: %w", err)
-		}
 		h, err := libp2ptransport.NewHost(libp2ptransport.HostOptions{DataDir: cfg.DataDir})
 		if err != nil {
 			return nil, fmt.Errorf("start libp2p host: %w", err)
 		}
 		p2pHost = h
-		dial = func(ctx context.Context, _, _ string) (net.Conn, error) {
-			return libp2ptransport.Dial(ctx, h, target)
+
+		switch {
+		case cfg.LibP2PRelayAddr != "" && cfg.LibP2PServerPeerID != "":
+			// Rendezvous discovery (docs/adr/0012-connect-by-identity.md):
+			// the Agent knows only the Relay's address and the Server's
+			// Peer ID, and looks the Server's current direct/circuit
+			// addresses up on every dial — no manually assembled circuit
+			// multiaddr required.
+			relayInfo, err := libp2ptransport.ParseTarget(cfg.LibP2PRelayAddr)
+			if err != nil {
+				return nil, fmt.Errorf("parse libp2p relay address: %w", err)
+			}
+			serverID, err := peer.Decode(cfg.LibP2PServerPeerID)
+			if err != nil {
+				return nil, fmt.Errorf("parse libp2p server peer id: %w", err)
+			}
+			dial = newDiscoveryDial(h, relayInfo, serverID, cfg.DataDir, logger)
+			logger.InfoContext(ctx, "dialing control plane via rendezvous discovery",
+				slog.String("peer_id", serverID.String()), slog.String("relay", relayInfo.ID.String()))
+		case cfg.LibP2PServerAddr != "":
+			// Deprecated static-target path: kept for backward compatibility
+			// with configs predating rendezvous discovery.
+			target, err := libp2ptransport.ParseTarget(cfg.LibP2PServerAddr)
+			if err != nil {
+				return nil, fmt.Errorf("parse libp2p server address: %w", err)
+			}
+			dial = func(ctx context.Context, _, _ string) (net.Conn, error) {
+				return libp2ptransport.Dial(ctx, h, target)
+			}
+			logger.WarnContext(ctx, "dialing control plane by static multiaddr; "+
+				"set ATLAS_AGENT_LIBP2P_RELAY_ADDR and ATLAS_AGENT_LIBP2P_SERVER_PEER_ID instead",
+				slog.String("peer_id", target.ID.String()), slog.String("transport", "libp2p"))
+		default:
+			return nil, fmt.Errorf("ATLAS_AGENT_TRANSPORT=libp2p requires either " +
+				"(ATLAS_AGENT_LIBP2P_RELAY_ADDR and ATLAS_AGENT_LIBP2P_SERVER_PEER_ID) " +
+				"or the deprecated ATLAS_AGENT_LIBP2P_SERVER_ADDR")
 		}
-		logger.InfoContext(ctx, "dialing control plane by peer id",
-			slog.String("peer_id", target.ID.String()), slog.String("transport", "libp2p"))
 	}
 
-	caCert, holder, err := bootstrap(ctx, cfg, identity.NodeID, logger, dial)
+	caCert, holder, err := bootstrapWithRetry(ctx, cfg, identity.NodeID, logger, dial)
 	if err != nil {
 		return nil, fmt.Errorf("bootstrap credentials: %w", err)
 	}

@@ -187,8 +187,10 @@ func (f *fleetPipeline) LibP2PPeerAddrs() []string {
 	return libp2ptransport.Addrs(f.libp2pHost)
 }
 
-// reserveRelay reserves a slot on relay for p2pHost and records the
-// resulting circuit address.
+// reserveRelay reserves a slot on relay for p2pHost, records the resulting
+// circuit address, and announces both it and p2pHost's direct addresses to
+// relay's rendezvous registry — the discovery path an Agent uses instead of
+// being handed a manually-assembled circuit multiaddr (ADR-0012).
 func (f *fleetPipeline) reserveRelay(ctx context.Context, p2pHost host.Host, relayInfo peer.AddrInfo) error {
 	circuit, expiration, err := libp2ptransport.ReserveRelay(ctx, p2pHost, relayInfo)
 	if err != nil {
@@ -199,6 +201,13 @@ func (f *fleetPipeline) reserveRelay(ctx context.Context, p2pHost host.Host, rel
 	f.mu.Unlock()
 	f.logger.InfoContext(ctx, "reserved a relay slot",
 		slog.String("circuit_addr", circuit), slog.Time("expires", expiration))
+
+	if err := libp2ptransport.Announce(ctx, p2pHost, relayInfo, libp2ptransport.Addrs(p2pHost), circuit); err != nil {
+		// Non-fatal: the circuit reservation above still works for any Agent
+		// dialing it directly; only rendezvous-based discovery is degraded
+		// until the next renewal tick retries the announce.
+		f.logger.ErrorContext(ctx, "rendezvous announce failed", slog.String("error", err.Error()))
+	}
 	return nil
 }
 

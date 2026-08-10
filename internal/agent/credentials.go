@@ -10,6 +10,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"os"
@@ -251,6 +252,55 @@ func bootstrap(ctx context.Context, cfg Config, nodeID string, logger *slog.Logg
 	logger.InfoContext(ctx, "enrolled", slog.String("node_id", nodeID), slog.Time("not_after", cert.NotAfter))
 
 	return caCert, holder, nil
+}
+
+// bootstrapBackoffMin/Max/MaxElapsed bound [bootstrapWithRetry]: a transient
+// relay outage, network blip, or Server unavailability during startup must
+// not permanently exit the process, but a genuinely broken configuration
+// (bad token, unreachable control plane) must still fail loudly rather than
+// retry forever. Vars, not consts, so tests can shrink them instead of
+// waiting out real minutes of backoff.
+var (
+	bootstrapBackoffMin = 2 * time.Second
+	bootstrapBackoffMax = 30 * time.Second
+	bootstrapMaxElapsed = 5 * time.Minute
+)
+
+// bootstrapWithRetry wraps [bootstrap] in a bounded exponential backoff:
+// each failure is retried with jittered, doubling delay up to
+// bootstrapBackoffMax, until either it succeeds, ctx is cancelled, or
+// bootstrapMaxElapsed has passed since the first attempt — at which point
+// the last error is returned so the caller can still exit fatally on a
+// truly stuck configuration.
+func bootstrapWithRetry(ctx context.Context, cfg Config, nodeID string, logger *slog.Logger, dial dialContextFunc) (*x509.Certificate, *credentialHolder, error) {
+	deadline := time.Now().Add(bootstrapMaxElapsed)
+	backoff := bootstrapBackoffMin
+
+	for attempt := 1; ; attempt++ {
+		caCert, holder, err := bootstrap(ctx, cfg, nodeID, logger, dial)
+		if err == nil {
+			return caCert, holder, nil
+		}
+
+		if time.Now().After(deadline) {
+			return nil, nil, fmt.Errorf("bootstrap did not succeed within %s (%d attempts): %w", bootstrapMaxElapsed, attempt, err)
+		}
+
+		wait := jitter(backoff)
+		logger.WarnContext(ctx, "bootstrap attempt failed, retrying",
+			slog.Int("attempt", attempt), slog.Duration("backoff", wait), slog.String("error", err.Error()))
+
+		select {
+		case <-ctx.Done():
+			return nil, nil, fmt.Errorf("bootstrap cancelled: %w", ctx.Err())
+		case <-time.After(wait):
+		}
+		backoff = min(backoff*2, bootstrapBackoffMax)
+	}
+}
+
+func jitter(d time.Duration) time.Duration {
+	return time.Duration(rand.Int64N(int64(d) + 1))
 }
 
 // renewalLoop renews the agent's certificate at [pki.RenewAt] of its

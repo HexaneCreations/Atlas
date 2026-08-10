@@ -3,12 +3,14 @@ package agent
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -84,6 +86,57 @@ func testControlPlane(t *testing.T) (url string, ca *pki.CA) {
 	t.Cleanup(srv.Close)
 
 	return srv.URL, ca
+}
+
+// testFlakyControlPlane behaves exactly like testControlPlane, except the
+// first failFirstN requests of any kind return 503 before the real handler
+// ever runs — simulating a transient relay outage or Server unavailability
+// during Agent startup.
+func testFlakyControlPlane(t *testing.T, failFirstN int32) string {
+	t.Helper()
+
+	ca, err := pki.New("test-ca")
+	if err != nil {
+		t.Fatalf("pki.New: %v", err)
+	}
+	router := transport.NewRouter()
+	handler := apiagent.NewHandler(apiagent.Deps{
+		CA:       ca,
+		Enroller: corefleet.NewEnroller(ca, fakeTokens{}, newFakeCredentials(), fakeDenylist{}),
+		Router:   router,
+	})
+	mux := http.NewServeMux()
+	handler.Mount(mux)
+
+	var calls atomic.Int32
+	flaky := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) <= failFirstN {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		mux.ServeHTTP(w, r)
+	})
+
+	srv := httptest.NewUnstartedServer(flaky)
+	serverLeaf, err := pki.NewServerLeaf(ca, []string{"127.0.0.1"})
+	if err != nil {
+		t.Fatalf("NewServerLeaf: %v", err)
+	}
+	srv.TLS = pki.ServerTLSConfig(serverLeaf, ca)
+	srv.TLS.ClientAuth = tls.VerifyClientCertIfGiven
+	srv.StartTLS()
+	t.Cleanup(srv.Close)
+
+	return srv.URL
+}
+
+// shrinkBootstrapBackoff lets a test exercise real retry/backoff logic
+// without waiting out real minutes.
+func shrinkBootstrapBackoff(t *testing.T) {
+	t.Helper()
+	restoreMin, restoreMax, restoreElapsed := bootstrapBackoffMin, bootstrapBackoffMax, bootstrapMaxElapsed
+	bootstrapBackoffMin, bootstrapBackoffMax, bootstrapMaxElapsed = 5*time.Millisecond, 20*time.Millisecond, 2*time.Second
+	t.Cleanup(func() { bootstrapBackoffMin, bootstrapBackoffMax, bootstrapMaxElapsed = restoreMin, restoreMax, restoreElapsed })
 }
 
 func testConfig(t *testing.T, controlPlaneURL string) Config {
@@ -195,5 +248,81 @@ func TestBootstrapFailsClearlyWhenPinIsMissing(t *testing.T) {
 	_, _, err := bootstrap(context.Background(), cfg, "node-1", discardLogger(), nil)
 	if err == nil {
 		t.Fatal("bootstrap succeeded with a certificate but no way to verify the server")
+	}
+}
+
+// TestBootstrapWithRetrySucceedsAfterTransientFailure is the milestone's
+// core retry requirement: Agent startup must not permanently exit because
+// of a temporary Server/relay/network failure — it must retry with backoff
+// and succeed once the control plane becomes reachable.
+func TestBootstrapWithRetrySucceedsAfterTransientFailure(t *testing.T) {
+	shrinkBootstrapBackoff(t)
+
+	url := testFlakyControlPlane(t, 2) // first 2 requests fail, then recover
+	cfg := testConfig(t, url)
+
+	caCert, holder, err := bootstrapWithRetry(context.Background(), cfg, "node-1", discardLogger(), nil)
+	if err != nil {
+		t.Fatalf("bootstrapWithRetry: %v", err)
+	}
+	if caCert == nil || holder.current() == nil {
+		t.Fatal("bootstrapWithRetry did not return a usable CA and credential")
+	}
+}
+
+// TestBootstrapWithRetryRespectsContextCancellation proves retrying does
+// not turn a shutdown request into a hang: cancelling ctx mid-backoff must
+// return promptly rather than waiting out the full retry budget.
+func TestBootstrapWithRetryRespectsContextCancellation(t *testing.T) {
+	restoreMin, restoreMax, restoreElapsed := bootstrapBackoffMin, bootstrapBackoffMax, bootstrapMaxElapsed
+	bootstrapBackoffMin, bootstrapBackoffMax, bootstrapMaxElapsed = time.Second, 2*time.Second, time.Minute
+	t.Cleanup(func() { bootstrapBackoffMin, bootstrapBackoffMax, bootstrapMaxElapsed = restoreMin, restoreMax, restoreElapsed })
+
+	// Always-failing control plane: every request 503s, so bootstrap never
+	// succeeds and bootstrapWithRetry must be sitting in its backoff wait
+	// when ctx is cancelled.
+	url := testFlakyControlPlane(t, 1<<30)
+	cfg := testConfig(t, url)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	_, _, err := bootstrapWithRetry(ctx, cfg, "node-1", discardLogger(), nil)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected bootstrapWithRetry to fail once cancelled")
+	}
+	if !errors.Is(ctx.Err(), context.Canceled) {
+		t.Fatalf("ctx.Err() = %v, want context.Canceled", ctx.Err())
+	}
+	if elapsed > 5*time.Second {
+		t.Fatalf("bootstrapWithRetry took %s after cancellation, want a prompt return", elapsed)
+	}
+}
+
+// TestBootstrapWithRetryBoundedByMaxElapsed proves a genuinely stuck
+// control plane still fails loudly instead of retrying forever.
+func TestBootstrapWithRetryBoundedByMaxElapsed(t *testing.T) {
+	restoreMin, restoreMax, restoreElapsed := bootstrapBackoffMin, bootstrapBackoffMax, bootstrapMaxElapsed
+	bootstrapBackoffMin, bootstrapBackoffMax, bootstrapMaxElapsed = 5*time.Millisecond, 10*time.Millisecond, 100*time.Millisecond
+	t.Cleanup(func() { bootstrapBackoffMin, bootstrapBackoffMax, bootstrapMaxElapsed = restoreMin, restoreMax, restoreElapsed })
+
+	url := testFlakyControlPlane(t, 1<<30) // never recovers
+	cfg := testConfig(t, url)
+
+	start := time.Now()
+	_, _, err := bootstrapWithRetry(context.Background(), cfg, "node-1", discardLogger(), nil)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected bootstrapWithRetry to eventually give up and return an error")
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("bootstrapWithRetry ran for %s, want it bounded near bootstrapMaxElapsed (100ms)", elapsed)
 	}
 }
