@@ -40,6 +40,7 @@ type Deps struct {
 	Collection        v1.CollectionSource
 	Activity          *activity.Recorder
 	Inventory         coreinventory.Store
+	RemoteLogs        v1.RemoteLogSource
 	Nodes             v1.NodeExistence
 	EventStore        v1.EventStore
 	Alerts            v1.AlertStore
@@ -71,6 +72,7 @@ func New(deps Deps) http.Handler {
 		Collection:        deps.Collection,
 		Activity:          deps.Activity,
 		Inventory:         deps.Inventory,
+		RemoteLogs:        deps.RemoteLogs,
 		Nodes:             deps.Nodes,
 		EventStore:        deps.EventStore,
 		Alerts:            deps.Alerts,

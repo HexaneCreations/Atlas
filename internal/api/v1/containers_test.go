@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -451,4 +452,167 @@ func (f fakeCollection) Ports(context.Context, inventory.Scope) ([]ports.Listene
 }
 func (f fakeCollection) Mounts(context.Context, inventory.Scope) ([]system.MountInfo, error) {
 	return nil, nil
+}
+
+// --- Remote container logs (RemoteLogSource) --------------------------
+//
+// fakeCollection.Identity() always returns an empty NodeID, so any request
+// carrying a non-empty ?node= is remote per Scope.IsLocal — no separate
+// "remote fake" is needed, only a RemoteLogSource.
+
+type fakeRemoteLogSource struct {
+	mu     sync.Mutex
+	lines  chan docker.LogLine
+	errCh  chan error
+	ctx    context.Context
+	nodeID string
+}
+
+func (f *fakeRemoteLogSource) ContainerLogs(ctx context.Context, nodeID, containerID string, opts docker.LogOptions) (<-chan docker.LogLine, <-chan error) {
+	f.mu.Lock()
+	f.ctx, f.nodeID = ctx, nodeID
+	f.mu.Unlock()
+	return f.lines, f.errCh
+}
+
+func (f *fakeRemoteLogSource) calledCtx() context.Context {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.ctx
+}
+
+func newRemoteFollowTestServer(t *testing.T, remote v1.RemoteLogSource) *httptest.Server {
+	t.Helper()
+	cfg := config.Default()
+	reg := health.NewRegistry(nil)
+	bus := eventbus.New(eventbus.Options{BufferSize: 8})
+	t.Cleanup(func() { _ = bus.Close() })
+	handler := api.New(api.Deps{
+		Config:     &cfg,
+		Health:     reg,
+		Pool:       postgres.NewPool(cfg.Database, nil),
+		Bus:        bus,
+		Collection: fakeCollection{},
+		RemoteLogs: remote,
+	})
+	srv := httptest.NewServer(handler)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func waitForCall(t *testing.T, remote *fakeRemoteLogSource) context.Context {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if ctx := remote.calledCtx(); ctx != nil {
+			return ctx
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("RemoteLogSource.ContainerLogs was never called")
+	return nil
+}
+
+// #13: closing the browser's WebSocket must cancel the context handed to
+// RemoteLogSource — the first hop of Browser -> Server -> Agent -> Docker
+// cancellation.
+func TestContainerLogsFollowRemoteCancellationReachesRemoteLogSource(t *testing.T) {
+	t.Parallel()
+
+	remote := &fakeRemoteLogSource{lines: make(chan docker.LogLine), errCh: make(chan error, 1)}
+	srv := newRemoteFollowTestServer(t, remote)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	conn, resp, err := websocket.Dial(ctx, wsURL(srv, "/api/v1/containers/c1/logs/follow?node=remote-node"), nil)
+	if err != nil {
+		t.Fatalf("Dial: %v (status %v)", err, statusOf(resp))
+	}
+
+	remoteCtx := waitForCall(t, remote)
+	if remote.nodeID != "remote-node" {
+		t.Errorf("nodeID passed to RemoteLogSource = %q, want %q", remote.nodeID, "remote-node")
+	}
+	if remoteCtx.Err() != nil {
+		t.Fatal("context was already cancelled before the browser closed anything")
+	}
+
+	conn.Close(websocket.StatusNormalClosure, "done")
+
+	select {
+	case <-remoteCtx.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("closing the browser WebSocket never cancelled the RemoteLogSource context")
+	}
+}
+
+// #16: an abrupt disconnect (no clean close frame) must cancel the same way
+// a graceful close does.
+func TestContainerLogsFollowRemoteAbruptDisconnectCancels(t *testing.T) {
+	t.Parallel()
+
+	remote := &fakeRemoteLogSource{lines: make(chan docker.LogLine), errCh: make(chan error, 1)}
+	srv := newRemoteFollowTestServer(t, remote)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	conn, resp, err := websocket.Dial(ctx, wsURL(srv, "/api/v1/containers/c1/logs/follow?node=remote-node"), nil)
+	if err != nil {
+		t.Fatalf("Dial: %v (status %v)", err, statusOf(resp))
+	}
+
+	remoteCtx := waitForCall(t, remote)
+	conn.CloseNow() // abrupt: no close handshake
+
+	select {
+	case <-remoteCtx.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("an abrupt disconnect never cancelled the RemoteLogSource context")
+	}
+}
+
+// Remote lines delivered by RemoteLogSource must reach the browser
+// unchanged — proves the wiring, not just the cancellation path.
+func TestContainerLogsFollowRemoteDeliversLines(t *testing.T) {
+	t.Parallel()
+
+	remote := &fakeRemoteLogSource{lines: make(chan docker.LogLine, 1), errCh: make(chan error, 1)}
+	remote.lines <- docker.LogLine{Stream: docker.StreamStdout, Time: time.Now(), Message: "remote line"}
+	srv := newRemoteFollowTestServer(t, remote)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	conn, resp, err := websocket.Dial(ctx, wsURL(srv, "/api/v1/containers/c1/logs/follow?node=remote-node"), nil)
+	if err != nil {
+		t.Fatalf("Dial: %v (status %v)", err, statusOf(resp))
+	}
+	defer conn.CloseNow()
+
+	var line v1LogLine
+	if err := wsjson.Read(ctx, conn, &line); err != nil {
+		t.Fatalf("reading the remote line: %v", err)
+	}
+	if line.Message != "remote line" {
+		t.Errorf("message = %q, want %q", line.Message, "remote line")
+	}
+}
+
+// No RemoteLogSource configured (nil, the same "not wired in" convention
+// every other optional Deps field uses) — a remote node's logs must report
+// unavailable, not panic or hang. This is also the HTTPS-only/legacy-agent
+// case: no libp2p session means no RemoteLogs entry ever reaches this node.
+func TestContainerLogsFollowRemoteUnavailableWithNoRemoteLogSource(t *testing.T) {
+	t.Parallel()
+
+	srv := newRemoteFollowTestServer(t, nil)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	_, resp, err := websocket.Dial(ctx, wsURL(srv, "/api/v1/containers/c1/logs/follow?node=remote-node"), nil)
+	if err == nil {
+		t.Fatal("Dial succeeded with no RemoteLogSource configured")
+	}
+	if resp == nil || resp.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("status = %v, want %d", statusOf(resp), http.StatusServiceUnavailable)
+	}
 }

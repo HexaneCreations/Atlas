@@ -1,0 +1,178 @@
+# Atlas — production Compose stack.
+#
+# Companion to docker-compose.yml (development-only Postgres — untouched by
+# this file). This is for `docker compose -f docker-compose.prod.yml up -d`
+# on the production host, and for CI/CD to `pull` and `up` a released image —
+# see docs/operations/deployment.md, which this follows directly.
+#
+# PostgreSQL is external/managed in this deployment — deployment.md's own
+# examples all point Atlas at an existing `postgres.internal`, never one this
+# Compose file provisions, so there is deliberately no `postgres` service
+# here. Point ATLAS_DATABASE_HOST (in .env.prod) at your real instance.
+#
+# This IS the Fleet control plane: Fleet/libp2p are enabled via .env.prod,
+# reaching Atlas Relay entirely by dialing out (see the atlas-server service
+# below for why no Fleet port is published here).
+#
+# Variable substitution and the atlas-server container environment both come
+# from one file, passed explicitly so this never picks up the development
+# .env that docker-compose.yml uses:
+#
+#   docker compose -f docker-compose.prod.yml --env-file .env.prod config
+#
+# See .env.prod.example for what that file needs.
+
+name: atlas-prod
+
+services:
+  # A fresh named volume is created root:root 0755 by Docker — verified
+  # directly: atlas-server (uid 10001, all capabilities dropped, per the
+  # hardening below) cannot write into one at all, which would silently break
+  # Fleet's very first CA write. Baking ownership into the image doesn't work
+  # either — also verified: Docker's volume-seed-from-image only copies file
+  # contents, not an empty directory's own ownership. One root, capable
+  # container fixes ownership once and exits; atlas-server never runs as
+  # root or gains a capability it doesn't already have.
+  atlas-fleet-volume-init:
+    image: alpine:3.21
+    container_name: atlas-fleet-volume-init
+    command: ["chown", "10001:10001", "/fleet-data"]
+    volumes:
+      - atlas-fleet-data:/fleet-data
+    restart: "no"
+    # A chown needs no network at all.
+    network_mode: none
+
+  atlas-server:
+    # ATLAS_SERVER_IMAGE lets CI/CD point at a registry tag; unset, this
+    # builds from the same production Dockerfile the image target already
+    # verifies in CI (see .github/workflows/ci.yml) — `docker compose build`
+    # gives a working local production image with no registry involved.
+    image: ${ATLAS_SERVER_IMAGE:-atlas-server:local}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        VERSION: ${ATLAS_VERSION:-dev}
+    container_name: atlas-server
+    restart: unless-stopped
+    depends_on:
+      atlas-fleet-volume-init:
+        condition: service_completed_successfully
+    # ATLAS_ENV_FILE lets `config`/`build` be validated against
+    # .env.prod.example alone, with no real .env.prod ever created — see the
+    # report's "Validation results":
+    #   ATLAS_ENV_FILE=.env.prod.example docker compose --env-file .env.prod.example -f docker-compose.prod.yml config
+    # Real usage is unaffected: --env-file .env.prod leaves this at its
+    # default, which is the same file.
+    env_file:
+      - ${ATLAS_ENV_FILE:-.env.prod}
+    secrets:
+      - atlas_db_password
+    environment:
+      # The one value that must point at *this* stack rather than being a
+      # free-form setting: the file path Compose actually mounts the secret
+      # at. Everything else Atlas needs comes from .env.prod via env_file.
+      ATLAS_DATABASE_PASSWORD_FILE: /run/secrets/atlas_db_password
+    networks:
+      - atlas-internal
+    # Not published: atlas-ui is the public entry point and reaches this
+    # service by its Compose DNS name (see web/nginx.conf's upstream). See
+    # "Ports"/"Networks" in the report for why this differs from
+    # docs/operations/deployment.md's standalone `docker run` example, which
+    # has no reverse proxy in front of it to delegate to.
+    #
+    # No Fleet/libp2p port is published either, by the same "only what must
+    # be reachable" logic — see internal/app/fleet.go's Start(): when
+    # ATLAS_FLEET_LIBP2P_RELAY_ADDR is set, the control plane *dials out* to
+    # Atlas Relay and reserves a circuit; its own LibP2PListenAddrs never
+    # needs to be reachable from outside ("an operator behind NAT needs no
+    # forwarded port for this listener to exist", per that file's own
+    # comment). The verified working Mac→Relay→Agent path already proved
+    # this — no port was forwarded for it either. If a future agent needs to
+    # dial this control plane directly instead of through the relay, that is
+    # a deliberate networking decision to make then, not a default here.
+    expose:
+      - "8080"
+    volumes:
+      # Fleet's CA and the server's own leaf certificate live under
+      # ATLAS_FLEET_DATA_DIR (see internal/platform/pki.LoadOrCreateCA,
+      # called from internal/app/fleet.go's Start()) — this is the trust
+      # root every enrolled agent already validated against. Losing it
+      # forces every agent to re-enroll; a named volume, not an anonymous
+      # one, is what survives `down`/`up` and any container recreation. The
+      # mount path is driven by the same variable Atlas itself reads, so
+      # they can never drift apart.
+      - atlas-fleet-data:${ATLAS_FLEET_DATA_DIR:-/var/lib/atlas/fleet}
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    # No Docker healthcheck: the runtime image is scratch (see Dockerfile) —
+    # no shell, no curl, nothing a CMD-SHELL probe could exec. Health is the
+    # HTTP probes at /healthz and /readyz, exactly as
+    # docs/operations/deployment.md's Kubernetes example uses them; here,
+    # the front door for those checks is atlas-ui's reverse proxy or an
+    # external monitor, not Docker itself.
+
+  atlas-ui:
+    image: ${ATLAS_UI_IMAGE:-atlas-ui:local}
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    container_name: atlas-ui
+    restart: unless-stopped
+    networks:
+      - atlas-internal
+    ports:
+      # The one public port in this stack. docs/operations/deployment.md is
+      # explicit that an authenticating reverse proxy is mandatory in front
+      # of Atlas until authentication ships — see the report: this container
+      # serves plain HTTP and expects that proxy (TLS + auth) in front of it,
+      # the same role its nginx example plays in front of atlas-server today.
+      - "${ATLAS_UI_PORT:-80}:80"
+    read_only: true
+    tmpfs:
+      - /var/cache/nginx
+      - /var/run
+    cap_drop:
+      - ALL
+    # nginx's own startup (root, before workers drop to the nginx user) needs
+    # these three to own and use the tmpfs mounts above — verified: with a
+    # bare `cap_drop: ALL` it fails startup with
+    # `chown("/var/cache/nginx/client_temp", 101) failed (1: Operation not
+    # permitted)`, even running as root, because ALL includes CAP_CHOWN.
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      # nginx:alpine has a shell and wget, unlike the atlas-server image —
+      # this one can actually run.
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:80/"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    depends_on:
+      - atlas-server
+
+networks:
+  atlas-internal:
+    driver: bridge
+
+volumes:
+  atlas-fleet-data:
+    name: atlas-fleet-data
+
+secrets:
+  # File-based, matching docs/operations/deployment.md's
+  # ATLAS_DATABASE_PASSWORD_FILE example exactly — see .env.prod.example and
+  # the report for how to create this file; it must never be committed.
+  atlas_db_password:
+    file: ${ATLAS_DB_PASSWORD_FILE:-./secrets/atlas_db_password.txt}

@@ -205,6 +205,24 @@ func New(ctx context.Context, cfg Config, logger *slog.Logger) (*Agent, error) {
 		inventorySources(active, processPlugin, servicePlugin, cronPlugin, portsPlugin, systemPlugin, dockerPlugin))
 	forwarder := newEventForwarder(bus, tr, origin, logger)
 
+	// AgentOps (remote container log streaming): registers a handler for one
+	// more libp2p protocol on the same dial-only host — the control plane
+	// opens the stream over the connection this Agent already established by
+	// dialing out, never the reverse; see
+	// internal/core/transport/libp2ptransport/agentops.go and ADR-0012's "the
+	// agent has no inbound surface", which this preserves exactly: no new
+	// listen address, no new port. Only registered when libp2p is the
+	// active transport — an HTTPS-only agent has no such connection for the
+	// control plane to reuse, so remote logs are simply unavailable for it in
+	// this phase, by design (see the docs on RemoteLogSource in
+	// internal/api/v1/containers.go).
+	if p2pHost != nil {
+		limiter := libp2ptransport.NewSessionLimiter(libp2ptransport.DefaultMaxConcurrentSessions)
+		libp2ptransport.RegisterAgentOpsHandler(p2pHost, caCert,
+			func(*tls.ClientHelloInfo) (*tls.Certificate, error) { return holder.GetClientCertificate(nil) },
+			containerLogsFunc(dockerPlugin), limiter)
+	}
+
 	return &Agent{
 		cfg: cfg, logger: logger, identity: identity,
 		caCert: caCert, holder: holder, spool: sp, transport: tr, p2pHost: p2pHost, bus: bus,

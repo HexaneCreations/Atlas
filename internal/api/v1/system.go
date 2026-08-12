@@ -73,6 +73,13 @@ type Deps struct {
 	// before this milestone: local scopes work, remote scopes report
 	// unavailable rather than trying to reach a store that does not exist.
 	Inventory inventory.Store
+	// RemoteLogs proxies a live container-log stream to a specific
+	// libp2p-connected Agent — see RemoteLogSource in containers.go. Nil is
+	// a valid, ordinary state, the same convention as Inventory: it means
+	// this Atlas instance has no fleet listener capable of it, and
+	// ContainerLogs/ContainerLogsFollow report unavailable for any remote
+	// node rather than reaching for a dependency that does not exist.
+	RemoteLogs RemoteLogSource
 	// Nodes answers whether Atlas has ever recorded a given node id. Used
 	// only by the remote inventory path, to tell "no such node" (404) apart
 	// from "this node exists but has not reported inventory" (503) — two

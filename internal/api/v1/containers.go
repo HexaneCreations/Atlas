@@ -135,6 +135,23 @@ type ContainerPortResponse struct {
 	HostPort      string `json:"host_port,omitempty"`
 }
 
+// RemoteLogSource proxies a live container-log stream to a specific
+// libp2p-connected Agent, for a node [Handler.dockerClient] refuses as
+// non-local. Logs have no snapshot form the way inventory does — an
+// operator asking to watch a container's output wants it live or not at
+// all — so unlike [resolveRemoteInventory], there is no stored fallback:
+// nil, or a node with no active libp2p session, both mean remote logs are
+// simply unavailable, not degraded.
+//
+// Implemented by internal/app's fleetPipeline over the AgentOps libp2p
+// protocol; see internal/core/transport/libp2ptransport/agentops.go.
+type RemoteLogSource interface {
+	// ContainerLogs returns the same two-channel shape docker.Client.Logs
+	// does, so containerLogSource and followLogs below handle a local and a
+	// remote session identically.
+	ContainerLogs(ctx context.Context, nodeID, containerID string, opts docker.LogOptions) (<-chan docker.LogLine, <-chan error)
+}
+
 // ListContainersResponse is the container collection.
 type ListContainersResponse struct {
 	// NodeID names the host this inventory describes.
@@ -329,11 +346,7 @@ type ContainerLogsResponse struct {
 func (h *Handler) ContainerLogs(w http.ResponseWriter, r *http.Request) error {
 	const op = "v1.Handler.ContainerLogs"
 
-	client, err := h.dockerClient(h.scopeFrom(r))
-	if err != nil {
-		return err
-	}
-
+	scope := h.scopeFrom(r)
 	id := r.PathValue("containerID")
 	if id == "" {
 		return errs.New(errs.CodeInvalidArgument, "a container id is required").
@@ -362,9 +375,12 @@ func (h *Handler) ContainerLogs(w http.ResponseWriter, r *http.Request) error {
 		since = t
 	}
 
-	lines, errCh := client.Logs(r.Context(), id, docker.LogOptions{
+	lines, errCh, err := h.containerLogSource(r.Context(), scope, id, docker.LogOptions{
 		Follow: false, Tail: tail, Since: since,
 	})
+	if err != nil {
+		return err
+	}
 
 	out := make([]LogLineResponse, 0, tail)
 	for line := range lines {
@@ -428,11 +444,7 @@ func (h *Handler) ContainerLogsFollow(w http.ResponseWriter, r *http.Request) er
 			WithOp(op)
 	}
 
-	client, err := h.dockerClient(h.scopeFrom(r))
-	if err != nil {
-		return err
-	}
-
+	scope := h.scopeFrom(r)
 	id := r.PathValue("containerID")
 	if id == "" {
 		return errs.New(errs.CodeInvalidArgument, "a container id is required").
@@ -449,14 +461,32 @@ func (h *Handler) ContainerLogsFollow(w http.ResponseWriter, r *http.Request) er
 		tail = min(n, maxLogTail)
 	}
 
-	containers, err := client.Containers(r.Context())
-	if err != nil {
-		return err
-	}
-	target, ok := findContainer(containers, id)
-	if !ok {
-		return errs.New(errs.CodeNotFound, "container not found").
-			WithOp(op).WithDetail("container", id)
+	// Pre-upgrade container resolution only happens for the local case: it
+	// needs a synchronous Containers() call this Handler can make directly,
+	// and it is what lets an operator pass a short id or name. A remote
+	// session has no equivalent cheap round trip before opening the real
+	// one, so the Agent resolves (or rejects) the id itself, as the first
+	// thing that can go wrong in the stream — see containerLogSource.
+	var client docker.Client
+	isLocal := h.deps.Collection != nil && scope.IsLocal(h.deps.Collection.Identity().NodeID)
+	if isLocal {
+		var err error
+		client, err = h.dockerClient(scope)
+		if err != nil {
+			return err
+		}
+		containers, err := client.Containers(r.Context())
+		if err != nil {
+			return err
+		}
+		target, ok := findContainer(containers, id)
+		if !ok {
+			return errs.New(errs.CodeNotFound, "container not found").
+				WithOp(op).WithDetail("container", id)
+		}
+		id = target.ID
+	} else if h.deps.RemoteLogs == nil {
+		return errs.New(errs.CodeUnavailable, "remote container logs are not available on this control plane").WithOp(op)
 	}
 
 	conn, err := websocket.Accept(w, r, websocketAcceptOptions(h.deps.Config.Server.AllowedOrigins))
@@ -475,18 +505,49 @@ func (h *Handler) ContainerLogsFollow(w http.ResponseWriter, r *http.Request) er
 	// This handler never expects an incoming message; CloseRead both answers
 	// control frames (ping/pong/close) on our behalf and cancels ctx the
 	// moment the peer disconnects, which is how a closed browser tab is
-	// noticed at all.
+	// noticed at all — and, for a remote session, is what propagates all the
+	// way to the Agent's Docker call; see RequestContainerLogs.
 	ctx = conn.CloseRead(ctx)
 
-	h.followLogs(ctx, conn, client, target.ID, tail)
+	var lines <-chan docker.LogLine
+	var errCh <-chan error
+	if isLocal {
+		lines, errCh = client.Logs(ctx, id, docker.LogOptions{Follow: true, Tail: tail})
+	} else {
+		lines, errCh = h.deps.RemoteLogs.ContainerLogs(ctx, scope.NodeID, id, docker.LogOptions{Follow: true, Tail: tail})
+	}
+	h.followLogs(ctx, conn, lines, errCh)
 	return nil
 }
 
-// followLogs streams lines to conn until the connection, the container's log
-// stream, or ctx ends.
-func (h *Handler) followLogs(ctx context.Context, conn *websocket.Conn, client docker.Client, containerID string, tail int) {
-	lines, errCh := client.Logs(ctx, containerID, docker.LogOptions{Follow: true, Tail: tail})
+// containerLogSource resolves where containerID's logs come from: the local
+// Docker client, or a remote Agent via RemoteLogs. Mirrors
+// resolveInventory's local/remote split, but proxies live rather than
+// reading a stored snapshot — see RemoteLogSource's doc.
+func (h *Handler) containerLogSource(ctx context.Context, scope inventory.Scope, containerID string, opts docker.LogOptions) (<-chan docker.LogLine, <-chan error, error) {
+	const op = "v1.Handler.containerLogSource"
 
+	if h.deps.Collection != nil && scope.IsLocal(h.deps.Collection.Identity().NodeID) {
+		client, err := h.dockerClient(scope)
+		if err != nil {
+			return nil, nil, err
+		}
+		lines, errCh := client.Logs(ctx, containerID, opts)
+		return lines, errCh, nil
+	}
+
+	if h.deps.RemoteLogs == nil {
+		return nil, nil, errs.New(errs.CodeUnavailable, "remote container logs are not available on this control plane").WithOp(op)
+	}
+	lines, errCh := h.deps.RemoteLogs.ContainerLogs(ctx, scope.NodeID, containerID, opts)
+	return lines, errCh, nil
+}
+
+// followLogs streams lines to conn until the connection, the log stream, or
+// ctx ends. lines/errCh use the same two-channel shape docker.Client.Logs
+// and RemoteLogSource.ContainerLogs both produce, so this one loop serves a
+// local and a remote session identically.
+func (h *Handler) followLogs(ctx context.Context, conn *websocket.Conn, lines <-chan docker.LogLine, errCh <-chan error) {
 	ping := time.NewTicker(followPingInterval)
 	defer ping.Stop()
 

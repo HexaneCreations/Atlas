@@ -1,4 +1,4 @@
-import { useQueries, useQuery } from "@tanstack/react-query";
+import { keepPreviousData, useQueries, useQuery } from "@tanstack/react-query";
 import { ApiError, apiGet } from "./client";
 import { emptyArray } from "./empty";
 import { useSelectedNodeID } from "../lib/selectedNode";
@@ -246,7 +246,9 @@ function retryUnlessNotImplemented(count: number, error: Error): boolean {
 
 export const containerKeys = {
   list: (nodeID: string) => ["containers", nodeID] as const,
-  logs: (id: string) => ["containers", id, "logs"] as const,
+  // tail is part of the key so "load older logs" (a bigger tail request) is
+  // its own cache entry rather than silently reusing a smaller one.
+  logs: (nodeID: string, id: string, tail: number) => ["containers", nodeID, id, "logs", tail] as const,
   detail: (id: string) => ["containers", id, "detail"] as const,
 } as const;
 
@@ -411,16 +413,20 @@ export function useMounts() {
 }
 
 /** The tail of one container's logs. */
-export function useContainerLogs(containerID: string | null, tail = 200) {
+export function useContainerLogs(containerID: string | null, nodeID: string | undefined, tail = 200) {
   return useQuery({
-    queryKey: containerKeys.logs(containerID ?? ""),
+    queryKey: containerKeys.logs(nodeID ?? "", containerID ?? "", tail),
     queryFn: ({ signal }) =>
       apiGet<ContainerLogsResponse>(
-        `/containers/${encodeURIComponent(containerID ?? "")}/logs?tail=${tail}`,
+        `/containers/${encodeURIComponent(containerID ?? "")}/logs?tail=${tail}&node=${encodeURIComponent(nodeID ?? "")}`,
         { signal },
       ),
     enabled: Boolean(containerID),
     refetchInterval: REFRESH_INTERVAL_MS,
     retry: retryPolicy,
+    // tail is part of the key, so "load older logs" (a bigger tail) is a new
+    // cache entry — without this, data would go briefly undefined while it
+    // loads, collapsing the log viewer's height mid-read.
+    placeholderData: keepPreviousData,
   });
 }
