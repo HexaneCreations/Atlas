@@ -124,6 +124,12 @@ func TestUpdateChannelPreservesCreatedAt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
+	// CreateChannel returns the in-memory time.Now() value at ns/monotonic
+	// precision; PostgreSQL's timestamptz column only round-trips at
+	// microsecond precision, which is what UpdateChannel reads back.
+	// Truncate here so the comparison below is against the precision
+	// actually persisted, not against a value that never round-tripped.
+	created.CreatedAt = created.CreatedAt.Truncate(time.Microsecond)
 
 	updated := created
 	updated.Enabled = false

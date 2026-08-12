@@ -65,9 +65,15 @@ func (s *TLSServer) Name() string { return s.name }
 // Start binds the listener (or adopts the prebound one) and serves in the
 // background.
 func (s *TLSServer) Start(ctx context.Context) error {
+	// Cloned rather than shared: ServeTLS's first call on a *tls.Config
+	// mutates it in place (net/http's onceSetNextProtoDefaults ->
+	// http2ConfigureServer adds ALPN protocols, sets GetCertificate, etc.).
+	// Callers such as fleetPipeline hand the same *tls.Config to two
+	// TLSServer instances (HTTPS and libp2p listeners); without a clone,
+	// their concurrent first requests race on that shared struct.
 	srv := &http.Server{
 		Handler:           s.handler,
-		TLSConfig:         s.tlsConfig,
+		TLSConfig:         s.tlsConfig.Clone(),
 		ReadHeaderTimeout: 10 * time.Second,
 		ErrorLog:          slog.NewLogLogger(s.logger.Handler(), slog.LevelWarn),
 		BaseContext: func(net.Listener) context.Context {

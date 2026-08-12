@@ -125,6 +125,12 @@ func TestUpdateRuleChangesFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
+	// CreateRule returns the in-memory time.Now() value at ns/monotonic
+	// precision; PostgreSQL's timestamptz column only round-trips at
+	// microsecond precision, which is what UpdateRule's RETURNING reads
+	// back. Truncate here so the comparison below is against the precision
+	// actually persisted, not against a value that never round-tripped.
+	created.CreatedAt = created.CreatedAt.Truncate(time.Microsecond)
 
 	created.Threshold = 95
 	created.Enabled = false

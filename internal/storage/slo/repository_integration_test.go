@@ -164,6 +164,12 @@ func TestUpdateSLOChangesFieldsButPreservesCreatedAt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
+	// CreateSLO returns the in-memory time.Now() value at ns/monotonic
+	// precision; PostgreSQL's timestamptz column only round-trips at
+	// microsecond precision, which is what UpdateSLO reads back. Truncate
+	// here so the comparison below is against the precision actually
+	// persisted, not against a value that never round-tripped.
+	created.CreatedAt = created.CreatedAt.Truncate(time.Microsecond)
 
 	updated := created
 	updated.Threshold = 90

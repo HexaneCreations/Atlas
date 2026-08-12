@@ -41,9 +41,9 @@ jobs:
       - name: Vet
         run: make vet
 
-      - uses: golangci/golangci-lint-action@v7
+      - uses: golangci/golangci-lint-action@v6
         with:
-          version: v2.12.2
+          version: latest
 
   test:
     name: Unit tests
