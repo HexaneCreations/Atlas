@@ -2,6 +2,9 @@ package app
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"sync"
@@ -18,6 +21,7 @@ import (
 	"github.com/hexane/atlas/internal/platform/httpx"
 	"github.com/hexane/atlas/internal/platform/pki"
 	"github.com/hexane/atlas/internal/platform/postgres"
+	"github.com/hexane/atlas/internal/plugin/docker"
 	storageeventstore "github.com/hexane/atlas/internal/storage/eventstore"
 	storagefleet "github.com/hexane/atlas/internal/storage/fleet"
 	storageinventory "github.com/hexane/atlas/internal/storage/inventory"
@@ -48,8 +52,21 @@ type fleetPipeline struct {
 	libp2pServer *httpx.TLSServer
 	libp2pHost   host.Host
 	relayAddr    string // circuit multiaddr, set only when Fleet.LibP2PRelayAddr is configured
-	stopCh       chan struct{}
-	wg           sync.WaitGroup
+	// caCert and serverLeaf back the reversed mTLS handshake AgentOps uses
+	// (see libp2ptransport.RequestContainerLogs) — the same CA and
+	// certificate already minted for the agent-facing listener, not a
+	// separate trust root.
+	caCert     *x509.Certificate
+	serverLeaf tls.Certificate
+	// peerByNode maps a NodeID to the libp2p Peer ID it was last seen
+	// dialing in from — in-memory only, populated as a side effect of the
+	// Agent's own existing enroll/renew/telemetry traffic (see
+	// recordAgentPeer), the same "no new state, no persistence" posture as
+	// the Relay's rendezvous registry. A stale or missing entry surfaces
+	// naturally as a failed stream open, not as a separate liveness check.
+	peerByNode map[string]peer.ID
+	stopCh     chan struct{}
+	wg         sync.WaitGroup
 }
 
 func newFleetPipeline(cfg *config.Config, logger *slog.Logger, pool *postgres.Pool, collection *collectionPipeline,
@@ -110,6 +127,9 @@ func (f *fleetPipeline) Start(ctx context.Context) error {
 	f.mu.Lock()
 	f.server = server
 	f.stopCh = make(chan struct{})
+	f.caCert = ca.Cert()
+	f.serverLeaf = serverLeaf
+	f.peerByNode = make(map[string]peer.ID)
 	f.mu.Unlock()
 
 	// libp2p is a second, POC listener for the same mux — see
@@ -129,7 +149,12 @@ func (f *fleetPipeline) Start(ctx context.Context) error {
 			_ = p2pHost.Close()
 			return err
 		}
-		libp2pServer := httpx.NewTLSServerFromListener("fleet.server.libp2p", listener, mux, tlsConfig, f.logger)
+		// recordAgentPeer wraps only this listener's mux, not the shared one
+		// the HTTPS listener also serves — an r.RemoteAddr from a plain TCP
+		// connection is an IP, not a Peer ID, so recording it would be
+		// meaningless (and recordAgentPeer's own peer.Decode guards against
+		// treating it as one regardless).
+		libp2pServer := httpx.NewTLSServerFromListener("fleet.server.libp2p", listener, f.recordAgentPeer(mux), tlsConfig, f.logger)
 		if err := libp2pServer.Start(ctx); err != nil {
 			_ = p2pHost.Close()
 			return err
@@ -185,6 +210,112 @@ func (f *fleetPipeline) LibP2PPeerAddrs() []string {
 		return nil
 	}
 	return libp2ptransport.Addrs(f.libp2pHost)
+}
+
+// recordAgentPeer wraps next with a side effect: for every request that
+// arrives with a verified mTLS client certificate, it records which libp2p
+// Peer ID it came in on, keyed by the certificate's NodeID.
+//
+// Nothing about this needs a new mechanism. [pki.PeerNodeID] is the same
+// authenticated-identity extraction every agent-facing handler already
+// performs; r.RemoteAddr, for a request that arrived over the libp2p
+// listener, is already the peer's libp2p Peer ID as a string — verified
+// directly against the go-libp2p-gostream source: gostream's net.Conn wraps
+// a network.Stream and its RemoteAddr().String() returns
+// stream.Conn().RemotePeer().String(), and Go's net/http copies
+// conn.RemoteAddr() into every Request.RemoteAddr automatically. No wire
+// format change, no Agent-side change, populated as a side effect of traffic
+// the Agent already sends (enroll, renew, telemetry).
+//
+// The map is never proactively pruned on disconnect: a stale entry simply
+// fails the next AgentOps stream open (no live connection to reuse, and the
+// Agent has no independently dialable address — see ADR-0012), which is
+// exactly the "no active session" signal RemoteLogSource's caller needs.
+// Actively tracking connect/disconnect events would only make that failure
+// arrive slightly sooner, at the cost of a second bookkeeping mechanism.
+func (f *fleetPipeline) recordAgentPeer(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
+			if nodeID, err := pki.PeerNodeID(r.TLS.PeerCertificates[0]); err == nil {
+				if pid, err := peer.Decode(r.RemoteAddr); err == nil {
+					f.mu.Lock()
+					f.peerByNode[nodeID] = pid
+					f.mu.Unlock()
+				}
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// ContainerLogs implements v1.RemoteLogSource: it proxies a live log session
+// to nodeID's Agent over AgentOps, using whichever Peer ID recordAgentPeer
+// last saw that node dial in from. Returns the same two-channel shape
+// docker.Client.Logs uses locally, so internal/api/v1/containers.go forwards
+// a local and a remote session through the identical loop.
+func (f *fleetPipeline) ContainerLogs(ctx context.Context, nodeID, containerID string, opts docker.LogOptions) (<-chan docker.LogLine, <-chan error) {
+	const op = "app.fleetPipeline.ContainerLogs"
+
+	lines := make(chan docker.LogLine)
+	errCh := make(chan error, 1)
+
+	f.mu.RLock()
+	pid, known := f.peerByNode[nodeID]
+	p2pHost := f.libp2pHost
+	caCert := f.caCert
+	serverLeaf := f.serverLeaf
+	f.mu.RUnlock()
+
+	if !known || p2pHost == nil {
+		close(lines)
+		errCh <- errs.New(errs.CodeUnavailable,
+			"no active libp2p session for this agent; remote logs are unavailable").
+			WithOp(op).WithDetail("node", nodeID)
+		close(errCh)
+		return lines, errCh
+	}
+
+	req := libp2ptransport.AgentOpRequest{
+		ProtocolVersion: libp2ptransport.AgentOpsProtocolVersion,
+		Op:              libp2ptransport.AgentOpContainerLogs,
+		ContainerID:     containerID,
+		Tail:            opts.Tail,
+		Follow:          opts.Follow,
+		Timestamps:      opts.Timestamps,
+	}
+	if !opts.Since.IsZero() {
+		req.Since = opts.Since.Format(time.RFC3339)
+	}
+
+	frames, err := libp2ptransport.RequestContainerLogs(ctx, p2pHost, pid, nodeID, caCert, serverLeaf, req)
+	if err != nil {
+		close(lines)
+		errCh <- err
+		close(errCh)
+		return lines, errCh
+	}
+
+	go func() {
+		defer close(lines)
+		defer close(errCh)
+		for frame := range frames {
+			switch frame.Type {
+			case "line":
+				select {
+				case lines <- docker.LogLine{Time: frame.Time, Stream: docker.Stream(frame.Stream), Message: frame.Message}:
+				case <-ctx.Done():
+					return
+				}
+			case "error":
+				errCh <- fmt.Errorf("%s", frame.Reason)
+				return
+			default: // "end"
+				return
+			}
+		}
+	}()
+
+	return lines, errCh
 }
 
 // reserveRelay reserves a slot on relay for p2pHost, records the resulting

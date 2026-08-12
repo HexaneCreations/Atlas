@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { ArrowDown, ArrowUp, ChevronsUpDown, FileText } from "lucide-react";
+import { Link } from "react-router";
 import { useContainers, useLatestMetrics, usePrimaryNodeID } from "../api/queries";
 import { ApiError } from "../api/client";
 import type { Container, ContainerState } from "../api/types";
@@ -19,9 +20,9 @@ import {
 import { ContainerInspector } from "./containers/ContainerInspector";
 import { ImageDistribution } from "./containers/ImageDistribution";
 import { LifecycleAnalytics } from "./containers/LifecycleAnalytics";
-import { LogViewer } from "./containers/LogViewer";
 import { ProjectExplorer } from "./containers/ProjectExplorer";
 import { ResourceAllocation } from "./containers/ResourceAllocation";
+import { containerLogsPath } from "./containers/logViewerModel";
 import { DEFAULT_FILTERS, useContainerTable, type SortKey } from "./containers/useContainerTable";
 
 const STATE_TONE: Record<ContainerState, Tone> = {
@@ -91,7 +92,6 @@ export function ContainersPage() {
   const latest = useLatestMetrics(nodeID);
 
   const [selectedID, setSelectedID] = useState<string | null>(null);
-  const [logsFor, setLogsFor] = useState<string | null>(null);
 
   const all = containers.data?.containers ?? emptyArray<Container>();
 
@@ -316,8 +316,8 @@ export function ContainersPage() {
                       usage={usage.get(c.name)}
                       selected={c.id === selectedID}
                       showImage={!selected}
+                      nodeID={nodeID}
                       onSelect={() => { setSelectedID(c.id === selectedID ? null : c.id); }}
-                      onLogs={() => { setLogsFor(c.id); }}
                     />
                   ))}
                 </tbody>
@@ -334,8 +334,6 @@ export function ContainersPage() {
           />
         ) : null}
       </div>
-
-      {logsFor ? <LogViewer containerID={logsFor} onClose={() => { setLogsFor(null); }} /> : null}
     </>
   );
 }
@@ -381,15 +379,15 @@ function ContainerRow({
   usage,
   selected,
   showImage,
+  nodeID,
   onSelect,
-  onLogs,
 }: {
   container: Container;
   usage: ReturnType<typeof readUsage> extends Map<string, infer U> ? U | undefined : never;
   selected: boolean;
   showImage: boolean;
+  nodeID: string | undefined;
   onSelect: () => void;
-  onLogs: () => void;
 }) {
   const health = effectiveHealth(c);
   const exit = readExit(c);
@@ -468,16 +466,15 @@ function ContainerRow({
       </td>
 
       <td className="px-3 py-2" onClick={(e) => { e.stopPropagation(); }}>
-        <button
-          type="button"
-          onClick={onLogs}
+        <Link
+          to={containerLogsPath(c.id, nodeID)}
           title="View logs"
           aria-label={`View logs for ${c.name}`}
           className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-text-muted hover:bg-surface-hover hover:text-text"
         >
           <FileText size={11} aria-hidden="true" />
           logs
-        </button>
+        </Link>
       </td>
     </tr>
   );

@@ -128,6 +128,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*App, error) {
 		Collection:        collection,
 		Activity:          activityLog,
 		Inventory:         lazyInventoryStore{pool: pool},
+		RemoteLogs:        fleetPipe,
 		Nodes:             nodeLookup{pipeline: collection},
 		EventStore:        lazyEventStore{pool: pool},
 		Alerts:            lazyAlertStore{pool: pool},

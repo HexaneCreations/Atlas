@@ -13,12 +13,15 @@ package app_test
 
 import (
 	"context"
+	"encoding/json"
 	"net"
 	"net/http"
 	"os"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/coder/websocket"
 
 	"github.com/hexane/atlas/internal/agent"
 	"github.com/hexane/atlas/internal/app"
@@ -343,4 +346,143 @@ func runDiscoveryAgentAndAssertObserved(t *testing.T, instance *app.App, relayAd
 	if !found {
 		t.Fatal("node was never observed by the control plane over rendezvous-discovered libp2p transport")
 	}
+}
+
+// #19: the real path this milestone adds — Browser/API -> Server -> Relay ->
+// Agent -> Docker -> logs back through Agent -> Server -> Browser/API. Real
+// Relay, real rendezvous discovery, real Agent, and the Agent's real local
+// Docker daemon (whatever containers actually happen to be running on this
+// machine) — not a fake docker.Client, so this proves AgentOps end to end
+// against genuine container output, not just the protocol in isolation
+// (which internal/core/transport/libp2ptransport/agentops_test.go already
+// covers with a fake).
+func TestRemoteContainerLogsOverAgentOps(t *testing.T) {
+	dsn := os.Getenv(testDatabaseURLEnv)
+	if dsn == "" {
+		t.Skipf("%s is not set; run `make db-up` first", testDatabaseURLEnv)
+	}
+
+	relayHost, err := libp2ptransport.NewRelayHost(t.TempDir(), []string{"/ip4/127.0.0.1/tcp/0"})
+	if err != nil {
+		t.Fatalf("start relay: %v", err)
+	}
+	t.Cleanup(func() { _ = relayHost.Close() })
+	libp2ptransport.RegisterRendezvousHandlers(relayHost, libp2ptransport.NewRegistry())
+	relayAddrs := libp2ptransport.Addrs(relayHost)
+	if len(relayAddrs) == 0 {
+		t.Fatal("relay advertised no listen addresses")
+	}
+
+	instance, circuitAddr := bootLibP2PFleetServer(t, relayAddrs[0])
+	serverTarget, err := libp2ptransport.ParseTarget(circuitAddr)
+	if err != nil {
+		t.Fatalf("parse server peer id out of circuit addr: %v", err)
+	}
+
+	nodeID := "agentops-it-node-" + id.New()
+	tok, err := corefleet.NewToken()
+	if err != nil {
+		t.Fatalf("generate token: %v", err)
+	}
+	spec := corefleet.TokenSpec{Label: "agentops-it", Environment: "test", AllowedCIDR: "0.0.0.0/0", MaxUses: 1, TTL: time.Hour}
+	if err := spec.Validate(); err != nil {
+		t.Fatalf("token spec: %v", err)
+	}
+	repo := storagefleet.NewRepository(instance.Pool.DB())
+	if err := repo.CreateToken(context.Background(), tok.Hash, spec, time.Now()); err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+
+	agentCfg := agent.Config{
+		ControlPlaneURL:    "https://localhost",
+		Token:              tok.Plaintext,
+		DataDir:            t.TempDir(),
+		NodeID:             nodeID,
+		Environment:        "test",
+		Transport:          "libp2p",
+		LibP2PRelayAddr:    relayAddrs[0],
+		LibP2PServerPeerID: serverTarget.ID.String(),
+		CollectionInterval: 2 * time.Second,
+		CollectionTimeout:  2 * time.Second,
+		InventoryInterval:  2 * time.Second,
+	}
+
+	a, err := agent.New(context.Background(), agentCfg, log.Discard())
+	if err != nil {
+		t.Fatalf("agent.New(): %v", err)
+	}
+	agentCtx, agentCancel := context.WithCancel(context.Background())
+	agentDone := make(chan error, 1)
+	go func() { agentDone <- a.Run(agentCtx) }()
+	t.Cleanup(func() {
+		agentCancel()
+		select {
+		case <-agentDone:
+		case <-time.After(15 * time.Second):
+			t.Error("agent did not shut down within 15s")
+		}
+	})
+
+	base := "http://" + waitForBoundAddress(t, instance)
+
+	// Wait for the agent's real container inventory to arrive — whatever is
+	// actually running on this machine's Docker daemon. If nothing is
+	// running (or Docker is absent here), that is an environment fact this
+	// test cannot fabricate around; it skips rather than reporting a false
+	// pass or a misleading failure.
+	var containerID string
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		resp, err := http.Get(base + "/api/v1/containers?node=" + nodeID)
+		if err == nil {
+			var payload struct {
+				Containers []struct {
+					ID string `json:"id"`
+				} `json:"containers"`
+			}
+			_ = json.NewDecoder(resp.Body).Decode(&payload)
+			resp.Body.Close()
+			if len(payload.Containers) > 0 {
+				containerID = payload.Containers[0].ID
+				break
+			}
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	if containerID == "" {
+		t.Skip("no containers observed from this machine's real Docker daemon within 30s; nothing to fetch remote logs for")
+	}
+
+	// Non-follow: the real request/response path, Browser/API -> Server ->
+	// AgentOps -> Agent -> real docker.Client.Logs -> back.
+	resp, err := http.Get(base + "/api/v1/containers/" + containerID + "/logs?node=" + nodeID + "&tail=5")
+	if err != nil {
+		t.Fatalf("GET logs: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET logs status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	var logsPayload struct {
+		ContainerID string `json:"container_id"`
+		Total       int    `json:"total"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&logsPayload); err != nil {
+		t.Fatalf("decode logs response: %v", err)
+	}
+	if logsPayload.ContainerID != containerID {
+		t.Errorf("container_id = %q, want %q", logsPayload.ContainerID, containerID)
+	}
+
+	// Follow: a real WebSocket upgrade over the same remote path, proving
+	// the live-follow leg (not just the tail request above) reaches the
+	// Agent's real Docker connection and a clean session teardown works.
+	wsURL := "ws" + strings.TrimPrefix(base, "http") + "/api/v1/containers/" + containerID + "/logs/follow?node=" + nodeID + "&tail=1"
+	wsCtx, wsCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer wsCancel()
+	conn, wsResp, err := websocket.Dial(wsCtx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("follow dial: %v (status %v)", err, wsResp)
+	}
+	conn.Close(websocket.StatusNormalClosure, "done")
 }

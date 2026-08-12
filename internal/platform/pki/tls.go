@@ -21,6 +21,15 @@ import (
 // control plane periodically is enough to stay ahead of this.
 const ServerLeafLifetime = 397 * 24 * time.Hour // just under the CA/Browser Forum's public-cert ceiling, out of habit
 
+// ControlPlaneCommonName is the Subject.CommonName every control plane leaf
+// certificate carries (see [NewServerLeaf]). Exported so a caller verifying a
+// presented certificate outside the normal client/server TLS roles — e.g. the
+// reversed handshake AgentOps uses, where the control plane connects out to
+// an Agent — can confirm the peer is genuinely the control plane and not just
+// any certificate this fleet's CA happens to have signed (agent leaf
+// certificates are signed by the same CA; this is what tells them apart).
+const ControlPlaneCommonName = "atlas-control-plane"
+
 // NewServerLeaf mints the control plane's own TLS server certificate, signed
 // by ca, valid for the given hosts (DNS names or IP addresses).
 //
@@ -58,7 +67,7 @@ func NewServerLeaf(ca *CA, hosts []string) (tls.Certificate, error) {
 	now := time.Now()
 	template := &x509.Certificate{
 		SerialNumber: serial,
-		Subject:      pkix.Name{CommonName: "atlas-control-plane", Organization: []string{"Atlas"}},
+		Subject:      pkix.Name{CommonName: ControlPlaneCommonName, Organization: []string{"Atlas"}},
 		NotBefore:    now.Add(-5 * time.Minute),
 		NotAfter:     now.Add(ServerLeafLifetime),
 		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,

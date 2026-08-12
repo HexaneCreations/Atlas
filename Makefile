@@ -31,6 +31,16 @@ TEST_DATABASE_URL ?= postgres://atlas:atlas_dev_password@127.0.0.1:5432/atlas?ss
 # packages under web/node_modules. Resolve the package list explicitly.
 GO_PACKAGES = $(shell go list ./... | grep -v '/node_modules/')
 
+# Local dev config (see .env.example). Optional: absent, targets fall back
+# to Go's own defaults (internal/platform/config) — only server/dev/env-check
+# actually need a real database and Fleet config. `include` (not a shell
+# `source`) is what makes this safe for values containing slashes/colons,
+# like a libp2p multiaddr, with no extra parsing.
+ifneq (,$(wildcard .env))
+include .env
+export
+endif
+
 .PHONY: help
 help: ## Show this help
 	@grep -hE '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -51,6 +61,42 @@ run: ## Run Atlas against the local development database
 	ATLAS_LOGGING_FORMAT=text \
 	ATLAS_LOGGING_LEVEL=debug \
 	go run ./cmd/$(BINARY) serve
+
+.PHONY: require-env
+require-env:
+	@test -f .env || { echo "no .env found — run: cp .env.example .env, then edit it"; exit 1; }
+
+.PHONY: server
+server: require-env build ## Run the full Atlas server (Fleet + libp2p) using .env
+	$(BIN_DIR)/$(BINARY) serve
+
+.PHONY: dev
+dev: require-env build ## Run the Atlas server and the frontend dev server together
+	@trap 'kill 0' EXIT; \
+	$(BIN_DIR)/$(BINARY) serve & \
+	$(MAKE) web-dev; \
+	wait
+
+.PHONY: env-check
+env-check: ## Verify required server environment is set, without printing secrets
+	@missing=0; \
+	for var in ATLAS_ENVIRONMENT ATLAS_DATABASE_HOST ATLAS_DATABASE_PORT ATLAS_DATABASE_NAME \
+		ATLAS_DATABASE_USER ATLAS_DATABASE_PASSWORD ATLAS_DATABASE_SSL_MODE ATLAS_FLEET_ENABLED \
+		ATLAS_FLEET_DATA_DIR ATLAS_FLEET_LIBP2P_ENABLED ATLAS_FLEET_LIBP2P_LISTEN_ADDRS \
+		ATLAS_FLEET_LIBP2P_RELAY_ADDR; do \
+		val="$${!var:-}"; \
+		if [ -z "$$val" ]; then \
+			echo "missing  $$var"; missing=1; \
+		elif echo "$$var" | grep -qiE 'PASSWORD|TOKEN|SECRET'; then \
+			echo "ok       $$var (set, hidden)"; \
+		else \
+			echo "ok       $$var=$$val"; \
+		fi; \
+	done; \
+	if [ "$$missing" = 1 ]; then \
+		echo; echo "missing variables above — run: cp .env.example .env, then edit it"; exit 1; \
+	fi; \
+	echo; echo "all required variables set"
 
 .PHONY: clean
 clean: ## Remove build output
@@ -166,6 +212,9 @@ web-install: ## Install frontend dependencies
 .PHONY: web-dev
 web-dev: ## Run the frontend dev server against a local Atlas
 	cd web && npm run dev
+
+.PHONY: ui
+ui: web-dev ## Alias for web-dev
 
 .PHONY: web-build
 web-build: ## Build the production frontend bundle

@@ -12,6 +12,9 @@ const NodesPage = lazy(() =>
 const ContainersPage = lazy(() =>
   import("./pages/ContainersPage").then((m) => ({ default: m.ContainersPage })),
 );
+const ContainerLogsPage = lazy(() =>
+  import("./pages/ContainerLogsPage").then((m) => ({ default: m.ContainerLogsPage })),
+);
 const ProcessesPage = lazy(() =>
   import("./pages/ProcessesPage").then((m) => ({ default: m.ProcessesPage })),
 );
@@ -78,6 +81,7 @@ export function App() {
                     <Route path="/" element={<OverviewPage />} />
                     <Route path="/nodes" element={<NodesPage />} />
                     <Route path="/containers" element={<ContainersPage />} />
+                    <Route path="/containers/:containerID/logs" element={<ContainerLogsPage />} />
                     <Route path="/processes" element={<ProcessesPage />} />
                     <Route path="/services" element={<ServicesPage />} />
                     <Route path="/cron" element={<CronPage />} />

@@ -36,9 +36,10 @@ const MAX_BUFFERED_LINES = 2000;
  */
 const SESSION_BOUND_REASON = "closing";
 
-/** Follows containerID's logs while enabled is true. */
+/** Follows containerID's logs on nodeID while enabled is true. */
 export function useContainerLogFollow(
   containerID: string | null,
+  nodeID: string | undefined,
   tail: number,
   enabled: boolean,
 ): FollowState {
@@ -68,6 +69,7 @@ export function useContainerLogFollow(
       );
       url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
       url.searchParams.set("tail", String(tail));
+      url.searchParams.set("node", nodeID ?? "");
 
       socket = new WebSocket(url);
 
@@ -111,7 +113,7 @@ export function useContainerLogFollow(
       cancelled = true;
       socket?.close(1000, "view closed");
     };
-  }, [containerID, tail, enabled]);
+  }, [containerID, nodeID, tail, enabled]);
 
   return state;
 }

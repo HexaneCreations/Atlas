@@ -18,8 +18,10 @@ web/.vite/
 /.env
 /.env.*
 !/.env.example
+!/.env.prod.example
 *.pem
 *.key
+/secrets/
 
 # Editor / OS
 .DS_Store
