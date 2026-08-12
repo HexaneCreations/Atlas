@@ -1,7 +1,10 @@
 package agent
 
 import (
+	"fmt"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -42,26 +45,37 @@ type Config struct {
 	CollectionTimeout  time.Duration
 	InventoryInterval  time.Duration
 
+	// AgentOpsContainerLogsDisabled is a local, explicit authorization gate
+	// for the one privileged AgentOps operation that exists: independent of,
+	// and never implied by, a control plane successfully authenticating.
+	// Phrased as a "disabled" flag rather than "allowed" so the zero value —
+	// what a Config{} literal not built through LoadConfig gets — preserves
+	// current behavior (allowed) rather than silently denying every AgentOps
+	// request. An operator sets it true to revoke this Agent's participation
+	// without touching the control plane.
+	AgentOpsContainerLogsDisabled bool
+
 	LogLevel string
 }
 
 // LoadConfig reads configuration from the environment, applying defaults.
 func LoadConfig() Config {
 	cfg := Config{
-		ControlPlaneURL:    getenv("ATLAS_AGENT_CONTROL_PLANE_URL", "https://127.0.0.1:8443"),
-		Token:              os.Getenv("ATLAS_AGENT_TOKEN"),
-		DataDir:            getenv("ATLAS_AGENT_DATA_DIR", "/var/lib/atlas-agent"),
-		CABundlePath:       os.Getenv("ATLAS_AGENT_CA_BUNDLE"),
-		NodeID:             os.Getenv("ATLAS_AGENT_NODE_ID"),
-		Environment:        os.Getenv("ATLAS_AGENT_ENVIRONMENT"),
-		Transport:          getenv("ATLAS_AGENT_TRANSPORT", "https"),
-		LibP2PServerAddr:   os.Getenv("ATLAS_AGENT_LIBP2P_SERVER_ADDR"),
-		LibP2PRelayAddr:    os.Getenv("ATLAS_AGENT_LIBP2P_RELAY_ADDR"),
-		LibP2PServerPeerID: os.Getenv("ATLAS_AGENT_LIBP2P_SERVER_PEER_ID"),
-		CollectionInterval: getenvDuration("ATLAS_AGENT_COLLECTION_INTERVAL", 15*time.Second),
-		CollectionTimeout:  getenvDuration("ATLAS_AGENT_COLLECTION_TIMEOUT", 10*time.Second),
-		InventoryInterval:  getenvDuration("ATLAS_AGENT_INVENTORY_INTERVAL", 60*time.Second),
-		LogLevel:           getenv("ATLAS_AGENT_LOG_LEVEL", "info"),
+		ControlPlaneURL:               getenv("ATLAS_AGENT_CONTROL_PLANE_URL", "https://127.0.0.1:8443"),
+		Token:                         os.Getenv("ATLAS_AGENT_TOKEN"),
+		DataDir:                       getenv("ATLAS_AGENT_DATA_DIR", "/var/lib/atlas-agent"),
+		CABundlePath:                  os.Getenv("ATLAS_AGENT_CA_BUNDLE"),
+		NodeID:                        os.Getenv("ATLAS_AGENT_NODE_ID"),
+		Environment:                   os.Getenv("ATLAS_AGENT_ENVIRONMENT"),
+		Transport:                     getenv("ATLAS_AGENT_TRANSPORT", "https"),
+		LibP2PServerAddr:              os.Getenv("ATLAS_AGENT_LIBP2P_SERVER_ADDR"),
+		LibP2PRelayAddr:               os.Getenv("ATLAS_AGENT_LIBP2P_RELAY_ADDR"),
+		LibP2PServerPeerID:            os.Getenv("ATLAS_AGENT_LIBP2P_SERVER_PEER_ID"),
+		CollectionInterval:            getenvDuration("ATLAS_AGENT_COLLECTION_INTERVAL", 15*time.Second),
+		CollectionTimeout:             getenvDuration("ATLAS_AGENT_COLLECTION_TIMEOUT", 10*time.Second),
+		InventoryInterval:             getenvDuration("ATLAS_AGENT_INVENTORY_INTERVAL", 60*time.Second),
+		AgentOpsContainerLogsDisabled: getenvBool("ATLAS_AGENT_AGENTOPS_CONTAINER_LOGS_DISABLED", false),
+		LogLevel:                      getenv("ATLAS_AGENT_LOG_LEVEL", "info"),
 	}
 	return cfg
 }
@@ -80,4 +94,76 @@ func getenvDuration(key string, def time.Duration) time.Duration {
 		}
 	}
 	return def
+}
+
+func getenvBool(key string, def bool) bool {
+	if v := os.Getenv(key); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			return b
+		}
+	}
+	return def
+}
+
+// relationshipsEnvVar lists additional Control-Plane relationship ids,
+// comma-separated (e.g. "production,development"). Each id's own bootstrap
+// config is read from ATLAS_AGENT_RELATIONSHIP_<ID>_* (id upper-cased,
+// non-alphanumeric characters replaced with "_"). Consulted only for
+// bootstrap — see relationship.go's DataDir-authoritative precedence rule;
+// once a relationship has bootstrapped once, relationship.json governs and
+// these vars are ignored.
+const relationshipsEnvVar = "ATLAS_AGENT_RELATIONSHIPS"
+
+// LoadRelationshipConfigs reads every relationship named in
+// ATLAS_AGENT_RELATIONSHIPS from the environment. The implicit "default"
+// relationship is not included here — it is always derived from Config's
+// existing flat fields (see relationshipBootstrapFromConfig in
+// relationship.go), so this function and Config/LoadConfig never interact.
+func LoadRelationshipConfigs() (map[string]RelationshipBootstrap, error) {
+	raw := os.Getenv(relationshipsEnvVar)
+	if raw == "" {
+		return nil, nil
+	}
+
+	out := make(map[string]RelationshipBootstrap)
+	for _, id := range strings.Split(raw, ",") {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, dup := out[id]; dup {
+			return nil, fmt.Errorf("%s: relationship id %q listed more than once", relationshipsEnvVar, id)
+		}
+		out[id] = loadRelationshipBootstrapEnv(id)
+	}
+	return out, nil
+}
+
+// relationshipEnvPrefix derives an id's environment variable prefix.
+// Non-alphanumeric characters become "_" so an id like "prod-eu" still
+// produces a valid, unambiguous variable name.
+func relationshipEnvPrefix(id string) string {
+	var b strings.Builder
+	for _, r := range strings.ToUpper(id) {
+		if (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+		} else {
+			b.WriteRune('_')
+		}
+	}
+	return "ATLAS_AGENT_RELATIONSHIP_" + b.String() + "_"
+}
+
+func loadRelationshipBootstrapEnv(id string) RelationshipBootstrap {
+	prefix := relationshipEnvPrefix(id)
+	return RelationshipBootstrap{
+		ControlPlaneURL:               os.Getenv(prefix + "CONTROL_PLANE_URL"),
+		Token:                         os.Getenv(prefix + "TOKEN"),
+		CABundlePath:                  os.Getenv(prefix + "CA_BUNDLE"),
+		Transport:                     getenv(prefix+"TRANSPORT", "https"),
+		LibP2PServerAddr:              os.Getenv(prefix + "LIBP2P_SERVER_ADDR"),
+		LibP2PRelayAddr:               os.Getenv(prefix + "LIBP2P_RELAY_ADDR"),
+		LibP2PServerPeerID:            os.Getenv(prefix + "LIBP2P_SERVER_PEER_ID"),
+		AgentOpsContainerLogsDisabled: getenvBool(prefix+"AGENTOPS_CONTAINER_LOGS_DISABLED", false),
+	}
 }

@@ -1,0 +1,19 @@
+# Atlas — Caddy reverse proxy.
+#
+# Caddy is the sole public web entry point for this stack (see
+# docker-compose.prod.yml: it is the only service with host-published
+# ports). It terminates public HTTP/TLS and proxies to atlas-ui over the
+# internal atlas-internal Docker network; atlas-ui's own nginx continues to
+# proxy /api, /healthz, /readyz to atlas-server exactly as it does today
+# (web/nginx.conf — untouched by this file). atlas-server, PostgreSQL,
+# Fleet mTLS, Fleet libp2p, and Atlas Relay are not reachable through Caddy
+# at all — this Caddyfile has no route to any of them.
+#
+# ATLAS_PUBLIC_HOSTNAME is supplied via .env.prod (see .env.prod.example),
+# never hardcoded here. Left unset, it defaults to "localhost": Caddy
+# detects that as a non-public name and serves a locally-trusted certificate
+# instead of attempting public ACME, which is what makes the stack usable
+# for a local smoke test with no real domain or Cloudflare in front of it.
+{$ATLAS_PUBLIC_HOSTNAME:localhost} {
+	reverse_proxy atlas-ui:80
+}

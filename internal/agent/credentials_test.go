@@ -56,6 +56,12 @@ type fakeDenylist struct{}
 
 func (fakeDenylist) IsDenied(context.Context, string) (bool, error) { return false, nil }
 
+type fakeGrants struct{}
+
+func (fakeGrants) IsGranted(context.Context, string, string) (bool, error)              { return true, nil }
+func (fakeGrants) Grant(context.Context, string, string, string, time.Time) error       { return nil }
+func (fakeGrants) RevokeGrant(context.Context, string, string, string, time.Time) error { return nil }
+
 // testControlPlane starts a real mTLS-capable agent server, signed by a real
 // CA, exactly as internal/app/fleet.go wires one — so bootstrap() exercises
 // the genuine HTTPS + enrollment path rather than a mock.
@@ -69,7 +75,7 @@ func testControlPlane(t *testing.T) (url string, ca *pki.CA) {
 	router := transport.NewRouter()
 	handler := apiagent.NewHandler(apiagent.Deps{
 		CA:       ca,
-		Enroller: corefleet.NewEnroller(ca, fakeTokens{}, newFakeCredentials(), fakeDenylist{}),
+		Enroller: corefleet.NewEnroller(ca, fakeTokens{}, newFakeCredentials(), fakeDenylist{}, fakeGrants{}),
 		Router:   router,
 	})
 	mux := http.NewServeMux()
@@ -102,7 +108,7 @@ func testFlakyControlPlane(t *testing.T, failFirstN int32) string {
 	router := transport.NewRouter()
 	handler := apiagent.NewHandler(apiagent.Deps{
 		CA:       ca,
-		Enroller: corefleet.NewEnroller(ca, fakeTokens{}, newFakeCredentials(), fakeDenylist{}),
+		Enroller: corefleet.NewEnroller(ca, fakeTokens{}, newFakeCredentials(), fakeDenylist{}, fakeGrants{}),
 		Router:   router,
 	})
 	mux := http.NewServeMux()
@@ -136,15 +142,20 @@ func shrinkBootstrapBackoff(t *testing.T) {
 	t.Helper()
 	restoreMin, restoreMax, restoreElapsed := bootstrapBackoffMin, bootstrapBackoffMax, bootstrapMaxElapsed
 	bootstrapBackoffMin, bootstrapBackoffMax, bootstrapMaxElapsed = 5*time.Millisecond, 20*time.Millisecond, 2*time.Second
-	t.Cleanup(func() { bootstrapBackoffMin, bootstrapBackoffMax, bootstrapMaxElapsed = restoreMin, restoreMax, restoreElapsed })
+	t.Cleanup(func() {
+		bootstrapBackoffMin, bootstrapBackoffMax, bootstrapMaxElapsed = restoreMin, restoreMax, restoreElapsed
+	})
 }
 
-func testConfig(t *testing.T, controlPlaneURL string) Config {
+func testConfig(t *testing.T, controlPlaneURL string) relationshipConfig {
 	t.Helper()
-	return Config{
-		ControlPlaneURL: controlPlaneURL,
-		Token:           "atlas_enroll_test",
-		DataDir:         t.TempDir(),
+	return relationshipConfig{
+		id:      "test",
+		dataDir: t.TempDir(),
+		RelationshipBootstrap: RelationshipBootstrap{
+			ControlPlaneURL: controlPlaneURL,
+			Token:           "atlas_enroll_test",
+		},
 	}
 }
 
@@ -162,10 +173,10 @@ func TestBootstrapEnrollsAndPersistsPinnedCA(t *testing.T) {
 		t.Fatal("bootstrap did not return a usable CA and credential")
 	}
 
-	if _, err := os.Stat(pinnedCAPath(cfg.DataDir)); err != nil {
+	if _, err := os.Stat(pinnedCAPath(cfg.dataDir)); err != nil {
 		t.Fatalf("TOFU-pinned CA was not persisted: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(cfg.DataDir, "agent-cert.pem")); err != nil {
+	if _, err := os.Stat(filepath.Join(cfg.dataDir, "agent-cert.pem")); err != nil {
 		t.Fatalf("agent certificate was not persisted: %v", err)
 	}
 }
@@ -209,11 +220,11 @@ func TestBootstrapPrefersExplicitCABundleOverPin(t *testing.T) {
 		t.Fatalf("first bootstrap: %v", err)
 	}
 
-	bundlePath := filepath.Join(cfg.DataDir, "explicit-ca.pem")
-	if err := savePinnedCA(cfg.DataDir, ca.Cert()); err != nil {
+	bundlePath := filepath.Join(cfg.dataDir, "explicit-ca.pem")
+	if err := savePinnedCA(cfg.dataDir, ca.Cert()); err != nil {
 		t.Fatalf("write explicit bundle fixture: %v", err)
 	}
-	if err := os.Rename(pinnedCAPath(cfg.DataDir), bundlePath); err != nil {
+	if err := os.Rename(pinnedCAPath(cfg.dataDir), bundlePath); err != nil {
 		t.Fatalf("rename: %v", err)
 	}
 	cfg.CABundlePath = bundlePath
@@ -240,7 +251,7 @@ func TestBootstrapFailsClearlyWhenPinIsMissing(t *testing.T) {
 	if _, _, err := bootstrap(context.Background(), cfg, "node-1", discardLogger(), nil); err != nil {
 		t.Fatalf("first bootstrap: %v", err)
 	}
-	if err := os.Remove(pinnedCAPath(cfg.DataDir)); err != nil {
+	if err := os.Remove(pinnedCAPath(cfg.dataDir)); err != nil {
 		t.Fatalf("remove pinned CA fixture: %v", err)
 	}
 	cfg.Token = ""
@@ -276,7 +287,9 @@ func TestBootstrapWithRetrySucceedsAfterTransientFailure(t *testing.T) {
 func TestBootstrapWithRetryRespectsContextCancellation(t *testing.T) {
 	restoreMin, restoreMax, restoreElapsed := bootstrapBackoffMin, bootstrapBackoffMax, bootstrapMaxElapsed
 	bootstrapBackoffMin, bootstrapBackoffMax, bootstrapMaxElapsed = time.Second, 2*time.Second, time.Minute
-	t.Cleanup(func() { bootstrapBackoffMin, bootstrapBackoffMax, bootstrapMaxElapsed = restoreMin, restoreMax, restoreElapsed })
+	t.Cleanup(func() {
+		bootstrapBackoffMin, bootstrapBackoffMax, bootstrapMaxElapsed = restoreMin, restoreMax, restoreElapsed
+	})
 
 	// Always-failing control plane: every request 503s, so bootstrap never
 	// succeeds and bootstrapWithRetry must be sitting in its backoff wait
@@ -310,7 +323,9 @@ func TestBootstrapWithRetryRespectsContextCancellation(t *testing.T) {
 func TestBootstrapWithRetryBoundedByMaxElapsed(t *testing.T) {
 	restoreMin, restoreMax, restoreElapsed := bootstrapBackoffMin, bootstrapBackoffMax, bootstrapMaxElapsed
 	bootstrapBackoffMin, bootstrapBackoffMax, bootstrapMaxElapsed = 5*time.Millisecond, 10*time.Millisecond, 100*time.Millisecond
-	t.Cleanup(func() { bootstrapBackoffMin, bootstrapBackoffMax, bootstrapMaxElapsed = restoreMin, restoreMax, restoreElapsed })
+	t.Cleanup(func() {
+		bootstrapBackoffMin, bootstrapBackoffMax, bootstrapMaxElapsed = restoreMin, restoreMax, restoreElapsed
+	})
 
 	url := testFlakyControlPlane(t, 1<<30) // never recovers
 	cfg := testConfig(t, url)

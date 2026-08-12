@@ -260,6 +260,83 @@ func TestExpiredCredentialIsNotActive(t *testing.T) {
 	}
 }
 
+func TestIsGrantedFalseForAnUngrantedNode(t *testing.T) {
+	repo := newRepository(t)
+	ctx := context.Background()
+
+	granted, err := repo.IsGranted(ctx, "node-e", corefleet.OperationContainerLogs)
+	if err != nil {
+		t.Fatalf("IsGranted: %v", err)
+	}
+	if granted {
+		t.Error("IsGranted true for a node that was never granted anything")
+	}
+}
+
+func TestGrantThenIsGrantedRoundTrips(t *testing.T) {
+	repo := newRepository(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	if err := repo.Grant(ctx, "node-f", corefleet.OperationContainerLogs, "operator", now); err != nil {
+		t.Fatalf("Grant: %v", err)
+	}
+	granted, err := repo.IsGranted(ctx, "node-f", corefleet.OperationContainerLogs)
+	if err != nil {
+		t.Fatalf("IsGranted: %v", err)
+	}
+	if !granted {
+		t.Error("IsGranted false immediately after Grant")
+	}
+}
+
+func TestRevokeGrantRemovesAuthorization(t *testing.T) {
+	repo := newRepository(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	if err := repo.Grant(ctx, "node-g", corefleet.OperationContainerLogs, "operator", now); err != nil {
+		t.Fatalf("Grant: %v", err)
+	}
+	if err := repo.RevokeGrant(ctx, "node-g", corefleet.OperationContainerLogs, "compromised", now); err != nil {
+		t.Fatalf("RevokeGrant: %v", err)
+	}
+	granted, err := repo.IsGranted(ctx, "node-g", corefleet.OperationContainerLogs)
+	if err != nil {
+		t.Fatalf("IsGranted: %v", err)
+	}
+	if granted {
+		t.Error("IsGranted true after RevokeGrant")
+	}
+}
+
+// The invariant the design depends on: Grant must never resurrect a grant
+// already revoked, so a re-enrollment can't silently undo an operator's
+// revocation.
+func TestGrantDoesNotResurrectARevokedGrant(t *testing.T) {
+	repo := newRepository(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	if err := repo.Grant(ctx, "node-h", corefleet.OperationContainerLogs, "operator", now); err != nil {
+		t.Fatalf("first Grant: %v", err)
+	}
+	if err := repo.RevokeGrant(ctx, "node-h", corefleet.OperationContainerLogs, "compromised", now); err != nil {
+		t.Fatalf("RevokeGrant: %v", err)
+	}
+	if err := repo.Grant(ctx, "node-h", corefleet.OperationContainerLogs, "re-enrollment", now); err != nil {
+		t.Fatalf("second Grant: %v", err)
+	}
+
+	granted, err := repo.IsGranted(ctx, "node-h", corefleet.OperationContainerLogs)
+	if err != nil {
+		t.Fatalf("IsGranted: %v", err)
+	}
+	if granted {
+		t.Error("a second Grant call resurrected a revoked grant")
+	}
+}
+
 func TestDenylistRoundTrips(t *testing.T) {
 	repo := newRepository(t)
 	ctx := context.Background()

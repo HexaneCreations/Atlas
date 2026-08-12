@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"net"
+	"net/url"
 	"time"
 
 	"github.com/hexane/atlas/internal/platform/errs"
@@ -74,6 +75,11 @@ func NewServerLeaf(ca *CA, hosts []string) (tls.Certificate, error) {
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		DNSNames:     dnsNames,
 		IPAddresses:  ips,
+		// The control plane's cryptographic identity: always the CA's own
+		// fingerprint (see ControlPlaneURI), never an operator-assigned
+		// label. This is what lets an Agent trusting more than one CA tell
+		// which specific control plane a presented certificate belongs to.
+		URIs: []*url.URL{ControlPlaneURI(Fingerprint(ca.Cert()))},
 	}
 
 	der, err := x509.CreateCertificate(rand.Reader, template, ca.Cert(), &key.PublicKey, ca.Key())

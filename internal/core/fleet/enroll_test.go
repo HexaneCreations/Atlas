@@ -74,7 +74,40 @@ func (f *fakeDenylist) IsDenied(_ context.Context, nodeID string) (bool, error) 
 	return f.denied[nodeID], nil
 }
 
-func testEnv(t *testing.T) (*pki.CA, *fakeTokens, *fakeCredentials, *fakeDenylist, *fleet.Enroller) {
+// fakeGrants is an in-memory GrantStore. Grant and RevokeGrant mirror the
+// real store's invariant: an existing row, granted or revoked, is never
+// overwritten by a later Grant call — this is what a test verifying
+// re-enrollment doesn't resurrect a revoked grant relies on.
+type fakeGrants struct {
+	exists map[[2]string]bool
+	live   map[[2]string]bool
+}
+
+func newFakeGrants() *fakeGrants {
+	return &fakeGrants{exists: map[[2]string]bool{}, live: map[[2]string]bool{}}
+}
+
+func (f *fakeGrants) IsGranted(_ context.Context, nodeID, operation string) (bool, error) {
+	k := [2]string{nodeID, operation}
+	return f.exists[k] && f.live[k], nil
+}
+
+func (f *fakeGrants) Grant(_ context.Context, nodeID, operation, _ string, _ time.Time) error {
+	k := [2]string{nodeID, operation}
+	if f.exists[k] {
+		return nil
+	}
+	f.exists[k] = true
+	f.live[k] = true
+	return nil
+}
+
+func (f *fakeGrants) RevokeGrant(_ context.Context, nodeID, operation, _ string, _ time.Time) error {
+	f.live[[2]string{nodeID, operation}] = false
+	return nil
+}
+
+func testEnv(t *testing.T) (*pki.CA, *fakeTokens, *fakeCredentials, *fakeDenylist, *fleet.Enroller, *fakeGrants) {
 	t.Helper()
 	ca, err := pki.New("test-ca")
 	if err != nil {
@@ -83,7 +116,8 @@ func testEnv(t *testing.T) (*pki.CA, *fakeTokens, *fakeCredentials, *fakeDenylis
 	tokens := &fakeTokens{grant: fleet.TokenGrant{Environment: "production"}, usesLeft: 1, expiresAt: time.Now().Add(time.Hour)}
 	creds := newFakeCredentials()
 	deny := &fakeDenylist{denied: map[string]bool{}}
-	return ca, tokens, creds, deny, fleet.NewEnroller(ca, tokens, creds, deny)
+	grants := newFakeGrants()
+	return ca, tokens, creds, deny, fleet.NewEnroller(ca, tokens, creds, deny, grants), grants
 }
 
 func csrFor(t *testing.T, nodeID string) []byte {
@@ -97,7 +131,7 @@ func csrFor(t *testing.T, nodeID string) []byte {
 
 func TestEnrollIssuesACertificate(t *testing.T) {
 	t.Parallel()
-	_, _, _, _, enroller := testEnv(t)
+	_, _, _, _, enroller, _ := testEnv(t)
 
 	leaf, err := enroller.Enroll(context.Background(), fleet.EnrollRequest{
 		TokenPlaintext: "atlas_enroll_whatever",
@@ -115,7 +149,7 @@ func TestEnrollIssuesACertificate(t *testing.T) {
 
 func TestEnrollRefusesAnExhaustedToken(t *testing.T) {
 	t.Parallel()
-	_, tokens, _, _, enroller := testEnv(t)
+	_, tokens, _, _, enroller, _ := testEnv(t)
 	tokens.usesLeft = 0
 
 	_, err := enroller.Enroll(context.Background(), fleet.EnrollRequest{
@@ -128,7 +162,7 @@ func TestEnrollRefusesAnExhaustedToken(t *testing.T) {
 
 func TestEnrollRefusesAnExpiredToken(t *testing.T) {
 	t.Parallel()
-	_, tokens, _, _, enroller := testEnv(t)
+	_, tokens, _, _, enroller, _ := testEnv(t)
 	tokens.expiresAt = time.Now().Add(-time.Minute)
 
 	_, err := enroller.Enroll(context.Background(), fleet.EnrollRequest{
@@ -141,7 +175,7 @@ func TestEnrollRefusesAnExpiredToken(t *testing.T) {
 
 func TestEnrollRefusesOutsideAllowedCIDR(t *testing.T) {
 	t.Parallel()
-	_, tokens, _, _, enroller := testEnv(t)
+	_, tokens, _, _, enroller, _ := testEnv(t)
 	_, cidr, _ := net.ParseCIDR("10.0.0.0/8")
 	tokens.allowedCIDR = cidr
 
@@ -159,7 +193,7 @@ func TestEnrollRefusesOutsideAllowedCIDR(t *testing.T) {
 // refused, or a stolen token could take over an existing node.
 func TestEnrollRefusesReenrollmentOfAnActiveNode(t *testing.T) {
 	t.Parallel()
-	_, tokens, _, _, enroller := testEnv(t)
+	_, tokens, _, _, enroller, _ := testEnv(t)
 	ctx := context.Background()
 
 	if _, err := enroller.Enroll(ctx, fleet.EnrollRequest{
@@ -183,7 +217,7 @@ func TestEnrollRefusesReenrollmentOfAnActiveNode(t *testing.T) {
 // The explicit grant is the one documented way past the refusal above.
 func TestEnrollAllowsReenrollmentWithAnExplicitGrant(t *testing.T) {
 	t.Parallel()
-	_, tokens, creds, _, enroller := testEnv(t)
+	_, tokens, creds, _, enroller, _ := testEnv(t)
 	ctx := context.Background()
 
 	first, err := enroller.Enroll(ctx, fleet.EnrollRequest{
@@ -213,7 +247,7 @@ func TestEnrollAllowsReenrollmentWithAnExplicitGrant(t *testing.T) {
 
 func TestEnrollRefusesADeniedNode(t *testing.T) {
 	t.Parallel()
-	_, _, _, deny, enroller := testEnv(t)
+	_, _, _, deny, enroller, _ := testEnv(t)
 	deny.denied["node-bad"] = true
 
 	_, err := enroller.Enroll(context.Background(), fleet.EnrollRequest{
@@ -224,9 +258,68 @@ func TestEnrollRefusesADeniedNode(t *testing.T) {
 	}
 }
 
+// Enrollment must grant the one privileged operation that exists today, by
+// default — this is what preserves current behavior for the existing fleet
+// (see migrations/0010's backfill) while making the grant an explicit,
+// independently revocable record instead of an implicit side effect of
+// holding a live certificate.
+func TestEnrollGrantsContainerLogsByDefault(t *testing.T) {
+	t.Parallel()
+	_, _, _, _, enroller, grants := testEnv(t)
+
+	if _, err := enroller.Enroll(context.Background(), fleet.EnrollRequest{
+		TokenPlaintext: "x", NodeID: "node-1", CSRDER: csrFor(t, "node-1"),
+	}); err != nil {
+		t.Fatalf("Enroll: %v", err)
+	}
+
+	granted, err := grants.IsGranted(context.Background(), "node-1", fleet.OperationContainerLogs)
+	if err != nil {
+		t.Fatalf("IsGranted: %v", err)
+	}
+	if !granted {
+		t.Error("Enroll did not grant container_logs by default")
+	}
+}
+
+// The security property the design set out to guarantee: authorization and
+// authentication are independently revocable. A re-enrollment (a fresh
+// authentication event) must never silently restore an authorization an
+// operator already revoked.
+func TestEnrollDoesNotRestoreARevokedGrantOnReenrollment(t *testing.T) {
+	t.Parallel()
+	_, tokens, _, _, enroller, grants := testEnv(t)
+	ctx := context.Background()
+
+	if _, err := enroller.Enroll(ctx, fleet.EnrollRequest{
+		TokenPlaintext: "x", NodeID: "node-1", CSRDER: csrFor(t, "node-1"),
+	}); err != nil {
+		t.Fatalf("first Enroll: %v", err)
+	}
+	if err := grants.RevokeGrant(ctx, "node-1", fleet.OperationContainerLogs, "operator revoked", time.Now()); err != nil {
+		t.Fatalf("RevokeGrant: %v", err)
+	}
+
+	tokens.usesLeft = 1
+	tokens.grant.AllowReenroll = true
+	if _, err := enroller.Enroll(ctx, fleet.EnrollRequest{
+		TokenPlaintext: "y", NodeID: "node-1", CSRDER: csrFor(t, "node-1"),
+	}); err != nil {
+		t.Fatalf("re-enrollment: %v", err)
+	}
+
+	granted, err := grants.IsGranted(ctx, "node-1", fleet.OperationContainerLogs)
+	if err != nil {
+		t.Fatalf("IsGranted: %v", err)
+	}
+	if granted {
+		t.Error("re-enrollment silently restored a previously revoked AgentOps grant")
+	}
+}
+
 func TestRenewIssuesAFreshCertificateForTheSameIdentity(t *testing.T) {
 	t.Parallel()
-	_, _, _, _, enroller := testEnv(t)
+	_, _, _, _, enroller, _ := testEnv(t)
 	ctx := context.Background()
 
 	leaf, err := enroller.Enroll(ctx, fleet.EnrollRequest{
@@ -254,7 +347,7 @@ func TestRenewIssuesAFreshCertificateForTheSameIdentity(t *testing.T) {
 // window where two live-looking credentials exist for one node.
 func TestRenewRefusesAnAlreadySupersededCertificate(t *testing.T) {
 	t.Parallel()
-	_, _, _, _, enroller := testEnv(t)
+	_, _, _, _, enroller, _ := testEnv(t)
 	ctx := context.Background()
 
 	leaf, err := enroller.Enroll(ctx, fleet.EnrollRequest{
@@ -275,7 +368,7 @@ func TestRenewRefusesAnAlreadySupersededCertificate(t *testing.T) {
 
 func TestRenewRefusesADeniedNode(t *testing.T) {
 	t.Parallel()
-	_, _, _, deny, enroller := testEnv(t)
+	_, _, _, deny, enroller, _ := testEnv(t)
 	ctx := context.Background()
 
 	leaf, err := enroller.Enroll(ctx, fleet.EnrollRequest{
@@ -293,7 +386,7 @@ func TestRenewRefusesADeniedNode(t *testing.T) {
 
 func TestShouldRenewCrossesAtHalfLifetime(t *testing.T) {
 	t.Parallel()
-	_, _, _, _, enroller := testEnv(t)
+	_, _, _, _, enroller, _ := testEnv(t)
 
 	leaf, err := enroller.Enroll(context.Background(), fleet.EnrollRequest{
 		TokenPlaintext: "x", NodeID: "node-1", CSRDER: csrFor(t, "node-1"),

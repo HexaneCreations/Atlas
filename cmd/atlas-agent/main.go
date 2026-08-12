@@ -97,6 +97,24 @@ Environment variables:
   ATLAS_AGENT_INVENTORY_INTERVAL  Inventory push interval (default 60s)
   ATLAS_AGENT_LOG_LEVEL           info or debug (default info)
 
+Multiple Control Planes (optional):
+  The variables above always configure the implicit "default" relationship.
+  To connect to additional control planes simultaneously (e.g. production and
+  development), set:
+
+  ATLAS_AGENT_RELATIONSHIPS      Comma-separated relationship ids, e.g.
+                                  "production,development". "default" is
+                                  reserved.
+
+  For each id, the equivalent of every ATLAS_AGENT_* variable above is read
+  from ATLAS_AGENT_RELATIONSHIP_<ID>_*, e.g.
+  ATLAS_AGENT_RELATIONSHIP_PRODUCTION_CONTROL_PLANE_URL,
+  ATLAS_AGENT_RELATIONSHIP_PRODUCTION_TOKEN, and so on. These variables are
+  consulted only until a relationship first bootstraps successfully — after
+  that, its resolved configuration is persisted under its own data directory
+  and is authoritative; the environment variables are ignored on later
+  restarts.
+
 Flags:
 `)
 		flags.PrintDefaults()

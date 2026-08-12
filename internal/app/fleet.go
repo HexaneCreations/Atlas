@@ -65,8 +65,11 @@ type fleetPipeline struct {
 	// the Relay's rendezvous registry. A stale or missing entry surfaces
 	// naturally as a failed stream open, not as a separate liveness check.
 	peerByNode map[string]peer.ID
-	stopCh     chan struct{}
-	wg         sync.WaitGroup
+	// grants is the CP-side AgentOps authorization check — see ContainerLogs.
+	// Set once at Start alongside caCert/serverLeaf.
+	grants corefleet.GrantStore
+	stopCh chan struct{}
+	wg     sync.WaitGroup
 }
 
 func newFleetPipeline(cfg *config.Config, logger *slog.Logger, pool *postgres.Pool, collection *collectionPipeline,
@@ -93,7 +96,7 @@ func (f *fleetPipeline) Start(ctx context.Context) error {
 	fleetRepo := storagefleet.NewRepository(f.pool.DB())
 	invRepo := storageinventory.NewRepository(f.pool.DB())
 	metricRepo := f.collection.Repository()
-	enroller := corefleet.NewEnroller(ca, fleetRepo, fleetRepo, fleetRepo)
+	enroller := corefleet.NewEnroller(ca, fleetRepo, fleetRepo, fleetRepo, fleetRepo)
 
 	eventStore := coreeventstore.Store(storageeventstore.NewRepository(f.pool.DB()))
 	if f.onEvent != nil {
@@ -130,6 +133,7 @@ func (f *fleetPipeline) Start(ctx context.Context) error {
 	f.caCert = ca.Cert()
 	f.serverLeaf = serverLeaf
 	f.peerByNode = make(map[string]peer.ID)
+	f.grants = fleetRepo
 	f.mu.Unlock()
 
 	// libp2p is a second, POC listener for the same mux — see
@@ -260,11 +264,30 @@ func (f *fleetPipeline) ContainerLogs(ctx context.Context, nodeID, containerID s
 	errCh := make(chan error, 1)
 
 	f.mu.RLock()
+	grants := f.grants
 	pid, known := f.peerByNode[nodeID]
 	p2pHost := f.libp2pHost
 	caCert := f.caCert
 	serverLeaf := f.serverLeaf
 	f.mu.RUnlock()
+
+	// Authorization is explicit and independent of authentication: a live,
+	// non-denylisted certificate is never by itself sufficient to invoke a
+	// privileged operation (see docs/architecture/security.md).
+	granted, err := grants.IsGranted(ctx, nodeID, corefleet.OperationContainerLogs)
+	if err != nil {
+		close(lines)
+		errCh <- errs.Wrap(err, errs.CodeUnavailable, "could not check agent operation authorization").WithOp(op).WithDetail("node", nodeID)
+		close(errCh)
+		return lines, errCh
+	}
+	if !granted {
+		close(lines)
+		errCh <- errs.New(errs.CodePermissionDenied, "this node is not authorized for container log streaming").
+			WithOp(op).WithDetail("node", nodeID)
+		close(errCh)
+		return lines, errCh
+	}
 
 	if !known || p2pHost == nil {
 		close(lines)

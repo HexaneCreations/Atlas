@@ -195,8 +195,58 @@ func (r *Repository) Allow(ctx context.Context, nodeID string) error {
 	return nil
 }
 
+// IsGranted implements [corefleet.GrantStore].
+func (r *Repository) IsGranted(ctx context.Context, nodeID, operation string) (bool, error) {
+	const op = "fleet.Repository.IsGranted"
+
+	const q = `SELECT 1 FROM agent_operation_grants WHERE node_id = $1 AND operation = $2 AND revoked_at IS NULL`
+	var one int
+	err := r.pool.QueryRow(ctx, q, nodeID, operation).Scan(&one)
+	switch {
+	case err == nil:
+		return true, nil
+	case err == pgx.ErrNoRows:
+		return false, nil
+	default:
+		return false, errs.Wrap(err, errs.CodeUnavailable, "could not check the agent operation grant").WithOp(op)
+	}
+}
+
+// Grant implements [corefleet.GrantStore]. ON CONFLICT DO NOTHING is the
+// idempotency the interface requires: an existing row, granted or revoked,
+// is never overwritten.
+func (r *Repository) Grant(ctx context.Context, nodeID, operation, grantedBy string, now time.Time) error {
+	const op = "fleet.Repository.Grant"
+
+	const q = `
+		INSERT INTO agent_operation_grants (node_id, operation, granted_at, granted_by)
+		VALUES ($1, $2, $3, NULLIF($4, ''))
+		ON CONFLICT (node_id, operation) DO NOTHING`
+
+	if _, err := r.pool.Exec(ctx, q, nodeID, operation, now, grantedBy); err != nil {
+		return errs.Wrap(err, errs.CodeUnavailable, "could not record the agent operation grant").WithOp(op)
+	}
+	return nil
+}
+
+// RevokeGrant implements [corefleet.GrantStore].
+func (r *Repository) RevokeGrant(ctx context.Context, nodeID, operation, reason string, now time.Time) error {
+	const op = "fleet.Repository.RevokeGrant"
+
+	const q = `
+		UPDATE agent_operation_grants
+		SET revoked_at = $3, revoked_reason = $4
+		WHERE node_id = $1 AND operation = $2 AND revoked_at IS NULL`
+
+	if _, err := r.pool.Exec(ctx, q, nodeID, operation, now, reason); err != nil {
+		return errs.Wrap(err, errs.CodeUnavailable, "could not revoke the agent operation grant").WithOp(op)
+	}
+	return nil
+}
+
 var (
 	_ corefleet.TokenStore      = (*Repository)(nil)
 	_ corefleet.CredentialStore = (*Repository)(nil)
 	_ corefleet.DenylistStore   = (*Repository)(nil)
+	_ corefleet.GrantStore      = (*Repository)(nil)
 )

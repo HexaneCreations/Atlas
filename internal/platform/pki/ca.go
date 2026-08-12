@@ -85,6 +85,51 @@ func trimLeadingSlash(s string) string {
 	return s
 }
 
+// controlPlaneURIHost is the URI SAN host distinguishing a control plane's
+// identity from a node's (see NodeURI) — same scheme, different host, so a
+// caller reading a certificate's URI SANs can never confuse the two roles.
+const controlPlaneURIHost = "control-plane"
+
+// ControlPlaneURI returns the URI SAN identifying a control plane. id must
+// always be that control plane's CA fingerprint (see Fingerprint) — the only
+// cryptographically authoritative identity a control plane has. A
+// human-readable label (e.g. an operator-assigned ATLAS_FLEET_ID) must never
+// be passed here: it plays no part in verification.
+func ControlPlaneURI(id string) *url.URL {
+	return &url.URL{Scheme: NodeURIScheme, Host: controlPlaneURIHost, Path: "/" + id}
+}
+
+// ControlPlaneIDFromURI extracts a control plane id from a URI SAN, if it
+// names one.
+func ControlPlaneIDFromURI(u *url.URL) (string, bool) {
+	if u == nil || u.Scheme != NodeURIScheme || u.Host != controlPlaneURIHost {
+		return "", false
+	}
+	id := trimLeadingSlash(u.Path)
+	if id == "" {
+		return "", false
+	}
+	return id, true
+}
+
+// ControlPlaneID extracts and validates a control plane's identity from its
+// own certificate — the counterpart to PeerNodeID for the reversed AgentOps
+// role. Like PeerNodeID, it only reads the identity out of a certificate
+// already known to chain to a trusted CA; it does not itself verify the
+// chain.
+func ControlPlaneID(cert *x509.Certificate) (string, error) {
+	const op = "pki.ControlPlaneID"
+	if cert == nil {
+		return "", errs.New(errs.CodeUnauthenticated, "no certificate was presented").WithOp(op)
+	}
+	for _, u := range cert.URIs {
+		if id, ok := ControlPlaneIDFromURI(u); ok {
+			return id, nil
+		}
+	}
+	return "", errs.New(errs.CodeUnauthenticated, "certificate carries no Atlas control-plane identity").WithOp(op)
+}
+
 // CA is Atlas's private certificate authority.
 //
 // A CA value is safe for concurrent use: signing operations only read the

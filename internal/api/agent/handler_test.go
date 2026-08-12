@@ -65,6 +65,12 @@ func (f *fakeDenylist) IsDenied(_ context.Context, nodeID string) (bool, error) 
 	return f.denied[nodeID], nil
 }
 
+type fakeGrants struct{}
+
+func (fakeGrants) IsGranted(context.Context, string, string) (bool, error)              { return true, nil }
+func (fakeGrants) Grant(context.Context, string, string, string, time.Time) error       { return nil }
+func (fakeGrants) RevokeGrant(context.Context, string, string, string, time.Time) error { return nil }
+
 type fakeClockSkew struct {
 	nodeID string
 	skew   float64
@@ -106,7 +112,7 @@ func testHandler(t *testing.T, tokens *fakeTokens, creds *fakeCredentials, deny 
 	}
 	deps := agent.Deps{
 		CA:       ca,
-		Enroller: fleet.NewEnroller(ca, tokens, creds, deny),
+		Enroller: fleet.NewEnroller(ca, tokens, creds, deny, fakeGrants{}),
 		Denylist: deny,
 		Router:   router,
 	}

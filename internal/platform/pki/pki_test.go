@@ -138,6 +138,136 @@ func TestNodeIDFromURIRejectsForeignSchemes(t *testing.T) {
 	}
 }
 
+// The server leaf's cryptographic identity must always be the CA's own
+// fingerprint — never an operator-assigned label — and CommonName stays
+// informational only (see ControlPlaneURI's doc).
+func TestNewServerLeafHasControlPlaneURISAN(t *testing.T) {
+	t.Parallel()
+
+	ca := testCA(t)
+	serverCert, err := pki.NewServerLeaf(ca, []string{"127.0.0.1"})
+	if err != nil {
+		t.Fatalf("NewServerLeaf: %v", err)
+	}
+	leaf, err := x509.ParseCertificate(serverCert.Certificate[0])
+	if err != nil {
+		t.Fatalf("ParseCertificate: %v", err)
+	}
+
+	if len(leaf.URIs) != 1 {
+		t.Fatalf("server leaf has %d URI SANs, want 1", len(leaf.URIs))
+	}
+	wantID := pki.Fingerprint(ca.Cert())
+	if got := leaf.URIs[0].String(); got != "atlas://control-plane/"+wantID {
+		t.Errorf("URI SAN = %q, want atlas://control-plane/%s", got, wantID)
+	}
+	if leaf.Subject.CommonName != pki.ControlPlaneCommonName {
+		t.Errorf("CommonName = %q, want %q (informational only, unchanged)", leaf.Subject.CommonName, pki.ControlPlaneCommonName)
+	}
+
+	gotID, err := pki.ControlPlaneID(leaf)
+	if err != nil {
+		t.Fatalf("ControlPlaneID: %v", err)
+	}
+	if gotID != wantID {
+		t.Errorf("ControlPlaneID = %q, want %q", gotID, wantID)
+	}
+}
+
+func TestControlPlaneIDFromURIRejectsForeignSchemes(t *testing.T) {
+	t.Parallel()
+
+	cases := []*url.URL{
+		{Scheme: "https", Host: "control-plane", Path: "/x"},
+		{Scheme: "atlas", Host: "node", Path: "/x"}, // a node identity, not a control plane's
+		{Scheme: "atlas", Host: "control-plane", Path: "/"},
+		nil,
+	}
+	for _, u := range cases {
+		if _, ok := pki.ControlPlaneIDFromURI(u); ok {
+			t.Errorf("ControlPlaneIDFromURI(%v) = ok, want rejected", u)
+		}
+	}
+}
+
+// The control plane's identity must survive its own server leaf being
+// reissued (renewal) — it is derived from the CA, not the leaf's own serial.
+func TestControlPlaneIDStableAcrossServerLeafReissuance(t *testing.T) {
+	t.Parallel()
+
+	ca := testCA(t)
+	leaf1, err := pki.NewServerLeaf(ca, nil)
+	if err != nil {
+		t.Fatalf("NewServerLeaf: %v", err)
+	}
+	leaf2, err := pki.NewServerLeaf(ca, nil)
+	if err != nil {
+		t.Fatalf("NewServerLeaf: %v", err)
+	}
+	cert1, _ := x509.ParseCertificate(leaf1.Certificate[0])
+	cert2, _ := x509.ParseCertificate(leaf2.Certificate[0])
+
+	id1, err := pki.ControlPlaneID(cert1)
+	if err != nil {
+		t.Fatalf("ControlPlaneID: %v", err)
+	}
+	id2, err := pki.ControlPlaneID(cert2)
+	if err != nil {
+		t.Fatalf("ControlPlaneID: %v", err)
+	}
+	if id1 != id2 {
+		t.Errorf("control plane identity changed across reissuance: %q vs %q", id1, id2)
+	}
+}
+
+// Two distinct control planes (distinct CAs) must never resolve to the same
+// identity — this is what a multi-Control-Plane Agent relies on to tell them
+// apart.
+func TestControlPlaneIDDiffersAcrossCAs(t *testing.T) {
+	t.Parallel()
+
+	caA := testCA(t)
+	caB := testCA(t)
+	leafA, err := pki.NewServerLeaf(caA, nil)
+	if err != nil {
+		t.Fatalf("NewServerLeaf: %v", err)
+	}
+	leafB, err := pki.NewServerLeaf(caB, nil)
+	if err != nil {
+		t.Fatalf("NewServerLeaf: %v", err)
+	}
+	certA, _ := x509.ParseCertificate(leafA.Certificate[0])
+	certB, _ := x509.ParseCertificate(leafB.Certificate[0])
+
+	idA, err := pki.ControlPlaneID(certA)
+	if err != nil {
+		t.Fatalf("ControlPlaneID: %v", err)
+	}
+	idB, err := pki.ControlPlaneID(certB)
+	if err != nil {
+		t.Fatalf("ControlPlaneID: %v", err)
+	}
+	if idA == idB {
+		t.Error("two distinct CAs produced the same control-plane identity")
+	}
+}
+
+func TestControlPlaneIDRejectsCertificateWithoutControlPlaneURI(t *testing.T) {
+	t.Parallel()
+
+	ca := testCA(t)
+	csrDER, _, _ := pki.NewCSR("node-not-a-cp")
+	csr, _ := pki.ParseCSR(csrDER)
+	agentLeaf, err := ca.IssueLeaf(csr, "node-not-a-cp") // a node leaf, not a control-plane leaf
+	if err != nil {
+		t.Fatalf("IssueLeaf: %v", err)
+	}
+
+	if _, err := pki.ControlPlaneID(agentLeaf); err == nil {
+		t.Fatal("ControlPlaneID accepted a node certificate")
+	}
+}
+
 func TestLeafLifetimeIsShort(t *testing.T) {
 	t.Parallel()
 

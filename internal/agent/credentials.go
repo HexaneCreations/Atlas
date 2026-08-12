@@ -164,18 +164,27 @@ func savePinnedCA(dataDir string, cert *x509.Certificate) error {
 	return os.WriteFile(pinnedCAPath(dataDir), out, 0o644)
 }
 
-// bootstrap ensures the agent holds a valid certificate, enrolling if none
-// exists, and returns the CA certificate and a live credential holder kept
-// current by the renewal loop.
-func bootstrap(ctx context.Context, cfg Config, nodeID string, logger *slog.Logger, dial dialContextFunc) (*x509.Certificate, *credentialHolder, error) {
+// bootstrap ensures the agent holds a valid certificate for one relationship,
+// enrolling if none exists, and returns the CA certificate and a live
+// credential holder kept current by that relationship's renewal loop.
+//
+// Both success paths below persist relCfg to relationship.json (a no-op if
+// already present — see persistRelationshipConfig) — this is what makes a
+// relationship's resolved connection config DataDir-authoritative from the
+// moment it first has a usable credential, whether that credential was just
+// freshly enrolled or was already on disk from before Phase 3 (legacy-layout
+// adoption). A failure to persist is logged, not fatal: the credential is
+// still valid either way, and the next successful bootstrap will retry the
+// write.
+func bootstrap(ctx context.Context, relCfg relationshipConfig, nodeID string, logger *slog.Logger, dial dialContextFunc) (*x509.Certificate, *credentialHolder, error) {
 	var caCert *x509.Certificate
-	if cfg.CABundlePath != "" {
-		cert, err := loadCABundle(cfg.CABundlePath)
+	if relCfg.CABundlePath != "" {
+		cert, err := loadCABundle(relCfg.CABundlePath)
 		if err != nil {
 			return nil, nil, fmt.Errorf("load CA bundle: %w", err)
 		}
 		caCert = cert
-	} else if pinned, err := loadPinnedCA(cfg.DataDir); err == nil {
+	} else if pinned, err := loadPinnedCA(relCfg.dataDir); err == nil {
 		// A CA pinned by TOFU on a previous enrollment (see below). Loading
 		// it back here — rather than repeating TOFU on every restart — is
 		// what makes the pin durable: an attacker who was not in position to
@@ -186,21 +195,24 @@ func bootstrap(ctx context.Context, cfg Config, nodeID string, logger *slog.Logg
 
 	holder := &credentialHolder{}
 
-	leaf, key, err := pki.LoadLeaf(cfg.DataDir)
+	leaf, key, err := pki.LoadLeaf(relCfg.dataDir)
 	if err == nil {
 		holder.set(pki.LeafTLSCertificate(leaf, key), leaf)
 		if caCert == nil {
 			return nil, nil, fmt.Errorf(
 				"a certificate exists at %s but its pinned CA (%s) is missing; "+
-					"set ATLAS_AGENT_CA_BUNDLE or remove the data dir to re-enroll",
-				cfg.DataDir, pinnedCAPath(cfg.DataDir))
+					"set the CA bundle path or remove the data dir to re-enroll",
+				relCfg.dataDir, pinnedCAPath(relCfg.dataDir))
+		}
+		if err := persistRelationshipConfig(relCfg); err != nil {
+			logger.WarnContext(ctx, "could not persist relationship config", slog.String("relationship", relCfg.id), slog.String("error", err.Error()))
 		}
 		return caCert, holder, nil
 	}
 
-	logger.InfoContext(ctx, "no existing certificate found; enrolling")
-	if cfg.Token == "" {
-		return nil, nil, fmt.Errorf("no certificate on disk and ATLAS_AGENT_TOKEN is not set")
+	logger.InfoContext(ctx, "no existing certificate found; enrolling", slog.String("relationship", relCfg.id))
+	if relCfg.Token == "" {
+		return nil, nil, fmt.Errorf("no certificate on disk and no enrollment token is set")
 	}
 
 	var pool *x509.CertPool
@@ -214,8 +226,8 @@ func bootstrap(ctx context.Context, cfg Config, nodeID string, logger *slog.Logg
 		return nil, nil, err
 	}
 
-	bc := newBootstrapClient(cfg.ControlPlaneURL, pool, dial)
-	resp, err := bc.enroll(ctx, cfg.Token, nodeID, csrDER)
+	bc := newBootstrapClient(relCfg.ControlPlaneURL, pool, dial)
+	resp, err := bc.enroll(ctx, relCfg.Token, nodeID, csrDER)
 	if err != nil {
 		return nil, nil, fmt.Errorf("enroll: %w", err)
 	}
@@ -238,18 +250,22 @@ func bootstrap(ctx context.Context, cfg Config, nodeID string, logger *slog.Logg
 		if err != nil {
 			return nil, nil, err
 		}
-		if err := savePinnedCA(cfg.DataDir, caCert); err != nil {
+		if err := savePinnedCA(relCfg.dataDir, caCert); err != nil {
 			return nil, nil, fmt.Errorf("persist pinned CA: %w", err)
 		}
 		logger.WarnContext(ctx, "pinned the control plane's CA on first contact (TOFU); "+
-			"set ATLAS_AGENT_CA_BUNDLE for a verified bootstrap in production")
+			"set a CA bundle path for a verified bootstrap in production", slog.String("relationship", relCfg.id))
 	}
 
-	if err := pki.SaveLeaf(cfg.DataDir, cert.Raw, csrKey); err != nil {
+	if err := pki.SaveLeaf(relCfg.dataDir, cert.Raw, csrKey); err != nil {
 		return nil, nil, err
 	}
 	holder.set(pki.LeafTLSCertificate(cert, csrKey), cert)
-	logger.InfoContext(ctx, "enrolled", slog.String("node_id", nodeID), slog.Time("not_after", cert.NotAfter))
+	logger.InfoContext(ctx, "enrolled", slog.String("relationship", relCfg.id), slog.String("node_id", nodeID), slog.Time("not_after", cert.NotAfter))
+
+	if err := persistRelationshipConfig(relCfg); err != nil {
+		logger.WarnContext(ctx, "could not persist relationship config", slog.String("relationship", relCfg.id), slog.String("error", err.Error()))
+	}
 
 	return caCert, holder, nil
 }
@@ -272,12 +288,12 @@ var (
 // bootstrapMaxElapsed has passed since the first attempt — at which point
 // the last error is returned so the caller can still exit fatally on a
 // truly stuck configuration.
-func bootstrapWithRetry(ctx context.Context, cfg Config, nodeID string, logger *slog.Logger, dial dialContextFunc) (*x509.Certificate, *credentialHolder, error) {
+func bootstrapWithRetry(ctx context.Context, relCfg relationshipConfig, nodeID string, logger *slog.Logger, dial dialContextFunc) (*x509.Certificate, *credentialHolder, error) {
 	deadline := time.Now().Add(bootstrapMaxElapsed)
 	backoff := bootstrapBackoffMin
 
 	for attempt := 1; ; attempt++ {
-		caCert, holder, err := bootstrap(ctx, cfg, nodeID, logger, dial)
+		caCert, holder, err := bootstrap(ctx, relCfg, nodeID, logger, dial)
 		if err == nil {
 			return caCert, holder, nil
 		}
@@ -303,9 +319,12 @@ func jitter(d time.Duration) time.Duration {
 	return time.Duration(rand.Int64N(int64(d) + 1))
 }
 
-// renewalLoop renews the agent's certificate at [pki.RenewAt] of its
-// lifetime, updating holder in place.
-func renewalLoop(ctx context.Context, cfg Config, nodeID string, caCert *x509.Certificate, holder *credentialHolder, logger *slog.Logger, dial dialContextFunc) {
+// renewalLoop renews one relationship's certificate at [pki.RenewAt] of its
+// lifetime, updating holder in place. Independent of every other
+// relationship's loop — a failure here (unreachable control plane, denied
+// node) is logged and retried on the next tick, and never touches another
+// relationship's holder, caCert, or dataDir.
+func renewalLoop(ctx context.Context, relCfg relationshipConfig, nodeID string, caCert *x509.Certificate, holder *credentialHolder, logger *slog.Logger, dial dialContextFunc) {
 	pool := x509.NewCertPool()
 	pool.AddCert(caCert)
 
@@ -332,7 +351,7 @@ func renewalLoop(ctx context.Context, cfg Config, nodeID string, caCert *x509.Ce
 		}
 
 		tlsCfg := &tls.Config{MinVersion: tls.VersionTLS13, RootCAs: pool, GetClientCertificate: holder.GetClientCertificate}
-		resp, err := renew(ctx, cfg.ControlPlaneURL, tlsCfg, csrDER, dial)
+		resp, err := renew(ctx, relCfg.ControlPlaneURL, tlsCfg, csrDER, dial)
 		if err != nil {
 			logger.ErrorContext(ctx, "certificate renewal failed", slog.String("error", err.Error()))
 			continue
@@ -349,7 +368,7 @@ func renewalLoop(ctx context.Context, cfg Config, nodeID string, caCert *x509.Ce
 			continue
 		}
 
-		if err := pki.SaveLeaf(cfg.DataDir, cert.Raw, key); err != nil {
+		if err := pki.SaveLeaf(relCfg.dataDir, cert.Raw, key); err != nil {
 			logger.ErrorContext(ctx, "could not persist renewed certificate", slog.String("error", err.Error()))
 			continue
 		}

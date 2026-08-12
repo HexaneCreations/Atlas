@@ -67,12 +67,13 @@ type Enroller struct {
 	tokens      TokenStore
 	credentials CredentialStore
 	denylist    DenylistStore
+	grants      GrantStore
 	now         func() time.Time
 }
 
 // NewEnroller builds an Enroller.
-func NewEnroller(ca *pki.CA, tokens TokenStore, credentials CredentialStore, denylist DenylistStore) *Enroller {
-	return &Enroller{ca: ca, tokens: tokens, credentials: credentials, denylist: denylist, now: time.Now}
+func NewEnroller(ca *pki.CA, tokens TokenStore, credentials CredentialStore, denylist DenylistStore, grants GrantStore) *Enroller {
+	return &Enroller{ca: ca, tokens: tokens, credentials: credentials, denylist: denylist, grants: grants, now: time.Now}
 }
 
 // EnrollRequest is what an agent presents to bootstrap a certificate.
@@ -156,6 +157,14 @@ func (e *Enroller) Enroll(ctx context.Context, req EnrollRequest) (*x509.Certifi
 		EnrolledVia: HashToken(req.TokenPlaintext),
 	}); err != nil {
 		return nil, errs.Wrap(err, errs.CodeUnavailable, "could not record the issued credential").WithOp(op)
+	}
+
+	// Default-allow, preserving pre-authorization behavior: enrollment grants
+	// the one privileged operation that exists today. Idempotent by design
+	// (see GrantStore.Grant) — a re-enrollment of an already-revoked node
+	// must not silently restore what an operator revoked.
+	if err := e.grants.Grant(ctx, req.NodeID, OperationContainerLogs, "enrollment", now); err != nil {
+		return nil, errs.Wrap(err, errs.CodeUnavailable, "could not record the default agent operation grant").WithOp(op)
 	}
 
 	return leaf, nil

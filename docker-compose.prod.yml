@@ -5,10 +5,11 @@
 # on the production host, and for CI/CD to `pull` and `up` a released image —
 # see docs/operations/deployment.md, which this follows directly.
 #
-# PostgreSQL is external/managed in this deployment — deployment.md's own
-# examples all point Atlas at an existing `postgres.internal`, never one this
-# Compose file provisions, so there is deliberately no `postgres` service
-# here. Point ATLAS_DATABASE_HOST (in .env.prod) at your real instance.
+# PostgreSQL runs as the `postgres` service below, on atlas-internal only —
+# never published to the host (see its "ports"/"expose" notes). ATLAS_
+# DATABASE_HOST (in .env.prod) points at it by its Compose DNS name,
+# "postgres". An external/managed instance remains a valid alternative;
+# point ATLAS_DATABASE_HOST at it instead and drop the postgres service.
 #
 # This IS the Fleet control plane: Fleet/libp2p are enabled via .env.prod,
 # reaching Atlas Relay entirely by dialing out (see the atlas-server service
@@ -43,6 +44,63 @@ services:
     # A chown needs no network at all.
     network_mode: none
 
+  postgres:
+    # migrations/0001_extensions.sql runs `CREATE EXTENSION IF NOT EXISTS
+    # timescaledb`, a hard requirement (docs/adr/0003-postgresql-
+    # timescaledb-datastore.md) that plain postgres images don't ship. Same
+    # tag docker-compose.yml (development) and .github/workflows/ci.yml
+    # already pin, so this is not a second, drifting choice of version.
+    image: timescale/timescaledb:2.17.2-pg17
+    # Distinct from docker-compose.yml's (development) container_name and
+    # volume name — both are "atlas-postgres"/"atlas-postgres-data" there
+    # too, and Docker's container/volume namespace is global to the host, so
+    # running both stacks side by side collides otherwise.
+    container_name: atlas-postgres-prod
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: atlas
+      POSTGRES_USER: atlas
+      # Sourced from the same secret atlas-server already authenticates
+      # with (see atlas-server's ATLAS_DATABASE_PASSWORD_FILE below) rather
+      # than a literal POSTGRES_PASSWORD, so the password is never written
+      # into this tracked file and the two services can never drift apart.
+      POSTGRES_PASSWORD_FILE: /run/secrets/atlas_db_password
+      # Avoids initdb failing on a fresh volume whose root already contains
+      # filesystem metadata (e.g. lost+found on some Linux/ext4 hosts) — a
+      # documented caveat of mounting a volume directly at the Postgres
+      # image's default PGDATA.
+      PGDATA: /var/lib/postgresql/data/pgdata
+    secrets:
+      - atlas_db_password
+    networks:
+      - atlas-internal
+    # Not published — see docker-compose.prod.yml's header comment. Only
+    # reachable from other atlas-internal services, by "postgres:5432".
+    expose:
+      - "5432"
+    volumes:
+      - atlas-postgres-data-prod:/var/lib/postgresql/data
+    cap_drop:
+      - ALL
+    # The official image's entrypoint runs as root first to chown/chmod
+    # PGDATA and /var/run/postgresql, then setuid/setgid down to the
+    # "postgres" user before the server itself starts — verified: a bare
+    # `cap_drop: ALL` fails both the chown and the chmod with "Operation not
+    # permitted". Same category of fix as atlas-ui's own cap_add, for nginx.
+    cap_add:
+      - CHOWN
+      - FOWNER
+      - SETUID
+      - SETGID
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U atlas -d atlas"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
   atlas-server:
     # ATLAS_SERVER_IMAGE lets CI/CD point at a registry tag; unset, this
     # builds from the same production Dockerfile the image target already
@@ -59,6 +117,8 @@ services:
     depends_on:
       atlas-fleet-volume-init:
         condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
     # ATLAS_ENV_FILE lets `config`/`build` be validated against
     # .env.prod.example alone, with no real .env.prod ever created — see the
     # report's "Validation results":
@@ -127,13 +187,13 @@ services:
     restart: unless-stopped
     networks:
       - atlas-internal
+    # Published to loopback only: an existing host/system Caddy (managed
+    # outside this Compose stack) is the public entry point and reverse-
+    # proxies to 127.0.0.1:8081, satisfying docs/operations/deployment.md's
+    # "an authenticating reverse proxy is mandatory in front of Atlas"
+    # requirement without a Caddy container in this stack.
     ports:
-      # The one public port in this stack. docs/operations/deployment.md is
-      # explicit that an authenticating reverse proxy is mandatory in front
-      # of Atlas until authentication ships — see the report: this container
-      # serves plain HTTP and expects that proxy (TLS + auth) in front of it,
-      # the same role its nginx example plays in front of atlas-server today.
-      - "${ATLAS_UI_PORT:-80}:80"
+      - "127.0.0.1:8081:80"
     read_only: true
     tmpfs:
       - /var/cache/nginx
@@ -169,6 +229,8 @@ networks:
 volumes:
   atlas-fleet-data:
     name: atlas-fleet-data
+  atlas-postgres-data-prod:
+    name: atlas-postgres-data-prod
 
 secrets:
   # File-based, matching docs/operations/deployment.md's

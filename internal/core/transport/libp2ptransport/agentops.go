@@ -172,19 +172,33 @@ func verifiedLeaf(rawCerts [][]byte, pool *x509.CertPool, usage x509.ExtKeyUsage
 }
 
 // verifyControlPlaneCertificate is the Agent's check on the certificate the
-// control plane presents: real cert, signed by the fleet CA, AND
-// specifically the control plane's own identity — not merely any certificate
-// that CA happens to have issued (agent leaf certs are signed by the same
-// CA). This is what stops one Agent from posing as the control plane to
-// another.
-func verifyControlPlaneCertificate(pool *x509.CertPool) func([][]byte, [][]*x509.Certificate) error {
+// control plane presents: real cert, signed by caCert, AND specifically
+// identifying the control plane that CA belongs to — not merely any
+// certificate that CA happens to have issued (agent leaf certs are signed by
+// the same CA). The expected identity is derived from caCert itself (its own
+// fingerprint — see pki.Fingerprint and pki.ControlPlaneID) at verification
+// time, never from a separately stored value, so there is exactly one source
+// of truth for which control plane a given pinned CA belongs to. This is
+// what stops one Agent from posing as the control plane to another, and —
+// once an Agent trusts more than one CA, one per Control-Plane relationship
+// — is what lets each relationship's check stay scoped to its own CA rather
+// than accepting a certificate from any CA the Agent happens to trust.
+func verifyControlPlaneCertificate(caCert *x509.Certificate) func([][]byte, [][]*x509.Certificate) error {
+	pool := x509.NewCertPool()
+	pool.AddCert(caCert)
+	expectedID := pki.Fingerprint(caCert)
+
 	return func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
 		cert, err := verifiedLeaf(rawCerts, pool, x509.ExtKeyUsageServerAuth)
 		if err != nil {
 			return err
 		}
-		if cert.Subject.CommonName != pki.ControlPlaneCommonName {
-			return fmt.Errorf("presented certificate identifies %q, not the Atlas control plane", cert.Subject.CommonName)
+		gotID, err := pki.ControlPlaneID(cert)
+		if err != nil {
+			return err
+		}
+		if gotID != expectedID {
+			return fmt.Errorf("presented certificate identifies control plane %q, expected %q", gotID, expectedID)
 		}
 		return nil
 	}
@@ -305,33 +319,48 @@ func RequestContainerLogs(ctx context.Context, h host.Host, agentPeerID peer.ID,
 	return frames, nil
 }
 
-// RegisterAgentOpsHandler wires h to accept AgentOps streams from the
-// control plane. h need not, and for the Agent must not, accept new inbound
-// connections for this — see the package doc on [AgentOpsProtocolID]; this
-// only registers a handler for one more protocol on a host that already only
-// ever dials out.
+// AgentOpsRelationshipLookup resolves the trust and authorization context for
+// an inbound AgentOps stream, keyed by the libp2p peer it arrived from. An
+// Agent with more than one Control-Plane relationship has more than one CA
+// and more than one certificate to present — remotePeer is how a single
+// shared host tells which relationship's context applies to this particular
+// stream, since the underlying libp2p connection identity (unlike a raw TCP
+// connection) is already known before any TLS byte is exchanged. ok is false
+// for a peer this lookup does not recognize as belonging to any relationship
+// — the stream is rejected outright, the same silent-drop posture as an
+// unrecognized certificate.
 //
-// caCert authenticates the control plane's presented certificate against the
-// same fleet CA the Agent already trusts from enrollment. getCert supplies
-// the Agent's own certificate to present in return — a function rather than
-// a static value so a certificate renewed mid-session (see
-// credentialHolder.GetClientCertificate in internal/agent) is picked up by
-// the next handshake automatically, the same as every other Atlas TLS
-// config already does.
-func RegisterAgentOpsHandler(h host.Host, caCert *x509.Certificate, getCert func(*tls.ClientHelloInfo) (*tls.Certificate, error), logs ContainerLogsFunc, limiter *SessionLimiter) {
+// caCert is the specific relationship's CA — never any CA the process
+// happens to trust elsewhere, which is what stops one relationship's control
+// plane from ever being accepted as another's. getCert supplies that same
+// relationship's own certificate to present in return.
+type AgentOpsRelationshipLookup func(remotePeer peer.ID) (caCert *x509.Certificate, getCert func(*tls.ClientHelloInfo) (*tls.Certificate, error), allowContainerLogs bool, ok bool)
+
+// RegisterAgentOpsHandler wires h to accept AgentOps streams from any
+// Control-Plane relationship the Agent is bootstrapped for. h need not, and
+// for the Agent must not, accept new inbound connections for this — see the
+// package doc on [AgentOpsProtocolID]; this only registers a handler for one
+// more protocol on a host that already only ever dials out.
+func RegisterAgentOpsHandler(h host.Host, logs ContainerLogsFunc, limiter *SessionLimiter, lookup AgentOpsRelationshipLookup) {
 	if limiter == nil {
 		limiter = NewSessionLimiter(DefaultMaxConcurrentSessions)
 	}
 	h.SetStreamHandler(AgentOpsProtocolID, func(s network.Stream) {
-		handleAgentOpsStream(s, caCert, getCert, logs, limiter)
+		handleAgentOpsStream(s, lookup, logs, limiter)
 	})
 }
 
-func handleAgentOpsStream(s network.Stream, caCert *x509.Certificate, getCert func(*tls.ClientHelloInfo) (*tls.Certificate, error), logs ContainerLogsFunc, limiter *SessionLimiter) {
+func handleAgentOpsStream(s network.Stream, lookup AgentOpsRelationshipLookup, logs ContainerLogsFunc, limiter *SessionLimiter) {
 	defer s.Close()
 
-	pool := x509.NewCertPool()
-	pool.AddCert(caCert)
+	// Resolved once, before TLS starts, from the already-established libp2p
+	// connection's peer identity — not something learned mid-handshake. An
+	// unrecognized peer is dropped exactly like a failed handshake below:
+	// there is no one yet to report an error to.
+	caCert, getCert, allowContainerLogs, ok := lookup(s.Conn().RemotePeer())
+	if !ok {
+		return
+	}
 
 	tlsConn := tls.Server(streamConn{s}, &tls.Config{
 		MinVersion:     tls.VersionTLS13,
@@ -341,7 +370,7 @@ func handleAgentOpsStream(s network.Stream, caCert *x509.Certificate, getCert fu
 		// same reason as the control-plane side — see RequestContainerLogs.
 		ClientAuth:            tls.RequireAnyClientCert,
 		InsecureSkipVerify:    true,
-		VerifyPeerCertificate: verifyControlPlaneCertificate(pool),
+		VerifyPeerCertificate: verifyControlPlaneCertificate(caCert),
 	})
 
 	hsCtx, hsCancel := context.WithTimeout(context.Background(), handshakeTimeout)
@@ -368,6 +397,10 @@ func handleAgentOpsStream(s network.Stream, caCert *x509.Certificate, getCert fu
 
 	if req.Op != AgentOpContainerLogs {
 		_ = enc.Encode(AgentOpFrame{Type: "error", Reason: fmt.Sprintf("unsupported operation %q", req.Op)})
+		return
+	}
+	if !allowContainerLogs {
+		_ = enc.Encode(AgentOpFrame{Type: "error", Reason: "container log streaming is not authorized on this agent"})
 		return
 	}
 

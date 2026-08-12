@@ -10,10 +10,24 @@ import (
 	"time"
 
 	"github.com/hexane/atlas/internal/core/transport/libp2ptransport"
+	"github.com/hexane/atlas/internal/platform/errs"
 	"github.com/hexane/atlas/internal/platform/pki"
 	"github.com/hexane/atlas/internal/plugin/docker"
 	"github.com/libp2p/go-libp2p/core/peer"
 )
+
+// fakeGrants is an in-memory GrantStore, always-granted unless overridden.
+type fakeGrants struct{ granted bool }
+
+func (g *fakeGrants) IsGranted(context.Context, string, string) (bool, error) { return g.granted, nil }
+func (g *fakeGrants) Grant(context.Context, string, string, string, time.Time) error {
+	g.granted = true
+	return nil
+}
+func (g *fakeGrants) RevokeGrant(context.Context, string, string, string, time.Time) error {
+	g.granted = false
+	return nil
+}
 
 // newTestFleetPipeline builds a fleetPipeline with just enough state set
 // directly (bypassing Start, which needs a real Postgres pool) to exercise
@@ -32,6 +46,7 @@ func newTestFleetPipeline(t *testing.T) (*fleetPipeline, *pki.CA) {
 	f.caCert = ca.Cert()
 	f.serverLeaf = serverLeaf
 	f.peerByNode = make(map[string]peer.ID)
+	f.grants = &fakeGrants{granted: true}
 	return f, ca
 }
 
@@ -141,6 +156,49 @@ func TestRecordAgentPeerIgnoresUnauthenticatedRequests(t *testing.T) {
 	f.mu.RUnlock()
 	if n != 0 {
 		t.Errorf("registry has %d entries, want 0 for an unauthenticated request", n)
+	}
+}
+
+// --- Phase 2: AgentOps authorization, independent of authentication --------
+
+// A node with no active libp2p session would normally fail with "unavailable"
+// (see TestContainerLogsUnavailableWhenNodeNeverConnected) — but authorization
+// is checked first, so a node that additionally lacks a grant must fail with
+// a permission error, not "unavailable", and must never reach the peer
+// lookup at all.
+func TestContainerLogsDeniedWhenNotGranted(t *testing.T) {
+	f, _ := newTestFleetPipeline(t)
+	f.grants = &fakeGrants{granted: false}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	lines, errCh := f.ContainerLogs(ctx, "node-a", "c1", docker.LogOptions{})
+
+	if _, open := <-lines; open {
+		t.Fatal("expected lines to be closed immediately")
+	}
+	err := <-errCh
+	if err == nil {
+		t.Fatal("expected a permission error")
+	}
+	if errs.CodeOf(err) != errs.CodePermissionDenied {
+		t.Errorf("code = %q, want %q", errs.CodeOf(err), errs.CodePermissionDenied)
+	}
+}
+
+func TestContainerLogsAllowedWhenGranted(t *testing.T) {
+	f, _ := newTestFleetPipeline(t)
+	f.grants = &fakeGrants{granted: true}
+	// No libp2p session recorded: authorization passes, then the existing
+	// "no active session" check (below) takes over — proves authorization
+	// doesn't short-circuit the rest of the function when it succeeds.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, errCh := f.ContainerLogs(ctx, "node-a", "c1", docker.LogOptions{})
+
+	err := <-errCh
+	if err == nil || errs.CodeOf(err) != errs.CodeUnavailable {
+		t.Fatalf("code = %q, want %q (authorization passed, reachability is the remaining gap)", errs.CodeOf(err), errs.CodeUnavailable)
 	}
 }
 
