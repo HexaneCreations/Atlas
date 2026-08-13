@@ -344,15 +344,23 @@ jobs:
             docker compose -f docker-compose.prod.yml pull
 
             # docker-compose.prod.yml bind-mounts secrets/atlas_db_password.txt
-            # into atlas-server at /run/secrets/atlas_db_password as-is (plain
-            # `docker compose` secrets, unlike Swarm, do not re-own/re-mode
-            # the file) — it must already be readable by the "atlas" user the
-            # container runs as. That UID/GID lives only in the image's own
-            # /etc/passwd (Dockerfile's `adduser -u 10001 ... atlas`) and is
-            # never hardcoded here, so it's read straight out of the exact
-            # image just pulled, not assumed, and stays correct if the image
-            # ever changes it. No shell is needed inside the (scratch) image
-            # for this — docker cp reads its filesystem without running it.
+            # into TWO containers, read by two different UIDs, so ownership
+            # can't be a single "chown to one user, 0400" arrangement:
+            #  - atlas-server (scratch image) reads it as the "atlas" user —
+            #    UID/GID come from the image's own /etc/passwd (Dockerfile's
+            #    `adduser -u 10001 ... atlas`), never hardcoded here, read
+            #    straight out of the exact image just pulled. No shell is
+            #    needed inside a scratch image for this — docker cp reads
+            #    its filesystem without running it.
+            #  - postgres's official entrypoint re-execs itself as the
+            #    "postgres" user (`gosu postgres ...`) before it resolves
+            #    POSTGRES_PASSWORD_FILE, and its compose service drops
+            #    DAC_OVERRIDE along with every other unneeded capability, so
+            #    nothing in that container — not even root, transiently —
+            #    can bypass file permission bits. Its real UID/GID (not
+            #    assumed 70:70) are looked up from the actual image the same
+            #    docker-cp-without-running way, reused below for
+            #    postgres-certs so this only runs once.
             ATLAS_PASSWD_CID=$(docker create "$ATLAS_SERVER_IMAGE")
             docker cp "$ATLAS_PASSWD_CID:/etc/passwd" /tmp/atlas_server_passwd
             docker rm "$ATLAS_PASSWD_CID" >/dev/null
@@ -366,14 +374,26 @@ jobs:
               exit 1
             fi
 
-            chown "$ATLAS_UID:$ATLAS_GID" secrets/atlas_db_password.txt
-            chmod 0400 secrets/atlas_db_password.txt
+            POSTGRES_UID=$(docker run --rm timescale/timescaledb:2.17.2-pg17 id -u postgres)
+            POSTGRES_GID=$(docker run --rm timescale/timescaledb:2.17.2-pg17 id -g postgres)
 
-            # Confirms the file is actually owned by the UID/GID the
-            # container will read it as, rather than assuming chown worked.
+            if [ -z "$POSTGRES_UID" ] || [ -z "$POSTGRES_GID" ]; then
+              echo "could not determine the postgres user's UID/GID from timescale/timescaledb:2.17.2-pg17" >&2
+              exit 1
+            fi
+
+            # Owner = atlas-server's UID (reads via the owner bit), group =
+            # postgres's real GID (reads via the group bit) — 0640, so
+            # neither user needs the other's bit and nobody else on the host
+            # gets any access at all.
+            chown "$ATLAS_UID:$POSTGRES_GID" secrets/atlas_db_password.txt
+            chmod 0640 secrets/atlas_db_password.txt
+
+            # Confirms the file is actually owned by the UID:GID both
+            # containers will read it as, rather than assuming chown worked.
             ACTUAL_OWNER=$(stat -c '%u:%g' secrets/atlas_db_password.txt)
-            if [ "$ACTUAL_OWNER" != "$ATLAS_UID:$ATLAS_GID" ]; then
-              echo "secrets/atlas_db_password.txt is owned by $ACTUAL_OWNER, expected $ATLAS_UID:$ATLAS_GID" >&2
+            if [ "$ACTUAL_OWNER" != "$ATLAS_UID:$POSTGRES_GID" ]; then
+              echo "secrets/atlas_db_password.txt is owned by $ACTUAL_OWNER, expected $ATLAS_UID:$POSTGRES_GID" >&2
               exit 1
             fi
 
@@ -429,11 +449,10 @@ jobs:
 
             # postgres refuses to start if server.key isn't owned by the
             # exact UID/GID it runs as, in production, that came out of a
-            # "postgres" user lookup rather than an assumed 999:999 — the
-            # timescaledb image (unlike atlas-server's scratch image) has a
-            # shell, so this can just ask it directly.
-            POSTGRES_UID=$(docker run --rm timescale/timescaledb:2.17.2-pg17 id -u postgres)
-            POSTGRES_GID=$(docker run --rm timescale/timescaledb:2.17.2-pg17 id -g postgres)
+            # "postgres" user lookup rather than an assumed 999:999 —
+            # POSTGRES_UID/POSTGRES_GID were already looked up the same way
+            # above, for the password secret; reused here rather than
+            # querying the image a second time.
             chown "$POSTGRES_UID:$POSTGRES_GID" postgres-certs/server.key postgres-certs/server.crt
             chmod 600 postgres-certs/server.key
 
