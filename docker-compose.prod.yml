@@ -57,6 +57,20 @@ services:
     # running both stacks side by side collides otherwise.
     container_name: atlas-postgres-prod
     restart: unless-stopped
+    # Atlas's own config validation (internal/platform/config/validate.go)
+    # refuses anything but verify-ca/verify-full in production, and Atlas has
+    # no custom-CA option (system trust store only) — so this server must
+    # actually terminate TLS with a certificate atlas-server can validate.
+    # ./postgres-certs (server.crt/server.key, CN/SAN "postgres") is
+    # generated once by the deploy workflow, signed by an internal CA that
+    # workflow also mounts into atlas-server's trust bundle below.
+    command:
+      - -c
+      - ssl=on
+      - -c
+      - ssl_cert_file=/etc/postgresql/certs/server.crt
+      - -c
+      - ssl_key_file=/etc/postgresql/certs/server.key
     environment:
       POSTGRES_DB: atlas
       POSTGRES_USER: atlas
@@ -80,6 +94,12 @@ services:
       - "5432"
     volumes:
       - atlas-postgres-data-prod:/var/lib/postgresql/data
+      # Host directory (not a named volume): the deploy workflow generates
+      # and chowns these files directly with plain shell commands, the same
+      # way it already manages secrets/atlas_db_password.txt. Postgres
+      # itself requires server.key be owned by the exact UID it runs
+      # as and mode 0600, hence :ro here but not on the workflow side.
+      - ./postgres-certs:/etc/postgresql/certs:ro
     cap_drop:
       - ALL
     # The official image's entrypoint runs as root first to chown/chmod
@@ -164,6 +184,15 @@ services:
       # mount path is driven by the same variable Atlas itself reads, so
       # they can never drift apart.
       - atlas-fleet-data:${ATLAS_FLEET_DATA_DIR:-/var/lib/atlas/fleet}
+      # Atlas has no custom-CA config (internal/platform/config has no
+      # sslrootcert-equivalent field) — verify-full against postgres's
+      # internal CA (see the postgres service's own comment) only works by
+      # replacing the image's own public-CA bundle with one that also
+      # includes it. The deploy workflow regenerates this file every deploy
+      # (image's bundle + the persisted internal CA), so it can't go stale
+      # if a future atlas-server image updates its base public-CA bundle.
+      # Public CA data, not a secret — 0444 is intentional.
+      - ./postgres-certs/combined-ca-bundle.crt:/etc/ssl/certs/ca-certificates.crt:ro
     read_only: true
     tmpfs:
       - /tmp

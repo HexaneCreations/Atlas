@@ -307,7 +307,17 @@ jobs:
             ATLAS_DATABASE_PORT=${{ vars.ATLAS_DATABASE_PORT }}
             ATLAS_DATABASE_NAME=${{ vars.ATLAS_DATABASE_NAME }}
             ATLAS_DATABASE_USER=${{ vars.ATLAS_DATABASE_USER }}
-            ATLAS_DATABASE_SSL_MODE=${{ vars.ATLAS_DATABASE_SSL_MODE }}
+            # Hardcoded, not read from vars.ATLAS_DATABASE_SSL_MODE: this
+            # pipeline now provisions postgres's own TLS cert specifically so
+            # verify-full succeeds (see the postgres/atlas-server cert setup
+            # below) — nothing else is a correct value here, and reading a
+            # Variable for it would let a future edit silently weaken
+            # validation without touching this file. GITHUB_TOKEN also has
+            # no permission to write Environment Variables/Secrets, so
+            # automating "keep the Variable itself correct" isn't safely
+            # possible without a new repo-admin-scoped credential — this
+            # sidesteps needing one at all.
+            ATLAS_DATABASE_SSL_MODE=verify-full
             ATLAS_DATABASE_MIGRATE_ON_START=${{ vars.ATLAS_DATABASE_MIGRATE_ON_START }}
             ATLAS_FLEET_ENABLED=${{ vars.ATLAS_FLEET_ENABLED }}
             ATLAS_FLEET_DATA_DIR=${{ vars.ATLAS_FLEET_DATA_DIR }}
@@ -366,5 +376,75 @@ jobs:
               echo "secrets/atlas_db_password.txt is owned by $ACTUAL_OWNER, expected $ATLAS_UID:$ATLAS_GID" >&2
               exit 1
             fi
+
+            # atlas-server's production config requires database.ssl_mode
+            # verify-ca/verify-full (internal/platform/config/validate.go),
+            # and Atlas has no custom-CA option — only the system trust
+            # store. So postgres must actually terminate TLS with a
+            # certificate atlas-server can validate: a self-signed internal
+            # CA, generated ONCE and persisted at ./postgres-certs (same
+            # "create if missing" shape as Fleet's own CA), signs a
+            # "postgres" server cert; the CA is then folded into
+            # atlas-server's trust bundle below. Never printed — none of
+            # this touches the database password.
+            #
+            # openssl is not guaranteed present (nothing else in this
+            # pipeline required it before this) — installed automatically,
+            # non-interactively, only if missing, so this never needs a
+            # manual SSH step. apt-get is assumed (Debian/Ubuntu, matching
+            # every other tool this pipeline already relies on being there,
+            # e.g. docker itself); fails loudly with a clear message on any
+            # host where that assumption doesn't hold, rather than silently
+            # doing nothing.
+            if ! command -v openssl >/dev/null 2>&1; then
+              if command -v apt-get >/dev/null 2>&1; then
+                export DEBIAN_FRONTEND=noninteractive
+                apt-get update -qq
+                apt-get install -y -qq openssl
+              else
+                echo "openssl is required but not installed, and this host has no apt-get to install it automatically" >&2
+                exit 1
+              fi
+            fi
+
+            mkdir -p postgres-certs
+            if [ ! -f postgres-certs/ca.crt ]; then
+              openssl genrsa -out postgres-certs/ca.key 4096
+              openssl req -x509 -new -nodes -key postgres-certs/ca.key -sha256 -days 3650 \
+                -subj "/CN=atlas-postgres-internal-ca" -out postgres-certs/ca.crt
+
+              openssl genrsa -out postgres-certs/server.key 2048
+              openssl req -new -key postgres-certs/server.key \
+                -subj "/CN=postgres" -out postgres-certs/server.csr
+              openssl x509 -req -in postgres-certs/server.csr \
+                -CA postgres-certs/ca.crt -CAkey postgres-certs/ca.key -CAcreateserial \
+                -out postgres-certs/server.crt -days 3650 -sha256 \
+                -extfile <(printf "subjectAltName=DNS:postgres,DNS:atlas-postgres-prod")
+              rm -f postgres-certs/server.csr
+
+              chmod 600 postgres-certs/ca.key postgres-certs/server.key
+              chmod 644 postgres-certs/ca.crt postgres-certs/server.crt
+            fi
+
+            # postgres refuses to start if server.key isn't owned by the
+            # exact UID/GID it runs as, in production, that came out of a
+            # "postgres" user lookup rather than an assumed 999:999 — the
+            # timescaledb image (unlike atlas-server's scratch image) has a
+            # shell, so this can just ask it directly.
+            POSTGRES_UID=$(docker run --rm timescale/timescaledb:2.17.2-pg17 id -u postgres)
+            POSTGRES_GID=$(docker run --rm timescale/timescaledb:2.17.2-pg17 id -g postgres)
+            chown "$POSTGRES_UID:$POSTGRES_GID" postgres-certs/server.key postgres-certs/server.crt
+            chmod 600 postgres-certs/server.key
+
+            # atlas-server's trust bundle = its own image's public-CA bundle
+            # (extracted fresh, same docker-cp-without-running technique as
+            # the password fix above) plus the internal CA — regenerated
+            # every deploy so it can't go stale, even though the CA itself
+            # is long-lived. Public CA data, not a secret: 0444 is correct.
+            BUNDLE_CID=$(docker create "$ATLAS_SERVER_IMAGE")
+            docker cp "$BUNDLE_CID:/etc/ssl/certs/ca-certificates.crt" postgres-certs/system-ca-bundle.crt
+            docker rm "$BUNDLE_CID" >/dev/null
+            cat postgres-certs/system-ca-bundle.crt postgres-certs/ca.crt > postgres-certs/combined-ca-bundle.crt
+            chmod 0444 postgres-certs/combined-ca-bundle.crt
 
             docker compose -f docker-compose.prod.yml up -d
