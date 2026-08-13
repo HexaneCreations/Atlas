@@ -408,6 +408,7 @@ jobs:
             fi
 
             mkdir -p postgres-certs
+            chmod 755 postgres-certs
             if [ ! -f postgres-certs/ca.crt ]; then
               openssl genrsa -out postgres-certs/ca.key 4096
               openssl req -x509 -new -nodes -key postgres-certs/ca.key -sha256 -days 3650 \
