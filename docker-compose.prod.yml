@@ -107,11 +107,22 @@ services:
     # "postgres" user before the server itself starts — verified: a bare
     # `cap_drop: ALL` fails both the chown and the chmod with "Operation not
     # permitted". Same category of fix as atlas-ui's own cap_add, for nginx.
+    #
+    # DAC_OVERRIDE: docker_setup_env (which resolves POSTGRES_PASSWORD_FILE)
+    # runs before the gosu re-exec to "postgres", so that read happens as
+    # root while still on this reduced capability set — without
+    # DAC_OVERRIDE, root here is bound by normal file permission bits like
+    # any other UID and can't read a secret owned by a different UID/GID,
+    # verified directly: the entrypoint fails at that exact read with
+    # `/run/secrets/atlas_db_password: Permission denied`. Only matters for
+    # this brief root phase — Linux drops capabilities on gosu's non-root
+    # setuid, so the postgres process itself never actually runs with it.
     cap_add:
       - CHOWN
       - FOWNER
       - SETUID
       - SETGID
+      - DAC_OVERRIDE
     security_opt:
       - no-new-privileges:true
     healthcheck:
