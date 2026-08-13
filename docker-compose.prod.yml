@@ -173,18 +173,19 @@ services:
     # docs/operations/deployment.md's standalone `docker run` example, which
     # has no reverse proxy in front of it to delegate to.
     #
-    # No Fleet/libp2p port is published either, by the same "only what must
-    # be reachable" logic — see internal/app/fleet.go's Start(): when
-    # ATLAS_FLEET_LIBP2P_RELAY_ADDR is set, the control plane *dials out* to
-    # Atlas Relay and reserves a circuit; its own LibP2PListenAddrs never
-    # needs to be reachable from outside ("an operator behind NAT needs no
-    # forwarded port for this listener to exist", per that file's own
-    # comment). The verified working Mac→Relay→Agent path already proved
-    # this — no port was forwarded for it either. If a future agent needs to
-    # dial this control plane directly instead of through the relay, that is
-    # a deliberate networking decision to make then, not a default here.
+    # Fleet/libp2p (4102) is now also published directly to the host, on top
+    # of 8080 staying internal-only — see internal/app/fleet.go's Start():
+    # when ATLAS_FLEET_LIBP2P_RELAY_ADDR is set, the control plane still
+    # dials out to Atlas Relay and reserves a circuit regardless, so the
+    # relay path keeps working unchanged; this port is published in addition
+    # to that, for an external Agent to reach 139.84.153.127:4102 directly
+    # instead of only through the relay. UFW on the host already allows
+    # 4102/tcp. This is the "deliberate networking decision to make then,
+    # not a default" that comment used to describe — this is that decision.
     expose:
       - "8080"
+    ports:
+      - "4102:4102"
     volumes:
       # Fleet's CA and the server's own leaf certificate live under
       # ATLAS_FLEET_DATA_DIR (see internal/platform/pki.LoadOrCreateCA,
