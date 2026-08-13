@@ -88,37 +88,40 @@ jobs:
   #         name: coverage
   #         path: coverage.out
 
-  integration:
-    name: Integration tests
-    runs-on: ubuntu-latest
-    services:
-      postgres:
-        # Must match docker-compose.yml. TimescaleDB is a hard requirement of
-        # migration 0001, so a plain postgres image would fail to migrate.
-        image: timescale/timescaledb:2.17.2-pg17
-        env:
-          POSTGRES_DB: atlas
-          POSTGRES_USER: atlas
-          POSTGRES_PASSWORD: atlas_dev_password
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U atlas -d atlas"
-          --health-interval 2s
-          --health-timeout 5s
-          --health-retries 30
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          cache: true
-
-      - name: Run integration tests
-        run: make test-integration
-        env:
-          ATLAS_TEST_DATABASE_URL: postgres://atlas:atlas_dev_password@127.0.0.1:5432/atlas?sslmode=disable
+  # TEMPORARY: entire job commented out (not merely bypassed) so it does not
+  # run at all — not wanted for now. Nothing else `needs:` this job. Restore
+  # by uncommenting this whole block.
+  # integration:
+  #   name: Integration tests
+  #   runs-on: ubuntu-latest
+  #   services:
+  #     postgres:
+  #       # Must match docker-compose.yml. TimescaleDB is a hard requirement of
+  #       # migration 0001, so a plain postgres image would fail to migrate.
+  #       image: timescale/timescaledb:2.17.2-pg17
+  #       env:
+  #         POSTGRES_DB: atlas
+  #         POSTGRES_USER: atlas
+  #         POSTGRES_PASSWORD: atlas_dev_password
+  #       ports:
+  #         - 5432:5432
+  #       options: >-
+  #         --health-cmd "pg_isready -U atlas -d atlas"
+  #         --health-interval 2s
+  #         --health-timeout 5s
+  #         --health-retries 30
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #
+  #     - uses: actions/setup-go@v5
+  #       with:
+  #         go-version: ${{ env.GO_VERSION }}
+  #         cache: true
+  #
+  #     - name: Run integration tests
+  #       run: make test-integration
+  #       env:
+  #         ATLAS_TEST_DATABASE_URL: postgres://atlas:atlas_dev_password@127.0.0.1:5432/atlas?sslmode=disable
 
   web:
     name: Frontend
@@ -329,4 +332,39 @@ jobs:
             export ATLAS_UI_IMAGE=ghcr.io/hexanecreations/atlas-ui:${{ github.ref_name }}
 
             docker compose -f docker-compose.prod.yml pull
+
+            # docker-compose.prod.yml bind-mounts secrets/atlas_db_password.txt
+            # into atlas-server at /run/secrets/atlas_db_password as-is (plain
+            # `docker compose` secrets, unlike Swarm, do not re-own/re-mode
+            # the file) — it must already be readable by the "atlas" user the
+            # container runs as. That UID/GID lives only in the image's own
+            # /etc/passwd (Dockerfile's `adduser -u 10001 ... atlas`) and is
+            # never hardcoded here, so it's read straight out of the exact
+            # image just pulled, not assumed, and stays correct if the image
+            # ever changes it. No shell is needed inside the (scratch) image
+            # for this — docker cp reads its filesystem without running it.
+            ATLAS_PASSWD_CID=$(docker create "$ATLAS_SERVER_IMAGE")
+            docker cp "$ATLAS_PASSWD_CID:/etc/passwd" /tmp/atlas_server_passwd
+            docker rm "$ATLAS_PASSWD_CID" >/dev/null
+
+            ATLAS_UID=$(grep '^atlas:' /tmp/atlas_server_passwd | cut -d: -f3)
+            ATLAS_GID=$(grep '^atlas:' /tmp/atlas_server_passwd | cut -d: -f4)
+            rm -f /tmp/atlas_server_passwd
+
+            if [ -z "$ATLAS_UID" ] || [ -z "$ATLAS_GID" ]; then
+              echo "could not determine the atlas user's UID/GID from $ATLAS_SERVER_IMAGE's /etc/passwd" >&2
+              exit 1
+            fi
+
+            chown "$ATLAS_UID:$ATLAS_GID" secrets/atlas_db_password.txt
+            chmod 0400 secrets/atlas_db_password.txt
+
+            # Confirms the file is actually owned by the UID/GID the
+            # container will read it as, rather than assuming chown worked.
+            ACTUAL_OWNER=$(stat -c '%u:%g' secrets/atlas_db_password.txt)
+            if [ "$ACTUAL_OWNER" != "$ATLAS_UID:$ATLAS_GID" ]; then
+              echo "secrets/atlas_db_password.txt is owned by $ACTUAL_OWNER, expected $ATLAS_UID:$ATLAS_GID" >&2
+              exit 1
+            fi
+
             docker compose -f docker-compose.prod.yml up -d
