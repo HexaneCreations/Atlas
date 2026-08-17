@@ -2,6 +2,7 @@ package system
 
 import (
 	"context"
+	stdnet "net"
 	"slices"
 	"strings"
 	"time"
@@ -39,13 +40,17 @@ func (gopsutilProvider) Host(ctx context.Context) (HostInfo, error) {
 	}
 
 	out := HostInfo{
-		Hostname:        info.Hostname,
-		OS:              info.OS,
-		Platform:        info.Platform,
-		PlatformVersion: info.PlatformVersion,
-		KernelVersion:   info.KernelVersion,
-		KernelArch:      info.KernelArch,
-		BootTime:        time.Unix(int64(info.BootTime), 0),
+		Hostname:           info.Hostname,
+		OS:                 info.OS,
+		Platform:           info.Platform,
+		PlatformVersion:    info.PlatformVersion,
+		KernelVersion:      info.KernelVersion,
+		KernelArch:         info.KernelArch,
+		BootTime:           time.Unix(int64(info.BootTime), 0),
+		Virtualization:     info.VirtualizationSystem,
+		VirtualizationRole: info.VirtualizationRole,
+		Timezone:           localTimezone(),
+		FQDN:               resolveFQDN(ctx, info.Hostname),
 	}
 
 	// Core counts are reported separately from host info and may be
@@ -58,7 +63,44 @@ func (gopsutilProvider) Host(ctx context.Context) (HostInfo, error) {
 	if physical, err := cpu.CountsWithContext(ctx, false); err == nil {
 		out.PhysicalCores = physical
 	}
+	if infos, err := cpu.InfoWithContext(ctx); err == nil && len(infos) > 0 {
+		out.CPUModel = strings.TrimSpace(infos[0].ModelName)
+		sockets := make(map[string]struct{}, len(infos))
+		for _, info := range infos {
+			if info.PhysicalID != "" {
+				sockets[info.PhysicalID] = struct{}{}
+			}
+		}
+		out.CPUSockets = len(sockets)
+	}
 	return out, nil
+}
+
+func localTimezone() string {
+	zone, _ := time.Now().Zone()
+	if name := time.Local.String(); name != "" && name != "Local" {
+		return name
+	}
+	return zone
+}
+
+// resolveFQDN asks the host's resolver for the canonical name behind
+// hostname. A host with no resolvable domain is normal, not an error, so
+// anything unresolved yields "".
+func resolveFQDN(ctx context.Context, hostname string) string {
+	if hostname == "" {
+		return ""
+	}
+	var resolver stdnet.Resolver
+	cname, err := resolver.LookupCNAME(ctx, hostname)
+	if err != nil {
+		return ""
+	}
+	cname = strings.TrimSuffix(cname, ".")
+	if cname == hostname {
+		return ""
+	}
+	return cname
 }
 
 func (gopsutilProvider) CPUPercent(ctx context.Context) ([]float64, error) {

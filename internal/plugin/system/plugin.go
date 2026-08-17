@@ -189,6 +189,21 @@ func (p *Plugin) Mounts(ctx context.Context) ([]MountInfo, error) {
 	return out, nil
 }
 
+// Host returns the machine's descriptive facts.
+func (p *Plugin) Host(ctx context.Context) (HostInfo, error) {
+	return p.provider.Host(ctx)
+}
+
+// NetworkIdentity returns the host's addressing: interfaces with their
+// addresses and state, default routes, and resolver configuration.
+//
+// Inventory rather than a time series: an address or a default route is
+// current state, and it is what an alert has to be correlated against to
+// mean anything ("which machine is 10.0.4.12").
+func (p *Plugin) NetworkIdentity(ctx context.Context) (NetworkIdentity, error) {
+	return p.provider.NetworkIdentity(ctx)
+}
+
 // Close implements [plugin.Plugin]. The plugin holds no sockets or handles;
 // gopsutil reads are stateless per call.
 func (p *Plugin) Close(context.Context) error { return nil }

@@ -215,6 +215,17 @@ func bootstrap(ctx context.Context, relCfg relationshipConfig, nodeID string, lo
 		return nil, nil, fmt.Errorf("no certificate on disk and no enrollment token is set")
 	}
 
+	// Enrolling with no pinned or configured CA means trusting whatever
+	// certificate answers, once, permanently. That is a defensible choice on
+	// a trusted network and an indefensible default for a fleet, so it must
+	// be made explicitly rather than fallen into.
+	if caCert == nil && !relCfg.InsecureBootstrap {
+		return nil, nil, fmt.Errorf(
+			"refusing to enroll without a pinned CA: set a CA bundle path (verified bootstrap), "+
+				"or set insecure bootstrap explicitly to trust the certificate presented on first contact (relationship %q)",
+			relCfg.id)
+	}
+
 	var pool *x509.CertPool
 	if caCert != nil {
 		pool = x509.NewCertPool()

@@ -35,7 +35,10 @@ const (
 	DefaultMaxAge = 24 * time.Hour
 )
 
-const fileExt = ".envelope.json"
+const (
+	fileExt = ".envelope.json"
+	tmpExt  = fileExt + ".tmp"
+)
 
 // Options configures a [Spool].
 type Options struct {
@@ -105,7 +108,18 @@ func Open(opts Options) (*Spool, error) {
 
 	cutoff := time.Now().Add(-opts.MaxAge)
 	for _, f := range files {
-		if f.IsDir() || !strings.HasSuffix(f.Name(), fileExt) {
+		if f.IsDir() {
+			continue
+		}
+		// A crash between opening a temp file and renaming it leaves an
+		// orphan that no later scan would ever see, so it escapes both the
+		// MaxBytes and MaxAge accounting and leaks disk indefinitely across
+		// repeated crash cycles.
+		if strings.HasSuffix(f.Name(), tmpExt) {
+			_ = os.Remove(filepath.Join(opts.Dir, f.Name()))
+			continue
+		}
+		if !strings.HasSuffix(f.Name(), fileExt) {
 			continue
 		}
 		seq, ok := seqFromName(f.Name())
@@ -160,7 +174,7 @@ func (s *Spool) Enqueue(env transport.Envelope) error {
 	s.nextSeq++
 	name := fmt.Sprintf("%020d%s", seq, fileExt)
 	path := filepath.Join(s.dir, name)
-	tmp := path + ".tmp"
+	tmp := filepath.Join(s.dir, fmt.Sprintf("%020d%s", seq, tmpExt))
 
 	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {

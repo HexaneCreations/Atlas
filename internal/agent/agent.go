@@ -119,6 +119,11 @@ func New(ctx context.Context, cfg Config, logger *slog.Logger) (*Agent, error) {
 	var resolveErrs []error
 	for id, boot := range bootstraps {
 		dataDir := dataDirFor(cfg.DataDir, id)
+		_, statErr := os.Stat(relationshipJSONPath(dataDir))
+		configSource := "env (no relationship.json yet)"
+		if statErr == nil {
+			configSource = "relationship.json (persisted — env vars for these fields are ignored until the file is removed)"
+		}
 		relCfg, err := loadOrAdoptRelationshipConfig(id, dataDir, boot)
 		if err != nil {
 			logger.ErrorContext(ctx, "relationship configuration is unusable; it will not be available this run",
@@ -126,6 +131,12 @@ func New(ctx context.Context, cfg Config, logger *slog.Logger) (*Agent, error) {
 			resolveErrs = append(resolveErrs, fmt.Errorf("%s: %w", id, err))
 			continue
 		}
+		logger.InfoContext(ctx, "relationship config resolved",
+			slog.String("relationship", id), slog.String("config_source", configSource),
+			slog.String("transport", relCfg.Transport), slog.String("control_plane_url", relCfg.ControlPlaneURL),
+			slog.Bool("libp2p_relay_addr_set", relCfg.LibP2PRelayAddr != ""), slog.String("libp2p_relay_addr", relCfg.LibP2PRelayAddr),
+			slog.String("libp2p_server_peer_id", relCfg.LibP2PServerPeerID), slog.String("libp2p_server_addr", relCfg.LibP2PServerAddr),
+			slog.String("environment", relCfg.Environment), slog.String("data_dir", dataDir))
 		relConfigs[id] = relCfg
 	}
 
@@ -136,12 +147,18 @@ func New(ctx context.Context, cfg Config, logger *slog.Logger) (*Agent, error) {
 
 	var p2pHost p2phost.Host
 	if needsP2PHost {
-		h, err := libp2ptransport.NewHost(libp2ptransport.HostOptions{DataDir: cfg.DataDir})
+		h, err := libp2ptransport.NewHost(libp2ptransport.HostOptions{DataDir: cfg.DataDir, Logger: logger})
 		if err != nil {
 			return nil, fmt.Errorf("start libp2p host: %w", err)
 		}
 		p2pHost = h
 	}
+
+	relationshipIDs := make([]string, 0, len(relConfigs))
+	for id := range relConfigs {
+		relationshipIDs = append(relationshipIDs, id)
+	}
+	logger.InfoContext(ctx, "resolved relationships entering bootstrap", slog.Any("relationship_ids", relationshipIDs))
 
 	relationships, bootErr := bootstrapAllRelationships(ctx, relConfigs, identity.NodeID, p2pHost, logger)
 	if len(relationships) == 0 {
@@ -152,9 +169,13 @@ func New(ctx context.Context, cfg Config, logger *slog.Logger) (*Agent, error) {
 			errors.Join(append(resolveErrs, bootErr)...))
 	}
 
-	targets := make([]transport.Transport, 0, len(relationships))
-	for _, rt := range relationships {
-		targets = append(targets, rt.transport)
+	targets := make([]fanoutTarget, 0, len(relationships))
+	for id, rt := range relationships {
+		environment := rt.relCfg.Environment
+		if environment == "" {
+			environment = cfg.Environment
+		}
+		targets = append(targets, fanoutTarget{id: id, environment: environment, tr: rt.transport})
 	}
 	fanout := newFanoutTransport(targets)
 
@@ -162,9 +183,9 @@ func New(ctx context.Context, cfg Config, logger *slog.Logger) (*Agent, error) {
 
 	plugins := plugin.NewRegistry(logger, nil)
 	dockerPlugin := docker.New(docker.Options{})
-	processPlugin := process.New(process.Options{})
+	processPlugin := process.New(process.Options{DisableSecretRedaction: cfg.SecretRedactionDisabled})
 	servicePlugin := service.New(service.Options{})
-	cronPlugin := cron.New(cron.Options{})
+	cronPlugin := cron.New(cron.Options{DisableSecretRedaction: cfg.SecretRedactionDisabled})
 	portsPlugin := ports.New(ports.Options{})
 	systemPlugin := system.New(system.Options{NodeID: identity.NodeID})
 
@@ -184,9 +205,9 @@ func New(ctx context.Context, cfg Config, logger *slog.Logger) (*Agent, error) {
 		return nil, fmt.Errorf("register collectors: %w", err)
 	}
 
-	// Origin.Environment stays global across every relationship — a single
-	// operator-assigned tag for this machine, not per-relationship (Phase 3
-	// scope decision; see the approved plan).
+	// Origin.Environment is set here only as the process-wide fallback; the
+	// fanout overwrites it per relationship on the way out, so the same
+	// observation can be tagged differently for each control plane.
 	sched, err := scheduler.New(scheduler.Options{
 		Registry:  collectors,
 		Transport: fanout,
@@ -213,8 +234,18 @@ func New(ctx context.Context, cfg Config, logger *slog.Logger) (*Agent, error) {
 		NodeID: identity.NodeID, Hostname: identity.Hostname,
 		AgentVersion: build.Current().Version, Environment: cfg.Environment,
 	}
-	pusher := newInventoryPusher(fanout, origin, cfg.InventoryInterval, logger,
-		inventorySources(active, processPlugin, servicePlugin, cronPlugin, portsPlugin, systemPlugin, dockerPlugin))
+	environments := make(map[string]string, len(targets))
+	for _, t := range targets {
+		environments[t.id] = t.environment
+	}
+	health := newHealthReporter(identity.NodeID, LockPath(cfg.DataDir), relationships, environments,
+		func() []CollectorHealth { return collectorHealthFrom(plugins.States()) })
+
+	sources := append(
+		inventorySources(active, processPlugin, servicePlugin, cronPlugin, portsPlugin, systemPlugin, dockerPlugin),
+		healthSource(health),
+	)
+	pusher := newInventoryPusher(fanout, origin, cfg.InventoryInterval, logger, sources)
 	forwarder := newEventForwarder(bus, fanout, origin, logger)
 
 	// AgentOps (remote container log streaming): one handler on the shared
@@ -280,6 +311,13 @@ func bootstrapAllRelationships(ctx context.Context, relConfigs map[string]relati
 // retry), its renewal loop, and its own delivery transport with its own
 // spool. Fully independent of every other relationship.
 func bootstrapRelationship(ctx context.Context, relCfg relationshipConfig, nodeID string, p2pHost p2phost.Host, logger *slog.Logger) (*relationshipRuntime, error) {
+	logger.InfoContext(ctx, "bootstrapping relationship",
+		slog.String("relationship", relCfg.id), slog.String("transport", relCfg.Transport),
+		slog.String("control_plane_url", relCfg.ControlPlaneURL),
+		slog.Bool("libp2p_relay_addr_set", relCfg.LibP2PRelayAddr != ""), slog.String("libp2p_relay_addr", relCfg.LibP2PRelayAddr),
+		slog.String("libp2p_server_peer_id", relCfg.LibP2PServerPeerID), slog.String("libp2p_server_addr", relCfg.LibP2PServerAddr),
+		slog.String("environment", relCfg.Environment), slog.String("data_dir", relCfg.dataDir))
+
 	if err := os.MkdirAll(relCfg.dataDir, 0o700); err != nil {
 		return nil, fmt.Errorf("create data dir: %w", err)
 	}
@@ -293,16 +331,49 @@ func bootstrapRelationship(ctx context.Context, relCfg relationshipConfig, nodeI
 		}
 		switch {
 		case relCfg.LibP2PRelayAddr != "" && relCfg.LibP2PServerPeerID != "":
+			// Diagnostic (A): entering the rendezvous branch, before the
+			// relay multiaddr is parsed.
+			logger.InfoContext(ctx, "rendezvous bootstrap: parsing relay multiaddr",
+				slog.String("relationship", relCfg.id), slog.String("libp2p_relay_addr", relCfg.LibP2PRelayAddr))
 			relayInfo, err := libp2ptransport.ParseTarget(relCfg.LibP2PRelayAddr)
 			if err != nil {
+				logger.ErrorContext(ctx, "rendezvous bootstrap: relay multiaddr is unparseable",
+					slog.String("relationship", relCfg.id), slog.String("libp2p_relay_addr", relCfg.LibP2PRelayAddr),
+					slog.String("error", err.Error()))
 				return nil, fmt.Errorf("parse libp2p relay address: %w", err)
 			}
+			// Diagnostic (B): relay parsed.
+			logger.InfoContext(ctx, "rendezvous bootstrap: relay multiaddr parsed",
+				slog.String("relationship", relCfg.id), slog.String("relay_peer_id", relayInfo.ID.String()),
+				slog.Int("relay_addr_count", len(relayInfo.Addrs)), slog.Any("relay_addrs", relayInfo.Addrs))
+
+			// Diagnostic (C): before decoding the control plane's peer id.
+			logger.InfoContext(ctx, "rendezvous bootstrap: decoding server peer id",
+				slog.String("relationship", relCfg.id),
+				slog.String("libp2p_server_peer_id", relCfg.LibP2PServerPeerID),
+				slog.Int("libp2p_server_peer_id_len", len(relCfg.LibP2PServerPeerID)))
 			serverID, err := peer.Decode(relCfg.LibP2PServerPeerID)
 			if err != nil {
+				logger.ErrorContext(ctx, "rendezvous bootstrap: server peer id is undecodable",
+					slog.String("relationship", relCfg.id),
+					slog.String("libp2p_server_peer_id", relCfg.LibP2PServerPeerID),
+					slog.Int("libp2p_server_peer_id_len", len(relCfg.LibP2PServerPeerID)),
+					slog.String("error", err.Error()))
 				return nil, fmt.Errorf("parse libp2p server peer id: %w", err)
 			}
+			// Diagnostic (D): server peer id decoded.
+			logger.InfoContext(ctx, "rendezvous bootstrap: server peer id decoded",
+				slog.String("relationship", relCfg.id), slog.String("peer_id", serverID.String()))
+
+			// Diagnostic (E): before the discovery dialer is constructed.
+			logger.InfoContext(ctx, "rendezvous bootstrap: building discovery dialer",
+				slog.String("relationship", relCfg.id), slog.String("peer_id", serverID.String()),
+				slog.String("relay_peer_id", relayInfo.ID.String()), slog.String("data_dir", relCfg.dataDir))
 			dial = newDiscoveryDial(p2pHost, relayInfo, serverID, relCfg.dataDir, logger)
 			peerID = serverID
+			// Diagnostic (F): discovery dialer built.
+			logger.InfoContext(ctx, "rendezvous bootstrap: discovery dialer built",
+				slog.String("relationship", relCfg.id), slog.String("peer_id", serverID.String()))
 			logger.InfoContext(ctx, "dialing control plane via rendezvous discovery",
 				slog.String("relationship", relCfg.id),
 				slog.String("peer_id", serverID.String()), slog.String("relay", relayInfo.ID.String()))
@@ -322,6 +393,16 @@ func bootstrapRelationship(ctx context.Context, relCfg relationshipConfig, nodeI
 			return nil, fmt.Errorf("libp2p transport requires either (relay address and server peer id) or the deprecated server address")
 		}
 	}
+
+	// Diagnostic (G): every dial-path decision is made; credential bootstrap
+	// (and its existing, unchanged retry budget) starts here.
+	logger.InfoContext(ctx, "entering credential bootstrap",
+		slog.String("relationship", relCfg.id), slog.String("transport", relCfg.Transport),
+		slog.String("control_plane_url", relCfg.ControlPlaneURL),
+		slog.Bool("custom_dialer", dial != nil), slog.String("peer_id", peerID.String()),
+		slog.Bool("insecure_bootstrap", relCfg.InsecureBootstrap),
+		slog.Bool("ca_bundle_configured", relCfg.CABundlePath != ""),
+		slog.Bool("token_configured", relCfg.Token != ""))
 
 	caCert, holder, err := bootstrapWithRetry(ctx, relCfg, nodeID, logger, dial)
 	if err != nil {
@@ -344,6 +425,12 @@ func bootstrapRelationship(ctx context.Context, relCfg relationshipConfig, nodeI
 	var httpClient *http.Client
 	if dial != nil {
 		httpClient = &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{TLSClientConfig: tlsCfg, DialContext: dial}}
+		if p2pHost != nil && peerID != "" {
+			// A hole-punched direct connection does not migrate this
+			// client's already-open (relay-backed) pooled connection —
+			// drop it so the next request re-dials onto the direct path.
+			libp2ptransport.PreferDirectConnection(p2pHost, peerID, httpClient.CloseIdleConnections)
+		}
 	}
 	tr, err := remote.New(remote.Options{
 		BaseURL: relCfg.ControlPlaneURL, TLSConfig: tlsCfg, HTTPClient: httpClient, Spool: sp, Logger: logger,

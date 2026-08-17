@@ -95,6 +95,46 @@ func TestResolvePeerIDConflictsNoLibP2PRelationshipsNeedsNoHost(t *testing.T) {
 	}
 }
 
+// A server peer id that is one character short of a real one (the classic
+// copy/paste truncation) is not decodable: resolvePeerIDConflicts must skip
+// the relationship rather than register a bogus peer id, while still
+// reporting that a libp2p host is needed — the relationship then fails on
+// its own in bootstrapRelationship, where peer.Decode runs again.
+func TestResolveLibP2PServerPeerIDRejectsTruncatedPeerID(t *testing.T) {
+	t.Parallel()
+	full := testPeerID(t, "local-cp").String()
+	truncated := full[:len(full)-1]
+
+	relayAddr := "/ip4/1.2.3.4/tcp/4103/p2p/" + testPeerID(t, "relay").String()
+	relCfg := relationshipConfig{id: "local", RelationshipBootstrap: RelationshipBootstrap{
+		Transport: "libp2p", LibP2PRelayAddr: relayAddr, LibP2PServerPeerID: truncated,
+	}}
+
+	if _, ok := resolveLibP2PServerPeerID(relCfg); ok {
+		t.Fatalf("resolveLibP2PServerPeerID accepted truncated peer id %q", truncated)
+	}
+	if _, err := peer.Decode(truncated); err == nil {
+		t.Fatalf("peer.Decode accepted truncated peer id %q", truncated)
+	}
+
+	relCfg.LibP2PServerPeerID = full
+	if _, ok := resolveLibP2PServerPeerID(relCfg); !ok {
+		t.Fatalf("resolveLibP2PServerPeerID rejected valid peer id %q", full)
+	}
+
+	relCfg.LibP2PServerPeerID = truncated
+	peerIDs, needsHost, err := resolvePeerIDConflicts(map[string]relationshipConfig{"local": relCfg})
+	if err != nil {
+		t.Fatalf("resolvePeerIDConflicts: %v", err)
+	}
+	if !needsHost {
+		t.Error("needsP2PHost = false, want true (the relationship still requests the libp2p transport)")
+	}
+	if len(peerIDs) != 0 {
+		t.Errorf("registered %d peer ids, want 0 (an undecodable peer id must not enter the demux map)", len(peerIDs))
+	}
+}
+
 // --- AgentOps demux: a Production relationship must never serve a stream
 // using Development's CA/certificate, and vice versa ------------------------
 

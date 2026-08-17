@@ -17,21 +17,23 @@ import (
 type fakeProvider struct {
 	mu sync.Mutex
 
-	host      HostInfo
-	cpuPct    []float64
-	cpuTimes  CPUTimes
-	memory    MemoryInfo
-	swap      SwapInfo
-	parts     []Partition
-	usage     map[string]DiskUsage
-	diskIO    []DiskIOCounters
-	networkIO []NetworkIOCounters
-	load      LoadAverage
+	host            HostInfo
+	cpuPct          []float64
+	cpuTimes        CPUTimes
+	memory          MemoryInfo
+	swap            SwapInfo
+	parts           []Partition
+	usage           map[string]DiskUsage
+	diskIO          []DiskIOCounters
+	networkIO       []NetworkIOCounters
+	networkIdentity NetworkIdentity
+	load            LoadAverage
 
 	// Per-method errors, so a test can fail one reading and assert that the
 	// collector still returns everything else.
 	hostErr, cpuPctErr, cpuTimesErr, memErr, swapErr error
 	partsErr, diskIOErr, netErr, loadErr             error
+	netIdentityErr                                   error
 	usageErr                                         map[string]error
 
 	// blockFor makes a method sleep, for cancellation tests.
@@ -174,6 +176,15 @@ func (f *fakeProvider) NetworkIO(ctx context.Context) ([]NetworkIOCounters, erro
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.networkIO, f.netErr
+}
+
+func (f *fakeProvider) NetworkIdentity(ctx context.Context) (NetworkIdentity, error) {
+	if err := f.block(ctx); err != nil {
+		return NetworkIdentity{}, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.networkIdentity, f.netIdentityErr
 }
 
 func (f *fakeProvider) LoadAverage(ctx context.Context) (LoadAverage, error) {

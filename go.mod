@@ -10,6 +10,7 @@ require (
 	github.com/libp2p/go-libp2p-gostream v0.6.0
 	github.com/multiformats/go-multiaddr v0.16.1
 	github.com/shirou/gopsutil/v4 v4.26.7
+	golang.org/x/time v0.15.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -129,7 +130,6 @@ require (
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/telemetry v0.0.0-20260717140457-bdb89881bb75 // indirect
 	golang.org/x/text v0.40.0 // indirect
-	golang.org/x/time v0.15.0 // indirect
 	golang.org/x/tools v0.48.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 	gotest.tools/v3 v3.5.2 // indirect

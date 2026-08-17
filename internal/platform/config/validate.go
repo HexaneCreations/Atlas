@@ -76,6 +76,15 @@ func (f Fleet) validate(v *violations) {
 	if f.LibP2PEnabled && len(f.LibP2PListenAddrs) == 0 {
 		v.addf("fleet.libp2p_listen_addrs", "must list at least one multiaddr when libp2p is enabled")
 	}
+	if f.MaxRequestBytes <= 0 {
+		v.addf("fleet.max_request_bytes", "must be positive")
+	}
+	if f.RequestTimeout <= 0 {
+		v.addf("fleet.request_timeout", "must be positive")
+	}
+	if f.MaxRequestsPerMinute <= 0 {
+		v.addf("fleet.max_requests_per_minute", "must be positive")
+	}
 }
 
 func (s Server) validate(v *violations, prod bool) {

@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"crypto/tls"
+	"encoding/pem"
 	"errors"
 	"log/slog"
 	"net"
@@ -10,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -155,7 +157,62 @@ func testConfig(t *testing.T, controlPlaneURL string) relationshipConfig {
 		RelationshipBootstrap: RelationshipBootstrap{
 			ControlPlaneURL: controlPlaneURL,
 			Token:           "atlas_enroll_test",
+			// These fixtures exercise TOFU pinning, which is opt-in — see
+			// TestBootstrapRefusesUnverifiedEnrollmentByDefault for the
+			// default posture.
+			InsecureBootstrap: true,
 		},
+	}
+}
+
+// Enrolling with no pinned CA trusts whatever answers, permanently. That
+// must be an explicit operator choice, not what happens when a CA bundle is
+// simply forgotten during fleet provisioning.
+func TestBootstrapRefusesUnverifiedEnrollmentByDefault(t *testing.T) {
+	t.Parallel()
+
+	url, _ := testControlPlane(t)
+	cfg := testConfig(t, url)
+	cfg.InsecureBootstrap = false
+
+	_, _, err := bootstrap(context.Background(), cfg, "node-1", discardLogger(), nil)
+	if err == nil {
+		t.Fatal("bootstrap enrolled with no pinned CA and no explicit opt-in")
+	}
+	if !strings.Contains(err.Error(), "CA bundle") {
+		t.Errorf("error = %q, want it to name the fix", err)
+	}
+	if _, statErr := os.Stat(pinnedCAPath(cfg.dataDir)); statErr == nil {
+		t.Error("a CA was pinned despite the refusal")
+	}
+}
+
+// An explicitly configured CA bundle is a verified bootstrap and needs no
+// opt-in.
+func TestBootstrapWithCABundleNeedsNoInsecureOptIn(t *testing.T) {
+	t.Parallel()
+
+	url, ca := testControlPlane(t)
+	cfg := testConfig(t, url)
+	cfg.InsecureBootstrap = false
+
+	bundlePath := filepath.Join(t.TempDir(), "ca.pem")
+	if err := os.WriteFile(bundlePath, pem.EncodeToMemory(&pem.Block{
+		Type: "CERTIFICATE", Bytes: ca.Cert().Raw,
+	}), 0o600); err != nil {
+		t.Fatalf("write CA bundle: %v", err)
+	}
+	cfg.CABundlePath = bundlePath
+
+	gotCA, holder, err := bootstrap(context.Background(), cfg, "node-1", discardLogger(), nil)
+	if err != nil {
+		t.Fatalf("bootstrap with an explicit CA bundle: %v", err)
+	}
+	if holder.current() == nil {
+		t.Fatal("no credential was issued")
+	}
+	if gotCA.SerialNumber.Cmp(ca.Cert().SerialNumber) != 0 {
+		t.Error("did not use the configured CA")
 	}
 }
 

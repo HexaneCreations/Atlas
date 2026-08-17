@@ -10,6 +10,7 @@ import (
 	"github.com/hexane/atlas/internal/core/collect"
 	"github.com/hexane/atlas/internal/core/plugin"
 	"github.com/hexane/atlas/internal/platform/errs"
+	"github.com/hexane/atlas/internal/platform/redact"
 )
 
 // Settings is the plugin's configuration section (`plugins.process`).
@@ -42,6 +43,7 @@ func (s Settings) inventoryLimit() int {
 // Plugin observes processes and binaries.
 type Plugin struct {
 	provider Provider
+	redactor redact.Redactor
 
 	mu         sync.RWMutex
 	settings   Settings
@@ -52,6 +54,12 @@ type Plugin struct {
 type Options struct {
 	// Provider supplies process facts. Defaults to the gopsutil implementation.
 	Provider Provider
+	// DisableSecretRedaction transmits command lines exactly as the host
+	// reports them, credentials included. Off by default: a command line
+	// routinely carries a password passed as an argument, and the cost of
+	// leaking one is unrecoverable. Intended for a trusted debugging
+	// session, never for a fleet.
+	DisableSecretRedaction bool
 }
 
 // New builds the process plugin.
@@ -59,7 +67,7 @@ func New(opts Options) *Plugin {
 	if opts.Provider == nil {
 		opts.Provider = NewProvider()
 	}
-	return &Plugin{provider: opts.Provider}
+	return &Plugin{provider: opts.Provider, redactor: redact.New(!opts.DisableSecretRedaction)}
 }
 
 // Descriptor implements [plugin.Plugin].
@@ -151,6 +159,9 @@ func (p *Plugin) Inventory(ctx context.Context) ([]Process, error) {
 
 	if len(procs) > limit {
 		procs = procs[:limit]
+	}
+	for i := range procs {
+		procs[i].Cmdline = p.redactor.String(procs[i].Cmdline)
 	}
 	return procs, nil
 }

@@ -272,3 +272,54 @@ func TestBackpressureDirectivePausesReplay(t *testing.T) {
 }
 
 func collectorName(i int) string { return string(rune('a' + i)) }
+
+// Stats is what the agent's self-health report is built from: without a
+// recorded last-success and last-failure, a control plane cannot tell an
+// agent with nothing to say from one that cannot reach it.
+func TestStatsRecordDeliveryOutcomes(t *testing.T) {
+	t.Parallel()
+
+	rec := &recording{}
+	srv := newTestServer(t, rec)
+	defer srv.Close()
+
+	sp, err := spool.Open(spool.Options{Dir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("spool.Open: %v", err)
+	}
+	tr, err := remote.New(remote.Options{BaseURL: srv.URL, Spool: sp})
+	if err != nil {
+		t.Fatalf("remote.New: %v", err)
+	}
+	defer tr.Close()
+
+	if stats := tr.Stats(); !stats.LastSuccess.IsZero() || !stats.LastFailure.IsZero() {
+		t.Fatalf("fresh transport reports outcomes it never had: %+v", stats)
+	}
+
+	if err := tr.Send(context.Background(), snapshotEnvelope("node-1")); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	stats := tr.Stats()
+	if stats.LastSuccess.IsZero() {
+		t.Error("a successful delivery did not record a last success")
+	}
+	if !stats.LastFailure.IsZero() {
+		t.Errorf("a successful delivery recorded a failure at %s", stats.LastFailure)
+	}
+
+	rec.fail.Store(100)
+	if err := tr.Send(context.Background(), snapshotEnvelope("node-1")); err == nil {
+		t.Fatal("Send succeeded against a failing server")
+	}
+	stats = tr.Stats()
+	if stats.LastFailure.IsZero() {
+		t.Error("a failed delivery did not record a last failure")
+	}
+	if stats.LastFailureReason == "" {
+		t.Error("a failed delivery recorded no reason")
+	}
+	if stats.LastSuccess.IsZero() {
+		t.Error("the earlier success was lost")
+	}
+}

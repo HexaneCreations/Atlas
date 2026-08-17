@@ -17,6 +17,9 @@ type Config struct {
 	CABundlePath    string
 	NodeID          string
 	Environment     string
+	// InsecureBootstrap permits first-contact enrollment with no CA bundle
+	// configured. See RelationshipBootstrap.InsecureBootstrap.
+	InsecureBootstrap bool
 
 	// Transport selects what carries requests to the control plane: "https"
 	// (default, TCP + mTLS) or "libp2p" (POC — dial by Peer ID; see
@@ -55,6 +58,12 @@ type Config struct {
 	// without touching the control plane.
 	AgentOpsContainerLogsDisabled bool
 
+	// SecretRedactionDisabled transmits process command lines and cron
+	// commands exactly as the host reports them, credentials included.
+	// Phrased as a "disabled" flag so the zero value — what a Config{}
+	// literal not built through LoadConfig gets — is the safe one.
+	SecretRedactionDisabled bool
+
 	LogLevel string
 }
 
@@ -65,6 +74,7 @@ func LoadConfig() Config {
 		Token:                         os.Getenv("ATLAS_AGENT_TOKEN"),
 		DataDir:                       getenv("ATLAS_AGENT_DATA_DIR", "/var/lib/atlas-agent"),
 		CABundlePath:                  os.Getenv("ATLAS_AGENT_CA_BUNDLE"),
+		InsecureBootstrap:             getenvBool("ATLAS_AGENT_INSECURE_BOOTSTRAP", false),
 		NodeID:                        os.Getenv("ATLAS_AGENT_NODE_ID"),
 		Environment:                   os.Getenv("ATLAS_AGENT_ENVIRONMENT"),
 		Transport:                     getenv("ATLAS_AGENT_TRANSPORT", "https"),
@@ -75,6 +85,7 @@ func LoadConfig() Config {
 		CollectionTimeout:             getenvDuration("ATLAS_AGENT_COLLECTION_TIMEOUT", 10*time.Second),
 		InventoryInterval:             getenvDuration("ATLAS_AGENT_INVENTORY_INTERVAL", 60*time.Second),
 		AgentOpsContainerLogsDisabled: getenvBool("ATLAS_AGENT_AGENTOPS_CONTAINER_LOGS_DISABLED", false),
+		SecretRedactionDisabled:       getenvBool("ATLAS_AGENT_SECRET_REDACTION_DISABLED", false),
 		LogLevel:                      getenv("ATLAS_AGENT_LOG_LEVEL", "info"),
 	}
 	return cfg
@@ -160,6 +171,8 @@ func loadRelationshipBootstrapEnv(id string) RelationshipBootstrap {
 		ControlPlaneURL:               os.Getenv(prefix + "CONTROL_PLANE_URL"),
 		Token:                         os.Getenv(prefix + "TOKEN"),
 		CABundlePath:                  os.Getenv(prefix + "CA_BUNDLE"),
+		InsecureBootstrap:             getenvBool(prefix+"INSECURE_BOOTSTRAP", false),
+		Environment:                   os.Getenv(prefix + "ENVIRONMENT"),
 		Transport:                     getenv(prefix+"TRANSPORT", "https"),
 		LibP2PServerAddr:              os.Getenv(prefix + "LIBP2P_SERVER_ADDR"),
 		LibP2PRelayAddr:               os.Getenv(prefix + "LIBP2P_RELAY_ADDR"),

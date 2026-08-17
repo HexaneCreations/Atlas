@@ -12,7 +12,10 @@
 #   --control-plane-url URL
 #   --token TOKEN           Enrollment token (see `atlas-server enroll-token`)
 #   --environment NAME      Operator-assigned environment tag
-#   --ca-bundle PATH        CA certificate to pin instead of trust-on-first-use
+#   --ca-bundle PATH        CA certificate to pin (verified bootstrap)
+#   --insecure-bootstrap    Enroll with no CA bundle, trusting the certificate
+#                            presented on first contact and pinning it. Required
+#                            explicitly when --ca-bundle is not given.
 #   --no-start              Enable the service but do not start it
 #   --force-env             Overwrite an existing /etc/atlas-agent/atlas-agent.env
 set -euo pipefail
@@ -24,6 +27,7 @@ CONTROL_PLANE_URL=""
 TOKEN=""
 ENVIRONMENT=""
 CA_BUNDLE=""
+INSECURE_BOOTSTRAP=0
 START=1
 FORCE_ENV=0
 
@@ -34,6 +38,7 @@ while [ $# -gt 0 ]; do
     --token) TOKEN="$2"; shift 2 ;;
     --environment) ENVIRONMENT="$2"; shift 2 ;;
     --ca-bundle) CA_BUNDLE="$2"; shift 2 ;;
+    --insecure-bootstrap) INSECURE_BOOTSTRAP=1; shift ;;
     --no-start) START=0; shift ;;
     --force-env) FORCE_ENV=1; shift ;;
     -h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
@@ -48,6 +53,12 @@ fi
 
 if [ -z "$CONTROL_PLANE_URL" ]; then
   echo "install.sh: --control-plane-url is required" >&2
+  exit 1
+fi
+
+if [ -z "$CA_BUNDLE" ] && [ "$INSECURE_BOOTSTRAP" -ne 1 ]; then
+  echo "install.sh: pass --ca-bundle PATH for a verified bootstrap, or" >&2
+  echo "            --insecure-bootstrap to trust the certificate presented on first contact" >&2
   exit 1
 fi
 
@@ -94,6 +105,7 @@ else
     echo "ATLAS_AGENT_TOKEN=$TOKEN"
     echo "ATLAS_AGENT_ENVIRONMENT=$ENVIRONMENT"
     [ -n "$CA_BUNDLE" ] && echo "ATLAS_AGENT_CA_BUNDLE=$CA_BUNDLE"
+    [ "$INSECURE_BOOTSTRAP" -eq 1 ] && echo "ATLAS_AGENT_INSECURE_BOOTSTRAP=true"
   } > "$ENV_FILE"
   chown root:atlas "$ENV_FILE"
   chmod 0640 "$ENV_FILE"

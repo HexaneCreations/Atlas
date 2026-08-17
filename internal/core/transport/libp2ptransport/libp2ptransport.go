@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
@@ -29,6 +30,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 	relayclient "github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/client"
 	relayv2 "github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/relay"
+	"github.com/libp2p/go-libp2p/p2p/protocol/holepunch"
 	"github.com/multiformats/go-multiaddr"
 	"net"
 
@@ -96,9 +98,19 @@ type HostOptions struct {
 	// port. Only the side meant to be reachable (the POC's bootstrap target)
 	// sets this.
 	ListenAddrs []string
+	// Logger receives connection-path and hole-punch observability events
+	// (direct established/lost/re-established, relay fallback used, hole
+	// punch attempted/succeeded/failed). Nil discards them.
+	Logger *slog.Logger
 }
 
 // NewHost builds a libp2p host identified by this node's persistent Peer ID.
+// DCUtR hole punching (github.com/libp2p/go-libp2p/p2p/protocol/holepunch)
+// is enabled on every host, listener or dial-only: whichever side receives
+// the inbound relayed connection is the one that initiates the punch, so
+// both roles need it, not just the reachable side. No custom NAT-traversal
+// protocol is implemented here — this only turns on and observes go-libp2p's
+// own DCUtR.
 func NewHost(opts HostOptions) (host.Host, error) {
 	const op = "libp2ptransport.NewHost"
 	if opts.DataDir == "" {
@@ -110,13 +122,26 @@ func NewHost(opts HostOptions) (host.Host, error) {
 		return nil, err
 	}
 
+	logger := opts.Logger
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
+	}
+
 	// EnableRelay is documented as on by default, but that default does not
 	// reliably apply alongside our other options — verified by inspecting
 	// the resulting host's registered stream protocols, which are missing
 	// the relay STOP handler unless this is passed explicitly. Needed on
 	// both ends: the dialing side to use a circuit address, the reachable
-	// side to accept an inbound relayed connection at all.
-	libp2pOpts := []libp2p.Option{libp2p.Identity(priv), libp2p.EnableRelay()}
+	// side to accept an inbound relayed connection at all. EnableHolePunching
+	// requires it for the same reason DCUtR needs a relayed connection to
+	// punch through. NATPortMap is a best-effort UPnP/NAT-PMP mapping for the
+	// listening side; a no-op when there is nothing to map (dial-only hosts).
+	libp2pOpts := []libp2p.Option{
+		libp2p.Identity(priv),
+		libp2p.EnableRelay(),
+		libp2p.EnableHolePunching(holepunch.WithTracer(newHolePunchTracer(logger))),
+		libp2p.NATPortMap(),
+	}
 	if len(opts.ListenAddrs) == 0 {
 		libp2pOpts = append(libp2pOpts, libp2p.NoListenAddrs)
 	} else {
@@ -127,6 +152,7 @@ func NewHost(opts HostOptions) (host.Host, error) {
 	if err != nil {
 		return nil, errs.Wrap(err, errs.CodeInternal, "could not start libp2p host").WithOp(op)
 	}
+	h.Network().Notify(newConnPathNotifiee(logger))
 	return h, nil
 }
 

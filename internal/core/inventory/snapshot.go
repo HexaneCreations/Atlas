@@ -19,6 +19,20 @@ const (
 	SubjectPorts        Subject = "ports"
 	SubjectMounts       Subject = "mounts"
 	SubjectContainers   Subject = "containers"
+	// SubjectNetwork is the host's addressing — interfaces, addresses,
+	// default routes, resolvers — as opposed to its traffic counters, which
+	// are metrics.
+	SubjectNetwork Subject = "network"
+	// SubjectHost is the machine's descriptive facts: CPU model and
+	// topology, virtualization, timezone, FQDN. The subset the nodes table
+	// already carries stays there; this covers what an operator needs for
+	// capacity and placement decisions and has no column of its own.
+	SubjectHost Subject = "host"
+	// SubjectAgentHealth is the agent's own report on whether it is
+	// delivering: one entry per control-plane relationship. Without it, a
+	// control plane can only infer agent health from telemetry that stopped
+	// arriving, which cannot distinguish a broken agent from a broken host.
+	SubjectAgentHealth Subject = "agent_health"
 )
 
 // Meta is the provenance of an inventory response: whose host, how current.

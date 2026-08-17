@@ -31,6 +31,17 @@ import (
 	"github.com/hexane/atlas/internal/platform/id"
 )
 
+// ProtocolVersion is the wire-contract version every agent request carries
+// and every control plane enforces.
+//
+// It lives here, below both the agent client (internal/core/transport/remote)
+// and the server handler (internal/api/agent), so the two cannot drift into
+// disagreeing about what version they speak. Bump it when the envelope or
+// request shape changes incompatibly; a mismatch is then refused explicitly
+// rather than being absorbed as incidental JSON tolerance, which is how a
+// half-upgraded fleet silently corrupts data.
+const ProtocolVersion = 1
+
 // Origin identifies where an observation was made.
 //
 // Every envelope carries one, including in single-node deployments where it

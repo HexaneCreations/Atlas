@@ -72,6 +72,16 @@ type Transport struct {
 	sent     atomic.Uint64
 	failed   atomic.Uint64
 	rejected atomic.Uint64
+	retries  atomic.Uint64
+
+	// outcomeMu guards the last-delivery record. It is separate from the
+	// counters above because a reader needs the time and its reason to be
+	// consistent with each other, which three independent atomics cannot
+	// promise.
+	outcomeMu     sync.Mutex
+	lastSuccess   time.Time
+	lastFailure   time.Time
+	failureReason string
 }
 
 // New builds a Transport and starts its background replay loop.
@@ -122,6 +132,7 @@ func (t *Transport) Send(ctx context.Context, env transport.Envelope) error {
 		resp, err := t.post(ctx, []transport.Envelope{env})
 		if err != nil {
 			t.failed.Add(1)
+			t.recordFailure(err)
 			return errs.Wrap(err, errs.CodeUnavailable, "could not deliver snapshot").WithOp(op)
 		}
 		if resp.Accepted == 0 {
@@ -130,9 +141,12 @@ func (t *Transport) Send(ctx context.Context, env transport.Envelope) error {
 			if len(resp.Rejected) > 0 {
 				reason = resp.Rejected[0].Reason
 			}
-			return errs.New(errs.CodeInvalidArgument, "snapshot rejected: %s", reason).WithOp(op)
+			rejection := errs.New(errs.CodeInvalidArgument, "snapshot rejected: %s", reason).WithOp(op)
+			t.recordFailure(rejection)
+			return rejection
 		}
 		t.sent.Add(1)
+		t.recordSuccess()
 		return nil
 	}
 
@@ -154,19 +168,54 @@ func (t *Transport) Close() error {
 	return nil
 }
 
-// Stats reports delivery counts.
+// Stats reports delivery counts and the outcome of the most recent attempt
+// in each direction. It is what lets a control plane distinguish "this agent
+// is fine and has nothing to say" from "this agent cannot reach me".
 type Stats struct {
 	Sent     uint64 `json:"sent"`
 	Failed   uint64 `json:"failed"`
 	Rejected uint64 `json:"rejected"`
 	Spooled  int    `json:"spooled"`
+	// SpooledBytes is the spool's disk footprint, the figure that matters
+	// for a host running out of space during a long outage.
+	SpooledBytes int64 `json:"spooled_bytes"`
+	// Dropped counts envelopes evicted because the spool hit its size cap.
+	Dropped uint64 `json:"dropped"`
+	// Retries counts delivery attempts that failed and were rescheduled.
+	Retries uint64 `json:"retries"`
+
+	LastSuccess time.Time `json:"last_success,omitzero"`
+	LastFailure time.Time `json:"last_failure,omitzero"`
+	// LastFailureReason is the most recent failure's message. It is an
+	// agent-side diagnostic string, never a credential — the transport only
+	// ever sees connection and HTTP status errors.
+	LastFailureReason string `json:"last_failure_reason,omitempty"`
 }
 
 func (t *Transport) Stats() Stats {
+	t.outcomeMu.Lock()
+	lastSuccess, lastFailure, reason := t.lastSuccess, t.lastFailure, t.failureReason
+	t.outcomeMu.Unlock()
+
 	return Stats{
 		Sent: t.sent.Load(), Failed: t.failed.Load(), Rejected: t.rejected.Load(),
-		Spooled: t.spool.Len(),
+		Spooled: t.spool.Len(), SpooledBytes: t.spool.Bytes(), Dropped: t.spool.Dropped(),
+		Retries:     t.retries.Load(),
+		LastSuccess: lastSuccess, LastFailure: lastFailure, LastFailureReason: reason,
 	}
+}
+
+func (t *Transport) recordSuccess() {
+	t.outcomeMu.Lock()
+	defer t.outcomeMu.Unlock()
+	t.lastSuccess = time.Now()
+}
+
+func (t *Transport) recordFailure(err error) {
+	t.outcomeMu.Lock()
+	defer t.outcomeMu.Unlock()
+	t.lastFailure = time.Now()
+	t.failureReason = err.Error()
 }
 
 func (t *Transport) wake() {
@@ -204,6 +253,8 @@ func (t *Transport) replayLoop() {
 
 			if err != nil {
 				t.failed.Add(uint64(len(batch)))
+				t.retries.Add(1)
+				t.recordFailure(err)
 				t.logger.Warn("telemetry delivery failed, will retry",
 					slog.String("error", err.Error()), slog.Duration("backoff", backoff))
 				select {
@@ -220,6 +271,7 @@ func (t *Transport) replayLoop() {
 			}
 			t.sent.Add(uint64(resp.Accepted))
 			t.rejected.Add(uint64(len(resp.Rejected)))
+			t.recordSuccess()
 			backoff = backoffMin
 
 			if resp.Directive == "slow_down" || resp.Directive == "pause" {
@@ -238,7 +290,7 @@ func (t *Transport) replayLoop() {
 }
 
 func (t *Transport) post(ctx context.Context, envelopes []transport.Envelope) (telemetryResponse, error) {
-	body, err := json.Marshal(telemetryRequest{ProtocolVersion: 1, Envelopes: envelopes})
+	body, err := json.Marshal(telemetryRequest{ProtocolVersion: transport.ProtocolVersion, Envelopes: envelopes})
 	if err != nil {
 		return telemetryResponse{}, fmt.Errorf("encode telemetry request: %w", err)
 	}

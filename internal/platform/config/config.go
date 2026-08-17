@@ -114,6 +114,24 @@ type Fleet struct {
 	// NAT with no forwarded port. LibP2PListenAddrs is still bound alongside
 	// it (harmless, just unreachable from outside).
 	LibP2PRelayAddr string `yaml:"libp2p_relay_addr" json:"libp2p_relay_addr" env:"LIBP2P_RELAY_ADDR"`
+
+	// MaxRequestBytes caps an agent request body. This listener is reachable
+	// by every enrolled agent in the fleet, so an unbounded body is a
+	// memory-exhaustion vector. The cap is larger than the browser API's
+	// because a telemetry POST carries a batch (up to maxBatchSize
+	// envelopes), and a spool draining after an outage sends full batches.
+	MaxRequestBytes int64 `yaml:"max_request_bytes" json:"max_request_bytes" env:"MAX_REQUEST_BYTES"`
+	// RequestTimeout bounds a single agent request. Enrollment signs a
+	// certificate and telemetry writes a batch to Postgres; neither should
+	// be able to hold a handler open indefinitely.
+	RequestTimeout time.Duration `yaml:"request_timeout" json:"request_timeout" env:"REQUEST_TIMEOUT"`
+
+	// MaxRequestsPerMinute bounds how often one enrolled node may call the
+	// agent API. A single misconfigured or compromised agent must not be
+	// able to flood ingest for the whole fleet. Counted per node identity
+	// (mTLS peer certificate), not per IP: many agents can share an egress
+	// address, and one agent can move between addresses.
+	MaxRequestsPerMinute int `yaml:"max_requests_per_minute" json:"max_requests_per_minute" env:"MAX_REQUESTS_PER_MINUTE"`
 }
 
 // Addr returns the host:port the fleet listener binds.
@@ -291,10 +309,13 @@ func Default() Config {
 			SeriesWindow:          DefaultSeriesWindow,
 		},
 		Fleet: Fleet{
-			Enabled: false,
-			Host:    "0.0.0.0",
-			Port:    8443,
-			DataDir: "/var/lib/atlas/fleet",
+			Enabled:              false,
+			Host:                 "0.0.0.0",
+			Port:                 8443,
+			DataDir:              "/var/lib/atlas/fleet",
+			MaxRequestBytes:      8 << 20, // 8 MiB — a full telemetry batch, not a browser request
+			RequestTimeout:       30 * time.Second,
+			MaxRequestsPerMinute: 240, // 4/s sustained: well above a 15s collection interval, even with spool replay
 		},
 	}
 }

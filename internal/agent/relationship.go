@@ -24,13 +24,26 @@ const defaultRelationshipID = "default"
 // names an operator-managed external file whose path may legitimately need
 // to keep being supplied.
 type RelationshipBootstrap struct {
-	ControlPlaneURL    string
-	Token              string
-	CABundlePath       string
+	ControlPlaneURL string
+	Token           string
+	CABundlePath    string
+	// Environment tags every envelope sent to this control plane. It is
+	// per-relationship because the same host is legitimately "development"
+	// to one control plane and "production" to another. Empty falls back to
+	// the process-wide ATLAS_AGENT_ENVIRONMENT.
+	Environment        string
 	Transport          string
 	LibP2PServerAddr   string
 	LibP2PRelayAddr    string
 	LibP2PServerPeerID string
+
+	// InsecureBootstrap permits first-contact enrollment with no CA bundle,
+	// trusting whatever certificate the endpoint presents and pinning it.
+	// Required explicitly because the alternative — doing it silently — puts
+	// every first enrollment in a fleet one intercepted connection away from
+	// a control plane the operator never chose. Like Token and
+	// CABundlePath, it is bootstrap-only and never persisted.
+	InsecureBootstrap bool
 
 	AgentOpsContainerLogsDisabled bool
 }
@@ -65,6 +78,8 @@ func relationshipBootstrapFromConfig(cfg Config) RelationshipBootstrap {
 		ControlPlaneURL:               cfg.ControlPlaneURL,
 		Token:                         cfg.Token,
 		CABundlePath:                  cfg.CABundlePath,
+		InsecureBootstrap:             cfg.InsecureBootstrap,
+		Environment:                   cfg.Environment,
 		Transport:                     cfg.Transport,
 		LibP2PServerAddr:              cfg.LibP2PServerAddr,
 		LibP2PRelayAddr:               cfg.LibP2PRelayAddr,
@@ -130,6 +145,7 @@ func discoverRelationships(cfg Config) (map[string]RelationshipBootstrap, error)
 type relationshipPersisted struct {
 	ID                            string    `json:"id"`
 	ControlPlaneURL               string    `json:"control_plane_url"`
+	Environment                   string    `json:"environment,omitempty"`
 	Transport                     string    `json:"transport"`
 	LibP2PServerAddr              string    `json:"libp2p_server_addr,omitempty"`
 	LibP2PRelayAddr               string    `json:"libp2p_relay_addr,omitempty"`
@@ -164,6 +180,8 @@ func loadOrAdoptRelationshipConfig(id, dataDir string, boot RelationshipBootstra
 				ControlPlaneURL:               p.ControlPlaneURL,
 				Token:                         boot.Token,
 				CABundlePath:                  boot.CABundlePath,
+				InsecureBootstrap:             boot.InsecureBootstrap,
+				Environment:                   p.Environment,
 				Transport:                     p.Transport,
 				LibP2PServerAddr:              p.LibP2PServerAddr,
 				LibP2PRelayAddr:               p.LibP2PRelayAddr,
@@ -192,6 +210,7 @@ func persistRelationshipConfig(relCfg relationshipConfig) error {
 	p := relationshipPersisted{
 		ID:                            relCfg.id,
 		ControlPlaneURL:               relCfg.ControlPlaneURL,
+		Environment:                   relCfg.Environment,
 		Transport:                     relCfg.Transport,
 		LibP2PServerAddr:              relCfg.LibP2PServerAddr,
 		LibP2PRelayAddr:               relCfg.LibP2PRelayAddr,

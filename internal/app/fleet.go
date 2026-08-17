@@ -121,8 +121,10 @@ func (f *fleetPipeline) Start(ctx context.Context) error {
 	mux := http.NewServeMux()
 	handler.Mount(mux)
 
+	agentHandler := httpx.AgentMiddleware(f.cfg.Fleet)(mux)
+
 	tlsConfig := pki.ServerTLSConfig(serverLeaf, ca)
-	server := httpx.NewTLSServer("fleet.server", f.cfg.Fleet.Addr(), mux, tlsConfig, f.logger)
+	server := httpx.NewTLSServer("fleet.server", f.cfg.Fleet.Addr(), agentHandler, tlsConfig, f.logger)
 	if err := server.Start(ctx); err != nil {
 		return err
 	}
@@ -143,7 +145,7 @@ func (f *fleetPipeline) Start(ctx context.Context) error {
 	// forwarded port for this listener to exist.
 	if f.cfg.Fleet.LibP2PEnabled {
 		p2pHost, err := libp2ptransport.NewHost(libp2ptransport.HostOptions{
-			DataDir: f.cfg.Fleet.DataDir, ListenAddrs: f.cfg.Fleet.LibP2PListenAddrs,
+			DataDir: f.cfg.Fleet.DataDir, ListenAddrs: f.cfg.Fleet.LibP2PListenAddrs, Logger: f.logger,
 		})
 		if err != nil {
 			return err
@@ -158,7 +160,7 @@ func (f *fleetPipeline) Start(ctx context.Context) error {
 		// connection is an IP, not a Peer ID, so recording it would be
 		// meaningless (and recordAgentPeer's own peer.Decode guards against
 		// treating it as one regardless).
-		libp2pServer := httpx.NewTLSServerFromListener("fleet.server.libp2p", listener, f.recordAgentPeer(mux), tlsConfig, f.logger)
+		libp2pServer := httpx.NewTLSServerFromListener("fleet.server.libp2p", listener, httpx.AgentMiddleware(f.cfg.Fleet)(f.recordAgentPeer(mux)), tlsConfig, f.logger)
 		if err := libp2pServer.Start(ctx); err != nil {
 			_ = p2pHost.Close()
 			return err

@@ -59,32 +59,96 @@ type Provider interface {
 
 	// NetworkIO returns cumulative per-interface counters.
 	NetworkIO(ctx context.Context) ([]NetworkIOCounters, error)
+	// NetworkIdentity returns the host's addressing: which interfaces exist,
+	// what addresses they carry, where traffic leaves by, and who resolves
+	// names. Every part is best-effort — a container without /proc/net, a
+	// host with no default route, and a resolver managed by something other
+	// than /etc/resolv.conf are all normal, and each yields an empty field
+	// rather than an error.
+	NetworkIdentity(ctx context.Context) (NetworkIdentity, error)
 
 	// LoadAverage returns the 1, 5, and 15 minute run-queue averages.
 	LoadAverage(ctx context.Context) (LoadAverage, error)
 }
 
+// NetworkIdentity is the host's addressing, as opposed to its traffic
+// counters: what an operator needs to answer "which machine is this alert
+// about" and "why can this host not reach anything".
+type NetworkIdentity struct {
+	Interfaces []NetworkInterface `json:"interfaces"`
+	// Gateways are the default routes, IPv4 and IPv6. Empty on a host with
+	// no default route, which is normal inside some container networks.
+	Gateways []Gateway `json:"gateways,omitempty"`
+	// DNSServers are the configured resolvers, in order.
+	DNSServers []string `json:"dns_servers,omitempty"`
+	// DNSSearch are the search domains, in order.
+	DNSSearch []string `json:"dns_search,omitempty"`
+}
+
+// NetworkInterface is one interface's identity and state. Addresses are
+// reported in CIDR form so the prefix is not lost.
+type NetworkInterface struct {
+	Name string `json:"name"`
+	// Up reports the administrative state.
+	Up bool `json:"up"`
+	// Loopback distinguishes lo from a real interface without matching on a
+	// name, which varies by platform.
+	Loopback bool `json:"loopback"`
+	// MAC is empty for interfaces with no hardware address (loopback,
+	// tunnels).
+	MAC  string   `json:"mac,omitempty"`
+	MTU  int      `json:"mtu,omitempty"`
+	IPv4 []string `json:"ipv4,omitempty"`
+	IPv6 []string `json:"ipv6,omitempty"`
+	// Flags are the raw interface flags, for states Up/Loopback do not
+	// capture (POINTOPOINT, MULTICAST).
+	Flags []string `json:"flags,omitempty"`
+}
+
+// Gateway is one default route.
+type Gateway struct {
+	// Family is "ipv4" or "ipv6".
+	Family    string `json:"family"`
+	Address   string `json:"address"`
+	Interface string `json:"interface,omitempty"`
+}
+
 // HostInfo describes the machine.
 type HostInfo struct {
-	Hostname string
+	Hostname string `json:"hostname"`
 	// OS is the kernel family: "linux", "darwin".
-	OS string
+	OS string `json:"os"`
 	// Platform is the distribution or product: "ubuntu", "darwin".
-	Platform string
+	Platform string `json:"platform"`
 	// PlatformVersion is its version: "24.04", "15.3.1".
-	PlatformVersion string
+	PlatformVersion string `json:"platform_version"`
 	// KernelVersion is the running kernel release.
-	KernelVersion string
+	KernelVersion string `json:"kernel_version"`
 	// KernelArch is the machine architecture: "x86_64", "arm64".
-	KernelArch string
+	KernelArch string `json:"kernel_arch"`
 	// BootTime is when the machine started. Uptime is derived from it at
 	// query time rather than stored, so it cannot go stale.
-	BootTime time.Time
+	BootTime time.Time `json:"boot_time"`
 	// LogicalCores is the count of schedulable CPUs, which is what load
 	// average must be normalised against.
-	LogicalCores int
+	LogicalCores int `json:"logical_cores"`
 	// PhysicalCores excludes hardware threads. Zero when unavailable.
-	PhysicalCores int
+	PhysicalCores int `json:"physical_cores"`
+	// CPUModel is the processor's marketing name. Empty when unavailable.
+	CPUModel string `json:"cpu_model,omitempty"`
+	// CPUSockets is the number of physical packages. Zero when unavailable —
+	// it cannot be derived on every platform.
+	CPUSockets int `json:"cpu_sockets,omitempty"`
+	// FQDN is the fully qualified name, when resolvable. Empty otherwise;
+	// many hosts have no resolvable domain and that is not an error.
+	FQDN string `json:"fqdn,omitempty"`
+	// Timezone is the system's zone name, e.g. "Europe/London".
+	Timezone string `json:"timezone,omitempty"`
+	// Virtualization names the hypervisor or container runtime ("kvm",
+	// "docker", "lxc"), empty on bare metal or where it cannot be detected.
+	Virtualization string `json:"virtualization,omitempty"`
+	// VirtualizationRole is "guest" or "host", empty when unknown.
+	VirtualizationRole string `json:"virtualization_role,omitempty"`
 }
 
 // Uptime returns how long the machine has been running.

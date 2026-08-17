@@ -9,11 +9,13 @@ import (
 	"github.com/hexane/atlas/internal/core/collect"
 	"github.com/hexane/atlas/internal/core/plugin"
 	"github.com/hexane/atlas/internal/platform/errs"
+	"github.com/hexane/atlas/internal/platform/redact"
 )
 
 // Plugin observes scheduled jobs.
 type Plugin struct {
 	provider Provider
+	redactor redact.Redactor
 
 	mu         sync.RWMutex
 	collectors []collect.Collector
@@ -23,6 +25,10 @@ type Plugin struct {
 type Options struct {
 	// Provider supplies jobs. Defaults to reading the standard locations.
 	Provider Provider
+	// DisableSecretRedaction transmits cron commands exactly as written,
+	// credentials included. Off by default — see process.Options for the
+	// same trade-off.
+	DisableSecretRedaction bool
 }
 
 // New builds the cron plugin.
@@ -30,7 +36,7 @@ func New(opts Options) *Plugin {
 	if opts.Provider == nil {
 		opts.Provider = NewProvider()
 	}
-	return &Plugin{provider: opts.Provider}
+	return &Plugin{provider: opts.Provider, redactor: redact.New(!opts.DisableSecretRedaction)}
 }
 
 // Descriptor implements [plugin.Plugin].
@@ -82,6 +88,9 @@ func (p *Plugin) Inventory(ctx context.Context) ([]Job, error) {
 	if err != nil {
 		return nil, errs.Wrap(err, errs.CodeOf(err), "could not read scheduled jobs").
 			WithOp("cron.Plugin.Inventory")
+	}
+	for i := range jobs {
+		jobs[i].Command = p.redactor.String(jobs[i].Command)
 	}
 	return jobs, nil
 }

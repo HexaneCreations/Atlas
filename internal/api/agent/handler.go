@@ -30,8 +30,12 @@ import (
 const DefaultMaxClockSkew = 5 * time.Minute
 
 // ProtocolVersion is the current agent protocol version, returned at
-// enrollment. See docs/architecture/agent-design.md §2, M1.
-const ProtocolVersion = 1
+// enrollment and enforced on every telemetry push. See
+// docs/architecture/agent-design.md §2, M1.
+//
+// It is defined once in internal/core/transport, below both this handler and
+// the agent's own client, so the two ends cannot drift.
+const ProtocolVersion = transport.ProtocolVersion
 
 // ClockSkewRecorder records a node's most recently observed clock skew.
 // Satisfied by [*metric.Repository].
@@ -207,6 +211,19 @@ func (h *Handler) Telemetry(w http.ResponseWriter, r *http.Request) error {
 		return errs.Wrap(err, errs.CodeInvalidArgument, "could not decode the telemetry request").WithOp(op)
 	}
 
+	// Whole batch, not per-envelope: if the ends disagree about the wire
+	// contract, every envelope was decoded under an assumption that no
+	// longer holds.
+	if req.ProtocolVersion != ProtocolVersion {
+		h.deps.Logger.WarnContext(r.Context(), "telemetry rejected: protocol version mismatch",
+			slog.String("node_id", nodeID),
+			slog.Int("agent_protocol_version", req.ProtocolVersion),
+			slog.Int("server_protocol_version", ProtocolVersion))
+		return errs.New(errs.CodeInvalidArgument, "unsupported agent protocol version").WithOp(op).
+			WithDetail("agent_protocol_version", req.ProtocolVersion).
+			WithDetail("server_protocol_version", ProtocolVersion)
+	}
+
 	now := time.Now()
 	resp := TelemetryResponse{Directive: "ok"}
 
@@ -222,6 +239,16 @@ func (h *Handler) Telemetry(w http.ResponseWriter, r *http.Request) error {
 			continue
 		}
 		env.Origin.NodeID = nodeID
+
+		// After the identity rebind: an empty claimed NodeID is only valid
+		// once the peer certificate has supplied one.
+		if err := env.Validate(); err != nil {
+			h.deps.Logger.WarnContext(r.Context(), "envelope failed validation",
+				slog.String("node_id", nodeID), slog.String("envelope_id", env.ID),
+				slog.String("error", err.Error()))
+			resp.Rejected = append(resp.Rejected, RejectedEnvelope{EnvelopeID: env.ID, Reason: "invalid_envelope"})
+			continue
+		}
 
 		skew := now.Sub(env.SentAt).Seconds()
 		if env.SentAt.After(latestSentAt) {

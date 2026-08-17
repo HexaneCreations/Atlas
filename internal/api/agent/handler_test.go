@@ -264,7 +264,7 @@ func TestTelemetryRequiresClientCertificate(t *testing.T) {
 	t.Parallel()
 	h, _ := testHandler(t, &fakeTokens{ok: true}, newFakeCredentials(), &fakeDenylist{denied: map[string]bool{}}, nil, nil)
 
-	rec := doJSON(handlerFunc(h.Telemetry), http.MethodPost, "/api/v1/agent/telemetry", agent.TelemetryRequest{})
+	rec := doJSON(handlerFunc(h.Telemetry), http.MethodPost, "/api/v1/agent/telemetry", agent.TelemetryRequest{ProtocolVersion: agent.ProtocolVersion})
 	if rec.Code != http.StatusUnauthorized {
 		t.Errorf("status = %d, want 401", rec.Code)
 	}
@@ -277,7 +277,7 @@ func TestTelemetryRefusesDenylistedNode(t *testing.T) {
 	cert := issueCert(t, ca, "node-1")
 
 	var buf bytes.Buffer
-	_ = json.NewEncoder(&buf).Encode(agent.TelemetryRequest{})
+	_ = json.NewEncoder(&buf).Encode(agent.TelemetryRequest{ProtocolVersion: agent.ProtocolVersion})
 	req := withPeerCert(httptest.NewRequest(http.MethodPost, "/api/v1/agent/telemetry", &buf), cert)
 	rec := httptest.NewRecorder()
 	handlerFunc(h.Telemetry)(rec, req)
@@ -309,7 +309,7 @@ func TestTelemetryRejectsIdentityMismatch(t *testing.T) {
 
 	env := testEnvelope("node-2", time.Now()) // claims a different node
 	var buf bytes.Buffer
-	_ = json.NewEncoder(&buf).Encode(agent.TelemetryRequest{Envelopes: []transport.Envelope{env}})
+	_ = json.NewEncoder(&buf).Encode(agent.TelemetryRequest{ProtocolVersion: agent.ProtocolVersion, Envelopes: []transport.Envelope{env}})
 	req := withPeerCert(httptest.NewRequest(http.MethodPost, "/api/v1/agent/telemetry", &buf), cert)
 	rec := httptest.NewRecorder()
 	handlerFunc(h.Telemetry)(rec, req)
@@ -340,7 +340,7 @@ func TestTelemetryBindsOriginToVerifiedIdentity(t *testing.T) {
 
 	env := testEnvelope("", time.Now())
 	var buf bytes.Buffer
-	_ = json.NewEncoder(&buf).Encode(agent.TelemetryRequest{Envelopes: []transport.Envelope{env}})
+	_ = json.NewEncoder(&buf).Encode(agent.TelemetryRequest{ProtocolVersion: agent.ProtocolVersion, Envelopes: []transport.Envelope{env}})
 	req := withPeerCert(httptest.NewRequest(http.MethodPost, "/api/v1/agent/telemetry", &buf), cert)
 	rec := httptest.NewRecorder()
 	handlerFunc(h.Telemetry)(rec, req)
@@ -367,7 +367,7 @@ func TestTelemetryRejectsClockSkewBeyondTolerance(t *testing.T) {
 
 	env := testEnvelope("node-1", time.Now().Add(-2*time.Hour))
 	var buf bytes.Buffer
-	_ = json.NewEncoder(&buf).Encode(agent.TelemetryRequest{Envelopes: []transport.Envelope{env}})
+	_ = json.NewEncoder(&buf).Encode(agent.TelemetryRequest{ProtocolVersion: agent.ProtocolVersion, Envelopes: []transport.Envelope{env}})
 	req := withPeerCert(httptest.NewRequest(http.MethodPost, "/api/v1/agent/telemetry", &buf), cert)
 	rec := httptest.NewRecorder()
 	handlerFunc(h.Telemetry)(rec, req)
@@ -396,7 +396,7 @@ func TestTelemetryAcceptsWithinToleranceAndRecordsSkew(t *testing.T) {
 
 	env := testEnvelope("node-1", time.Now().Add(-2*time.Second))
 	var buf bytes.Buffer
-	_ = json.NewEncoder(&buf).Encode(agent.TelemetryRequest{Envelopes: []transport.Envelope{env}})
+	_ = json.NewEncoder(&buf).Encode(agent.TelemetryRequest{ProtocolVersion: agent.ProtocolVersion, Envelopes: []transport.Envelope{env}})
 	req := withPeerCert(httptest.NewRequest(http.MethodPost, "/api/v1/agent/telemetry", &buf), cert)
 	rec := httptest.NewRecorder()
 	handlerFunc(h.Telemetry)(rec, req)
@@ -410,6 +410,97 @@ func TestTelemetryAcceptsWithinToleranceAndRecordsSkew(t *testing.T) {
 	}
 	if skew.nodeID != "node-1" {
 		t.Errorf("skew recorded for node %q, want node-1", skew.nodeID)
+	}
+}
+
+func TestTelemetryRejectsProtocolVersionMismatch(t *testing.T) {
+	t.Parallel()
+	recv := &recordingReceiver{kind: transport.KindMetrics}
+	h, ca := testHandler(t, &fakeTokens{ok: true}, newFakeCredentials(), &fakeDenylist{denied: map[string]bool{}}, recv, nil)
+	cert := issueCert(t, ca, "node-1")
+
+	for _, version := range []int{0, agent.ProtocolVersion + 1} {
+		env := testEnvelope("node-1", time.Now())
+		var buf bytes.Buffer
+		_ = json.NewEncoder(&buf).Encode(agent.TelemetryRequest{ProtocolVersion: version, Envelopes: []transport.Envelope{env}})
+		req := withPeerCert(httptest.NewRequest(http.MethodPost, "/api/v1/agent/telemetry", &buf), cert)
+		rec := httptest.NewRecorder()
+		handlerFunc(h.Telemetry)(rec, req)
+
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("protocol version %d: status = %d, want 400", version, rec.Code)
+		}
+	}
+	if len(recv.received) != 0 {
+		t.Errorf("receiver got %d envelopes from version-mismatched batches, want 0", len(recv.received))
+	}
+}
+
+func TestTelemetryRejectsInvalidEnvelope(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		env  transport.Envelope
+	}{
+		{
+			name: "payload missing required field",
+			env: transport.NewEnvelope(
+				transport.Origin{Hostname: "h"},
+				collect.Batch{Samples: []collect.Sample{
+					{Metric: "m", Value: 1, Unit: collect.UnitCount, Kind: collect.KindGauge, Time: time.Now()},
+				}},
+			),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			recv := &recordingReceiver{kind: transport.KindMetrics}
+			h, ca := testHandler(t, &fakeTokens{ok: true}, newFakeCredentials(), &fakeDenylist{denied: map[string]bool{}}, recv, nil)
+			cert := issueCert(t, ca, "node-1")
+
+			env := tt.env
+			env.SentAt = time.Now()
+			var buf bytes.Buffer
+			_ = json.NewEncoder(&buf).Encode(agent.TelemetryRequest{ProtocolVersion: agent.ProtocolVersion, Envelopes: []transport.Envelope{env}})
+			req := withPeerCert(httptest.NewRequest(http.MethodPost, "/api/v1/agent/telemetry", &buf), cert)
+			rec := httptest.NewRecorder()
+			handlerFunc(h.Telemetry)(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+			}
+			var resp agent.TelemetryResponse
+			if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if resp.Accepted != 0 || len(resp.Rejected) != 1 || resp.Rejected[0].Reason != "invalid_envelope" {
+				t.Errorf("response = %+v, want one rejection reason invalid_envelope", resp)
+			}
+			if len(recv.received) != 0 {
+				t.Error("an invalid envelope reached the receiver")
+			}
+		})
+	}
+}
+
+func TestTelemetryRejectsMalformedEnvelopeBatch(t *testing.T) {
+	t.Parallel()
+	recv := &recordingReceiver{kind: transport.KindMetrics}
+	h, ca := testHandler(t, &fakeTokens{ok: true}, newFakeCredentials(), &fakeDenylist{denied: map[string]bool{}}, recv, nil)
+	cert := issueCert(t, ca, "node-1")
+
+	body := `{"protocol_version":1,"envelopes":[{"id":"env-1","origin":{"node_id":"node-1"},"payload":null}]}`
+	req := withPeerCert(httptest.NewRequest(http.MethodPost, "/api/v1/agent/telemetry", bytes.NewBufferString(body)), cert)
+	rec := httptest.NewRecorder()
+	handlerFunc(h.Telemetry)(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 for a malformed envelope", rec.Code)
+	}
+	if len(recv.received) != 0 {
+		t.Error("a malformed envelope reached the receiver")
 	}
 }
 

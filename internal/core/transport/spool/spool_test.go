@@ -214,6 +214,38 @@ func TestReopenDiscardsEntriesOlderThanMaxAge(t *testing.T) {
 	}
 }
 
+// A crash between opening a temp file and renaming it leaves an orphan that
+// no scan matching only *.envelope.json would ever see — it would escape both
+// the MaxBytes and MaxAge accounting and leak disk across crash cycles.
+func TestReopenSweepsOrphanedTempFiles(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	s, err := spool.Open(spool.Options{Dir: dir})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := s.Enqueue(testEnvelope("node-1", "live")); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+
+	orphan := filepath.Join(dir, "00000000000000009999.envelope.json.tmp")
+	if err := os.WriteFile(orphan, []byte(`{"partial":`), 0o600); err != nil {
+		t.Fatalf("write orphan: %v", err)
+	}
+
+	reopened, err := spool.Open(spool.Options{Dir: dir})
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	if reopened.Len() != 1 {
+		t.Errorf("Len after reopen = %d, want 1 (the orphan must not be queued)", reopened.Len())
+	}
+	if _, err := os.Stat(orphan); !os.IsNotExist(err) {
+		t.Errorf("orphaned temp file still present after reopen (stat err = %v)", err)
+	}
+}
+
 func TestPeekNAndDequeueNBatch(t *testing.T) {
 	t.Parallel()
 

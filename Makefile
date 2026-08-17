@@ -54,6 +54,21 @@ build: ## Build the atlas-server binary into bin/
 	go build -trimpath -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/$(BINARY) ./cmd/$(BINARY)
 	@echo "built $(BIN_DIR)/$(BINARY) ($(VERSION))"
 
+.PHONY: build-agent
+build-agent: ## Build the atlas-agent binary into bin/
+	@mkdir -p $(BIN_DIR)
+	go build -trimpath -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/atlas-agent ./cmd/atlas-agent
+	@echo "built $(BIN_DIR)/atlas-agent ($(VERSION))"
+
+.PHONY: build-relay
+build-relay: ## Build the atlas-relay binary into bin/
+	@mkdir -p $(BIN_DIR)
+	go build -trimpath -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/atlas-relay ./cmd/atlas-relay
+	@echo "built $(BIN_DIR)/atlas-relay ($(VERSION))"
+
+.PHONY: build-all
+build-all: build build-agent build-relay ## Build every binary
+
 .PHONY: run
 run: ## Run Atlas against the local development database
 	ATLAS_DATABASE_PASSWORD=atlas_dev_password \

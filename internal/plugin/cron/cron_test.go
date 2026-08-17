@@ -366,3 +366,44 @@ func (f *fakeProvider) Jobs(context.Context) ([]Job, error) {
 }
 
 var _ Provider = (*fakeProvider)(nil)
+
+func TestInventoryRedactsJobCommandSecretsByDefault(t *testing.T) {
+	t.Parallel()
+
+	provider := &fakeProvider{jobs: []Job{
+		{Schedule: "0 3 * * *", Command: `curl -H "Authorization: Bearer eyJhbGciOiJIUzI1" https://api.example.com/backup`},
+		{Schedule: "*/5 * * * *", Command: "/usr/local/bin/healthcheck --port 8080"},
+	}}
+	p := New(Options{Provider: provider})
+
+	got, err := p.Inventory(context.Background())
+	if err != nil {
+		t.Fatalf("Inventory: %v", err)
+	}
+
+	if strings.Contains(got[0].Command, "eyJhbGciOiJIUzI1") {
+		t.Errorf("command = %q, still carries the bearer token", got[0].Command)
+	}
+	if !strings.Contains(got[0].Command, "curl") || !strings.Contains(got[0].Command, "https://api.example.com/backup") {
+		t.Errorf("command = %q, want the job still identifiable", got[0].Command)
+	}
+	if got[1].Command != "/usr/local/bin/healthcheck --port 8080" {
+		t.Errorf("command = %q, want ordinary arguments untouched", got[1].Command)
+	}
+}
+
+func TestInventoryRedactionCanBeDisabledExplicitly(t *testing.T) {
+	t.Parallel()
+
+	const raw = "mysql -uroot -pSuperSecret -e 'select 1'"
+	provider := &fakeProvider{jobs: []Job{{Schedule: "0 3 * * *", Command: raw}}}
+	p := New(Options{Provider: provider, DisableSecretRedaction: true})
+
+	got, err := p.Inventory(context.Background())
+	if err != nil {
+		t.Fatalf("Inventory: %v", err)
+	}
+	if got[0].Command != raw {
+		t.Errorf("command = %q, want %q when redaction is explicitly disabled", got[0].Command, raw)
+	}
+}

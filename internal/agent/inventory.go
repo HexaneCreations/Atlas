@@ -52,9 +52,17 @@ func inventorySources(
 		}})
 	}
 	if active["system"] {
-		sources = append(sources, inventorySource{coreinventory.SubjectMounts, func(ctx context.Context) (any, error) {
-			return systemPlugin.Mounts(ctx)
-		}})
+		sources = append(sources,
+			inventorySource{coreinventory.SubjectMounts, func(ctx context.Context) (any, error) {
+				return systemPlugin.Mounts(ctx)
+			}},
+			inventorySource{coreinventory.SubjectNetwork, func(ctx context.Context) (any, error) {
+				return systemPlugin.NetworkIdentity(ctx)
+			}},
+			inventorySource{coreinventory.SubjectHost, func(ctx context.Context) (any, error) {
+				return systemPlugin.Host(ctx)
+			}},
+		)
 	}
 	if active["docker"] {
 		sources = append(sources, inventorySource{coreinventory.SubjectContainers, func(ctx context.Context) (any, error) {
@@ -76,25 +84,58 @@ type inventorySource struct {
 
 // inventoryPusher periodically pushes changed inventory snapshots.
 //
-// A subject is skipped when its content hash is unchanged since the last
-// push — most subjects on a stable host rarely change, and this is what
-// keeps the steady-state push volume low.
+// A subject is skipped for a relationship when its content hash is unchanged
+// since the last push that relationship actually accepted — most subjects on
+// a stable host rarely change, and this is what keeps the steady-state push
+// volume low.
+//
+// The hash is tracked per relationship, never globally. Inventory is
+// snapshot-class: it is dropped rather than spooled on failure, so a global
+// cache would let a push that one control plane accepted and another
+// rejected be recorded as delivered to both, leaving the second carrying
+// stale inventory indefinitely — until the underlying data happened to
+// change again.
 type inventoryPusher struct {
-	tr       transport.Transport
+	fanout   *fanoutTransport
 	origin   transport.Origin
 	sources  []inventorySource
 	interval time.Duration
 	logger   *slog.Logger
 
 	mu       sync.Mutex
-	lastHash map[coreinventory.Subject]string
+	lastHash map[string]map[coreinventory.Subject]string
 }
 
-func newInventoryPusher(tr transport.Transport, origin transport.Origin, interval time.Duration, logger *slog.Logger, sources []inventorySource) *inventoryPusher {
+func newInventoryPusher(fanout *fanoutTransport, origin transport.Origin, interval time.Duration, logger *slog.Logger, sources []inventorySource) *inventoryPusher {
 	return &inventoryPusher{
-		tr: tr, origin: origin, sources: sources, interval: interval,
-		logger: logger, lastHash: map[coreinventory.Subject]string{},
+		fanout: fanout, origin: origin, sources: sources, interval: interval,
+		logger: logger, lastHash: map[string]map[coreinventory.Subject]string{},
 	}
+}
+
+// staleRelationships returns the relationships that have not accepted this
+// exact content for this subject yet.
+func (p *inventoryPusher) staleRelationships(subject coreinventory.Subject, hash string) []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	var stale []string
+	for _, id := range p.fanout.targetIDs() {
+		if p.lastHash[id][subject] != hash {
+			stale = append(stale, id)
+		}
+	}
+	return stale
+}
+
+func (p *inventoryPusher) recordDelivered(id string, subject coreinventory.Subject, hash string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.lastHash[id] == nil {
+		p.lastHash[id] = map[coreinventory.Subject]string{}
+	}
+	p.lastHash[id][subject] = hash
 }
 
 func (p *inventoryPusher) run(ctx context.Context) {
@@ -132,10 +173,8 @@ func (p *inventoryPusher) pushAll(ctx context.Context) {
 		}
 
 		hash := contentHash(raw)
-		p.mu.Lock()
-		unchanged := p.lastHash[src.subject] == hash
-		p.mu.Unlock()
-		if unchanged {
+		stale := p.staleRelationships(src.subject, hash)
+		if len(stale) == 0 {
 			continue
 		}
 
@@ -143,15 +182,15 @@ func (p *inventoryPusher) pushAll(ctx context.Context) {
 			Subject: src.subject, ObservedAt: time.Now(), ContentHash: hash, Data: raw,
 		}
 		env := transport.NewEnvelopeOf(p.origin, payload)
-		if err := p.tr.Send(ctx, env); err != nil {
-			p.logger.WarnContext(ctx, "inventory push failed",
-				slog.String("subject", string(src.subject)), slog.String("error", err.Error()))
-			continue
+		for id, err := range p.fanout.SendTo(ctx, stale, env) {
+			if err != nil {
+				p.logger.WarnContext(ctx, "inventory push failed",
+					slog.String("relationship", id),
+					slog.String("subject", string(src.subject)), slog.String("error", err.Error()))
+				continue
+			}
+			p.recordDelivered(id, src.subject, hash)
 		}
-
-		p.mu.Lock()
-		p.lastHash[src.subject] = hash
-		p.mu.Unlock()
 	}
 }
 

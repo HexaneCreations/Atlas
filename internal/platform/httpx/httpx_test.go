@@ -445,6 +445,92 @@ func TestMaxBodyBytes(t *testing.T) {
 	}
 }
 
+// The agent-facing listener is reachable by every enrolled node, so each
+// of these protections is load-bearing there specifically — a missing body
+// cap or an unrecovered panic affects monitoring for the whole fleet, not
+// one browser session.
+func TestAgentMiddlewareCapsBodyRecoversPanicsAndTimesOut(t *testing.T) {
+	t.Parallel()
+
+	fleetCfg := config.Default().Fleet
+	fleetCfg.MaxRequestBytes = 16
+	fleetCfg.RequestTimeout = 30 * time.Millisecond
+
+	t.Run("body cap", func(t *testing.T) {
+		h := httpx.AgentMiddleware(fleetCfg)(httpx.Handler(func(_ http.ResponseWriter, r *http.Request) error {
+			buf := make([]byte, 1024)
+			for {
+				_, err := r.Body.Read(buf)
+				if err != nil {
+					if strings.Contains(err.Error(), "too large") {
+						return errs.New(errs.CodeInvalidArgument, "request body too large")
+					}
+					return nil
+				}
+			}
+		}))
+
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/agent/telemetry", strings.NewReader(strings.Repeat("x", 1024)))
+		h.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("status = %d, want 400 for an oversized agent body", rec.Code)
+		}
+	})
+
+	t.Run("panic recovery", func(t *testing.T) {
+		h := httpx.AgentMiddleware(fleetCfg)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+			panic("handler dereferenced a nil envelope")
+		}))
+
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/agent/telemetry", nil))
+
+		if rec.Code != http.StatusInternalServerError {
+			t.Errorf("status = %d, want 500", rec.Code)
+		}
+		if strings.Contains(rec.Body.String(), "nil envelope") {
+			t.Errorf("panic text leaked to the agent: %s", rec.Body.String())
+		}
+	})
+
+	t.Run("request timeout", func(t *testing.T) {
+		h := httpx.AgentMiddleware(fleetCfg)(httpx.Handler(func(_ http.ResponseWriter, r *http.Request) error {
+			select {
+			case <-r.Context().Done():
+				return errs.New(errs.CodeDeadlineExceeded, "request timed out")
+			case <-time.After(5 * time.Second):
+				return nil
+			}
+		}))
+
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/agent/telemetry", nil))
+
+		if rec.Code != http.StatusGatewayTimeout {
+			t.Errorf("status = %d, want 504", rec.Code)
+		}
+	})
+
+	// No browser calls this listener; advertising a CORS policy nothing
+	// enforces would misrepresent the protection actually in effect.
+	t.Run("no CORS headers", func(t *testing.T) {
+		h := httpx.AgentMiddleware(fleetCfg)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/agent/telemetry", nil)
+		req.Header.Set("Origin", "https://example.com")
+		h.ServeHTTP(rec, req)
+
+		if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "" {
+			t.Errorf("Access-Control-Allow-Origin = %q, want empty on the agent listener", got)
+		}
+	})
+}
+
 func TestTimeoutSetsDeadlineWithoutBuffering(t *testing.T) {
 	t.Parallel()
 

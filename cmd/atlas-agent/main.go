@@ -22,6 +22,7 @@ import (
 
 	"github.com/hexane/atlas/internal/agent"
 	"github.com/hexane/atlas/internal/platform/build"
+	"github.com/hexane/atlas/internal/platform/lock"
 )
 
 func main() {
@@ -62,6 +63,14 @@ func run() error {
 		return fmt.Errorf("create data dir: %w", err)
 	}
 
+	// Acquired before any identity/certificate/spool/relationship state is
+	// touched, and held for the process lifetime — see internal/platform/lock.
+	agentLock, err := lock.Acquire(agent.LockPath(cfg.DataDir))
+	if err != nil {
+		return err
+	}
+	defer agentLock.Release()
+
 	a, err := agent.New(ctx, cfg, logger)
 	if err != nil {
 		return fmt.Errorf("initialise agent: %w", err)
@@ -87,14 +96,19 @@ Environment variables:
   ATLAS_AGENT_TOKEN               Enrollment token; required only on first run
   ATLAS_AGENT_DATA_DIR            Certificate and spool storage (default /var/lib/atlas-agent)
   ATLAS_AGENT_CA_BUNDLE           Path to a PEM CA certificate, for verified bootstrap.
-                                  Omit to trust-on-first-use and pin the CA the
-                                  control plane returns during enrollment.
+  ATLAS_AGENT_INSECURE_BOOTSTRAP  Enroll with no CA bundle, trusting and pinning the
+                                  certificate presented on first contact. Must be set
+                                  explicitly; enrollment is otherwise refused when no
+                                  CA bundle is configured and none is pinned yet.
   ATLAS_AGENT_NODE_ID             Pin the node id explicitly. Empty derives one
                                   from the OS machine id.
   ATLAS_AGENT_ENVIRONMENT         Operator-assigned environment tag
   ATLAS_AGENT_COLLECTION_INTERVAL Metric collection interval (default 15s)
   ATLAS_AGENT_COLLECTION_TIMEOUT  Per-collector timeout (default 10s)
   ATLAS_AGENT_INVENTORY_INTERVAL  Inventory push interval (default 60s)
+  ATLAS_AGENT_SECRET_REDACTION_DISABLED
+                                  Transmit process command lines and cron commands
+                                  unredacted (default false — redaction is on).
   ATLAS_AGENT_LOG_LEVEL           info or debug (default info)
 
 Multiple Control Planes (optional):

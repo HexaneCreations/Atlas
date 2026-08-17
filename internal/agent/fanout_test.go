@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -32,7 +33,7 @@ func (f *fakeTransport) Close() error {
 func TestFanoutSendReachesEveryTarget(t *testing.T) {
 	t.Parallel()
 	a, b := &fakeTransport{}, &fakeTransport{}
-	f := newFanoutTransport([]transport.Transport{a, b})
+	f := newFanoutTransport([]fanoutTarget{{id: "a", tr: a}, {id: "b", tr: b}})
 
 	if err := f.Send(context.Background(), transport.Envelope{}); err != nil {
 		t.Fatalf("Send: %v", err)
@@ -49,7 +50,7 @@ func TestFanoutSendOneTargetFailingDoesNotAffectOthers(t *testing.T) {
 	t.Parallel()
 	failing := &fakeTransport{sendErr: errors.New("control plane unreachable")}
 	ok := &fakeTransport{}
-	f := newFanoutTransport([]transport.Transport{failing, ok})
+	f := newFanoutTransport([]fanoutTarget{{id: "failing", tr: failing}, {id: "ok", tr: ok}})
 
 	if err := f.Send(context.Background(), transport.Envelope{}); err != nil {
 		t.Fatalf("Send returned an error even though one target succeeded: %v", err)
@@ -66,7 +67,7 @@ func TestFanoutSendReturnsErrorOnlyWhenAllTargetsFail(t *testing.T) {
 	t.Parallel()
 	a := &fakeTransport{sendErr: errors.New("a down")}
 	b := &fakeTransport{sendErr: errors.New("b down")}
-	f := newFanoutTransport([]transport.Transport{a, b})
+	f := newFanoutTransport([]fanoutTarget{{id: "a", tr: a}, {id: "b", tr: b}})
 
 	err := f.Send(context.Background(), transport.Envelope{})
 	if err == nil {
@@ -82,7 +83,7 @@ func TestFanoutSendIsParallelNotSequential(t *testing.T) {
 	const delay = 100 * time.Millisecond
 	slow1 := &slowTransport{delay: delay}
 	slow2 := &slowTransport{delay: delay}
-	f := newFanoutTransport([]transport.Transport{slow1, slow2})
+	f := newFanoutTransport([]fanoutTarget{{id: "slow1", tr: slow1}, {id: "slow2", tr: slow2}})
 
 	start := time.Now()
 	if err := f.Send(context.Background(), transport.Envelope{}); err != nil {
@@ -106,7 +107,7 @@ func TestFanoutCloseClosesEveryTargetAndAggregatesErrors(t *testing.T) {
 	t.Parallel()
 	a := &fakeTransport{closeErr: errors.New("a close failed")}
 	b := &fakeTransport{}
-	f := newFanoutTransport([]transport.Transport{a, b})
+	f := newFanoutTransport([]fanoutTarget{{id: "a", tr: a}, {id: "b", tr: b}})
 
 	err := f.Close()
 	if !a.closed.Load() || !b.closed.Load() {
@@ -128,5 +129,78 @@ func TestFanoutWithZeroTargetsIsANoop(t *testing.T) {
 	}
 }
 
+// The same host is legitimately "development" to one control plane and
+// "production" to another; each must see its own tag, not a shared one.
+func TestFanoutStampsEachRelationshipsOwnEnvironment(t *testing.T) {
+	t.Parallel()
+	dev, prod := &recordingTransport{}, &recordingTransport{}
+	f := newFanoutTransport([]fanoutTarget{
+		{id: "development", environment: "development", tr: dev},
+		{id: "production", environment: "production", tr: prod},
+	})
+
+	env := transport.Envelope{Origin: transport.Origin{NodeID: "node-1", Environment: "unset"}}
+	if err := f.Send(context.Background(), env); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	if got := dev.last().Origin.Environment; got != "development" {
+		t.Errorf("development relationship saw environment %q, want development", got)
+	}
+	if got := prod.last().Origin.Environment; got != "production" {
+		t.Errorf("production relationship saw environment %q, want production", got)
+	}
+	if env.Origin.Environment != "unset" {
+		t.Errorf("caller's envelope was mutated: environment = %q", env.Origin.Environment)
+	}
+}
+
+func TestSendToDeliversOnlyToNamedRelationshipsAndReportsEachOutcome(t *testing.T) {
+	t.Parallel()
+	a := &fakeTransport{}
+	b := &fakeTransport{sendErr: errors.New("b down")}
+	c := &fakeTransport{}
+	f := newFanoutTransport([]fanoutTarget{{id: "a", tr: a}, {id: "b", tr: b}, {id: "c", tr: c}})
+
+	results := f.SendTo(context.Background(), []string{"a", "b"}, transport.Envelope{})
+
+	if len(results) != 2 {
+		t.Fatalf("results = %v, want one entry each for a and b", results)
+	}
+	if results["a"] != nil {
+		t.Errorf("results[a] = %v, want nil", results["a"])
+	}
+	if !errors.Is(results["b"], b.sendErr) {
+		t.Errorf("results[b] = %v, want %v", results["b"], b.sendErr)
+	}
+	if c.sent.Load() != 0 {
+		t.Error("an unnamed relationship was sent to")
+	}
+}
+
+type recordingTransport struct {
+	mu   sync.Mutex
+	envs []transport.Envelope
+}
+
+func (r *recordingTransport) Send(_ context.Context, env transport.Envelope) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.envs = append(r.envs, env)
+	return nil
+}
+
+func (r *recordingTransport) Close() error { return nil }
+
+func (r *recordingTransport) last() transport.Envelope {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.envs) == 0 {
+		return transport.Envelope{}
+	}
+	return r.envs[len(r.envs)-1]
+}
+
 var _ transport.Transport = (*fakeTransport)(nil)
 var _ transport.Transport = (*slowTransport)(nil)
+var _ transport.Transport = (*recordingTransport)(nil)

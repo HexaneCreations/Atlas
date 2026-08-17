@@ -175,3 +175,20 @@ func BaseMiddleware(cfg config.Server, requestTimeout time.Duration) Middleware 
 		Timeout(requestTimeout),
 	)
 }
+
+// AgentMiddleware returns the chain the agent-facing listener runs through,
+// in the same order as [BaseMiddleware], with two differences: CORS is
+// omitted (no browser reaches this listener, so advertising a policy nothing
+// enforces would mislead), and the body cap comes from the fleet config,
+// because a telemetry batch legitimately exceeds the browser API's 1 MiB.
+func AgentMiddleware(cfg config.Fleet) Middleware {
+	return Chain(
+		Recoverer(),
+		RequestID(),
+		AccessLog(),
+		SecurityHeaders(),
+		PerNodeRateLimit(cfg.MaxRequestsPerMinute),
+		MaxBodyBytes(cfg.MaxRequestBytes),
+		Timeout(cfg.RequestTimeout),
+	)
+}

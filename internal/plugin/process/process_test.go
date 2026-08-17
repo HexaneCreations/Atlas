@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -416,3 +417,57 @@ func (f *fakeProvider) Processes(context.Context) ([]Process, error) {
 }
 
 var _ Provider = (*fakeProvider)(nil)
+
+// A command line routinely carries a credential passed as an argument. The
+// default must withhold it, and must keep everything else that makes the
+// process identifiable.
+func TestInventoryRedactsCommandLineSecretsByDefault(t *testing.T) {
+	t.Parallel()
+
+	provider := &fakeProvider{procs: []Process{
+		{PID: 1, Name: "mysqldump", Cmdline: "mysqldump -uroot -pSuperSecret atlas"},
+		{PID: 2, Name: "java", Cmdline: "java -Xmx4g -jar app.jar --port 8080"},
+	}}
+	p := New(Options{Provider: provider})
+
+	got, err := p.Inventory(context.Background())
+	if err != nil {
+		t.Fatalf("Inventory: %v", err)
+	}
+
+	var mysqldump, java Process
+	for _, proc := range got {
+		switch proc.Name {
+		case "mysqldump":
+			mysqldump = proc
+		case "java":
+			java = proc
+		}
+	}
+
+	if strings.Contains(mysqldump.Cmdline, "SuperSecret") {
+		t.Errorf("cmdline = %q, still carries the password", mysqldump.Cmdline)
+	}
+	if !strings.Contains(mysqldump.Cmdline, "mysqldump") || !strings.Contains(mysqldump.Cmdline, "-uroot") {
+		t.Errorf("cmdline = %q, want the process still identifiable", mysqldump.Cmdline)
+	}
+	if java.Cmdline != "java -Xmx4g -jar app.jar --port 8080" {
+		t.Errorf("cmdline = %q, want ordinary arguments untouched", java.Cmdline)
+	}
+}
+
+func TestInventoryRedactionCanBeDisabledExplicitly(t *testing.T) {
+	t.Parallel()
+
+	const raw = "mysqldump -uroot -pSuperSecret atlas"
+	provider := &fakeProvider{procs: []Process{{PID: 1, Name: "mysqldump", Cmdline: raw}}}
+	p := New(Options{Provider: provider, DisableSecretRedaction: true})
+
+	got, err := p.Inventory(context.Background())
+	if err != nil {
+		t.Fatalf("Inventory: %v", err)
+	}
+	if got[0].Cmdline != raw {
+		t.Errorf("cmdline = %q, want %q when redaction is explicitly disabled", got[0].Cmdline, raw)
+	}
+}
