@@ -85,7 +85,9 @@ type RelationshipHealth struct {
 
 	// CertificateExpiry is when this relationship's client certificate stops
 	// being accepted. An agent whose renewal loop is silently failing looks
-	// healthy until this passes, which is exactly why it is reported.
+	// healthy until this passes, which is exactly why it is reported. Zero
+	// for a libp2p relationship: it holds no certificate, so there is no
+	// expiry to watch.
 	CertificateExpiry time.Time `json:"certificate_expiry,omitzero"`
 	CertificateValid  bool      `json:"certificate_valid"`
 }

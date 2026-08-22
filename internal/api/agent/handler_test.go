@@ -356,6 +356,71 @@ func TestTelemetryBindsOriginToVerifiedIdentity(t *testing.T) {
 	}
 }
 
+// The libp2p path: no client certificate exists at all, and the identity
+// comes from the peer authorization the middleware resolved. The same C1
+// binding must still hold — the receiver sees the authorized node id, not
+// whatever the envelope claimed — and the authorized environment overrides
+// the agent's own tag, because the registration is the operator's statement
+// about that machine.
+func TestTelemetryBindsOriginToAuthorizedPeerIdentityWithoutACertificate(t *testing.T) {
+	t.Parallel()
+	recv := &recordingReceiver{kind: transport.KindMetrics}
+	h, _ := testHandler(t, &fakeTokens{ok: true}, newFakeCredentials(), &fakeDenylist{denied: map[string]bool{}}, recv, nil)
+
+	env := testEnvelope("", time.Now())
+	env.Origin.Environment = "whatever-the-agent-said"
+	var buf bytes.Buffer
+	_ = json.NewEncoder(&buf).Encode(agent.TelemetryRequest{ProtocolVersion: agent.ProtocolVersion, Envelopes: []transport.Envelope{env}})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agent/telemetry", &buf)
+	req = req.WithContext(agent.WithPeerIdentity(req.Context(), fleet.PeerIdentity{
+		PeerID: "12D3KooWPlaceholder", NodeID: "node-1", Environment: "production", Role: fleet.PeerRoleAgent,
+	}))
+	rec := httptest.NewRecorder()
+	handlerFunc(h.Telemetry)(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if len(recv.received) != 1 {
+		t.Fatalf("receiver got %d envelopes, want 1", len(recv.received))
+	}
+	if got := recv.received[0].Origin.NodeID; got != "node-1" {
+		t.Errorf("Origin.NodeID = %q, want node-1 (from the authorized peer)", got)
+	}
+	if got := recv.received[0].Origin.Environment; got != "production" {
+		t.Errorf("Origin.Environment = %q, want production (from the authorization, not the agent's claim)", got)
+	}
+}
+
+// An envelope claiming another node is rejected on the libp2p path exactly
+// as it is on the mTLS one — the proof changed, the rule did not.
+func TestTelemetryRejectsIdentityMismatchOnTheLibP2PPath(t *testing.T) {
+	t.Parallel()
+	recv := &recordingReceiver{kind: transport.KindMetrics}
+	h, _ := testHandler(t, &fakeTokens{ok: true}, newFakeCredentials(), &fakeDenylist{denied: map[string]bool{}}, recv, nil)
+
+	env := testEnvelope("node-2", time.Now())
+	var buf bytes.Buffer
+	_ = json.NewEncoder(&buf).Encode(agent.TelemetryRequest{ProtocolVersion: agent.ProtocolVersion, Envelopes: []transport.Envelope{env}})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agent/telemetry", &buf)
+	req = req.WithContext(agent.WithPeerIdentity(req.Context(), fleet.PeerIdentity{NodeID: "node-1", Environment: "production"}))
+	rec := httptest.NewRecorder()
+	handlerFunc(h.Telemetry)(rec, req)
+
+	var resp agent.TelemetryResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Accepted != 0 || len(resp.Rejected) != 1 || resp.Rejected[0].Reason != "identity_mismatch" {
+		t.Errorf("response = %+v, want one rejection reason identity_mismatch", resp)
+	}
+	if len(recv.received) != 0 {
+		t.Error("a forged envelope reached the receiver")
+	}
+}
+
 // H6: a sample timestamped far outside tolerance is rejected rather than
 // trusted, and must not reach the receiver.
 func TestTelemetryRejectsClockSkewBeyondTolerance(t *testing.T) {

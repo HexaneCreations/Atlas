@@ -2,8 +2,6 @@ package app
 
 import (
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -38,8 +36,10 @@ const envelopeRetention = 48 * time.Hour
 // reservation actually lapses.
 const relayReservationRenewInterval = 20 * time.Minute
 
-// fleetPipeline is the agent-facing mTLS listener: enrollment, renewal, and
-// telemetry ingest. Inert when cfg.Fleet.Enabled is false.
+// fleetPipeline is the agent-facing listener: enrollment, renewal, and
+// telemetry ingest over HTTPS/mTLS, plus the same telemetry surface over
+// libp2p, where Noise authenticates the Peer ID and agent_peers authorizes
+// it. Inert when cfg.Fleet.Enabled is false.
 type fleetPipeline struct {
 	cfg        *config.Config
 	logger     *slog.Logger
@@ -52,21 +52,15 @@ type fleetPipeline struct {
 	libp2pServer *httpx.TLSServer
 	libp2pHost   host.Host
 	relayAddr    string // circuit multiaddr, set only when Fleet.LibP2PRelayAddr is configured
-	// caCert and serverLeaf back the reversed mTLS handshake AgentOps uses
-	// (see libp2ptransport.RequestContainerLogs) — the same CA and
-	// certificate already minted for the agent-facing listener, not a
-	// separate trust root.
-	caCert     *x509.Certificate
-	serverLeaf tls.Certificate
 	// peerByNode maps a NodeID to the libp2p Peer ID it was last seen
 	// dialing in from — in-memory only, populated as a side effect of the
-	// Agent's own existing enroll/renew/telemetry traffic (see
-	// recordAgentPeer), the same "no new state, no persistence" posture as
-	// the Relay's rendezvous registry. A stale or missing entry surfaces
-	// naturally as a failed stream open, not as a separate liveness check.
+	// Agent's own telemetry traffic (see recordAgentPeer), the same "no new
+	// state, no persistence" posture as the Relay's rendezvous registry. A
+	// stale or missing entry surfaces naturally as a failed stream open, not
+	// as a separate liveness check.
 	peerByNode map[string]peer.ID
 	// grants is the CP-side AgentOps authorization check — see ContainerLogs.
-	// Set once at Start alongside caCert/serverLeaf.
+	// Set once at Start.
 	grants corefleet.GrantStore
 	stopCh chan struct{}
 	wg     sync.WaitGroup
@@ -132,17 +126,17 @@ func (f *fleetPipeline) Start(ctx context.Context) error {
 	f.mu.Lock()
 	f.server = server
 	f.stopCh = make(chan struct{})
-	f.caCert = ca.Cert()
-	f.serverLeaf = serverLeaf
 	f.peerByNode = make(map[string]peer.ID)
 	f.grants = fleetRepo
 	f.mu.Unlock()
 
-	// libp2p is a second, POC listener for the same mux — see
-	// docs/adr/0012-connect-by-identity.md. It carries the identical
-	// enrollment/renewal/telemetry HTTP surface, just reached by Peer ID
-	// instead of a dialable address, so an operator behind NAT needs no
-	// forwarded port for this listener to exist.
+	// libp2p is a second listener for the same mux — see
+	// docs/adr/0012-connect-by-identity.md. It carries the same telemetry
+	// HTTP surface, reached by Peer ID instead of a dialable address, so an
+	// operator behind NAT needs no forwarded port for this listener to
+	// exist. It authenticates differently: Noise proves the Peer ID, and
+	// agent_peers says which node that peer may act as, so nothing on this
+	// path enrolls or presents a certificate.
 	if f.cfg.Fleet.LibP2PEnabled {
 		p2pHost, err := libp2ptransport.NewHost(libp2ptransport.HostOptions{
 			DataDir: f.cfg.Fleet.DataDir, ListenAddrs: f.cfg.Fleet.LibP2PListenAddrs, Logger: f.logger,
@@ -155,12 +149,17 @@ func (f *fleetPipeline) Start(ctx context.Context) error {
 			_ = p2pHost.Close()
 			return err
 		}
-		// recordAgentPeer wraps only this listener's mux, not the shared one
-		// the HTTPS listener also serves — an r.RemoteAddr from a plain TCP
-		// connection is an IP, not a Peer ID, so recording it would be
-		// meaningless (and recordAgentPeer's own peer.Decode guards against
-		// treating it as one regardless).
-		libp2pServer := httpx.NewTLSServerFromListener("fleet.server.libp2p", listener, httpx.AgentMiddleware(f.cfg.Fleet)(f.recordAgentPeer(mux)), tlsConfig, f.logger)
+		// No TLS on this listener, and no enrollment behind it: the Noise
+		// handshake that brought the stream up already authenticated both
+		// Peer IDs and encrypted the bytes. PeerAuthMiddleware supplies the
+		// authorization the handshake cannot — which node this peer is
+		// registered to speak for — from agent_peers, and injects it for the
+		// handlers to use in place of a client certificate. Mounted only on
+		// this listener: the HTTPS one keeps mTLS unchanged (see ADR-0012
+		// and migrations/0011_agent_peers.sql).
+		peerAuth := agentapi.PeerAuthMiddleware(fleetRepo, f.logger, f.recordAgentPeer)
+		libp2pServer := httpx.NewServerFromListener("fleet.server.libp2p", listener,
+			httpx.AgentMiddleware(f.cfg.Fleet)(peerAuth(mux)), f.logger)
 		if err := libp2pServer.Start(ctx); err != nil {
 			_ = p2pHost.Close()
 			return err
@@ -218,20 +217,12 @@ func (f *fleetPipeline) LibP2PPeerAddrs() []string {
 	return libp2ptransport.Addrs(f.libp2pHost)
 }
 
-// recordAgentPeer wraps next with a side effect: for every request that
-// arrives with a verified mTLS client certificate, it records which libp2p
-// Peer ID it came in on, keyed by the certificate's NodeID.
-//
-// Nothing about this needs a new mechanism. [pki.PeerNodeID] is the same
-// authenticated-identity extraction every agent-facing handler already
-// performs; r.RemoteAddr, for a request that arrived over the libp2p
-// listener, is already the peer's libp2p Peer ID as a string — verified
-// directly against the go-libp2p-gostream source: gostream's net.Conn wraps
-// a network.Stream and its RemoteAddr().String() returns
-// stream.Conn().RemotePeer().String(), and Go's net/http copies
-// conn.RemoteAddr() into every Request.RemoteAddr automatically. No wire
-// format change, no Agent-side change, populated as a side effect of traffic
-// the Agent already sends (enroll, renew, telemetry).
+// recordAgentPeer notes which libp2p Peer ID a node is currently reachable
+// at, for the reverse (AgentOps) direction. It is called by
+// [agentapi.PeerAuthMiddleware] once per authorized request, so both halves
+// of the pair are already established facts: the Peer ID by the Noise
+// handshake, the node id by the operator's own agent_peers registration.
+// Neither is a claim from the request.
 //
 // The map is never proactively pruned on disconnect: a stale entry simply
 // fails the next AgentOps stream open (no live connection to reuse, and the
@@ -239,19 +230,13 @@ func (f *fleetPipeline) LibP2PPeerAddrs() []string {
 // exactly the "no active session" signal RemoteLogSource's caller needs.
 // Actively tracking connect/disconnect events would only make that failure
 // arrive slightly sooner, at the cost of a second bookkeeping mechanism.
-func (f *fleetPipeline) recordAgentPeer(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
-			if nodeID, err := pki.PeerNodeID(r.TLS.PeerCertificates[0]); err == nil {
-				if pid, err := peer.Decode(r.RemoteAddr); err == nil {
-					f.mu.Lock()
-					f.peerByNode[nodeID] = pid
-					f.mu.Unlock()
-				}
-			}
-		}
-		next.ServeHTTP(w, r)
-	})
+func (f *fleetPipeline) recordAgentPeer(id corefleet.PeerIdentity, pid peer.ID) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.peerByNode == nil {
+		f.peerByNode = make(map[string]peer.ID)
+	}
+	f.peerByNode[id.NodeID] = pid
 }
 
 // ContainerLogs implements v1.RemoteLogSource: it proxies a live log session
@@ -269,12 +254,10 @@ func (f *fleetPipeline) ContainerLogs(ctx context.Context, nodeID, containerID s
 	grants := f.grants
 	pid, known := f.peerByNode[nodeID]
 	p2pHost := f.libp2pHost
-	caCert := f.caCert
-	serverLeaf := f.serverLeaf
 	f.mu.RUnlock()
 
-	// Authorization is explicit and independent of authentication: a live,
-	// non-denylisted certificate is never by itself sufficient to invoke a
+	// Authorization is explicit and independent of authentication: an
+	// authenticated peer is never by itself sufficient to invoke a
 	// privileged operation (see docs/architecture/security.md).
 	granted, err := grants.IsGranted(ctx, nodeID, corefleet.OperationContainerLogs)
 	if err != nil {
@@ -312,7 +295,7 @@ func (f *fleetPipeline) ContainerLogs(ctx context.Context, nodeID, containerID s
 		req.Since = opts.Since.Format(time.RFC3339)
 	}
 
-	frames, err := libp2ptransport.RequestContainerLogs(ctx, p2pHost, pid, nodeID, caCert, serverLeaf, req)
+	frames, err := libp2ptransport.RequestContainerLogs(ctx, p2pHost, pid, req)
 	if err != nil {
 		close(lines)
 		errCh <- err

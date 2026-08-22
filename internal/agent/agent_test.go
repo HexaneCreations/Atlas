@@ -3,7 +3,6 @@ package agent
 import (
 	"context"
 	"crypto/rand"
-	"crypto/tls"
 	"crypto/x509"
 	"os"
 	"testing"
@@ -135,8 +134,8 @@ func TestResolveLibP2PServerPeerIDRejectsTruncatedPeerID(t *testing.T) {
 	}
 }
 
-// --- AgentOps demux: a Production relationship must never serve a stream
-// using Development's CA/certificate, and vice versa ------------------------
+// --- AgentOps demux: each inbound stream is decided on the Peer ID it
+// arrived from, never on insertion order or on holding a credential --------
 
 func testRelationshipRuntime(id string) *relationshipRuntime {
 	return &relationshipRuntime{
@@ -152,6 +151,7 @@ func testRelationshipRuntime(id string) *relationshipRuntime {
 func TestBuildAgentOpsLookupRoutesByPeerIDNotByInsertionOrder(t *testing.T) {
 	t.Parallel()
 	prodPeer, devPeer := testPeerID(t, "prod-cp"), testPeerID(t, "dev-cp")
+	stranger := testPeerID(t, "stranger")
 
 	relationships := map[string]*relationshipRuntime{
 		"production":  testRelationshipRuntime("production"),
@@ -161,36 +161,28 @@ func TestBuildAgentOpsLookupRoutesByPeerIDNotByInsertionOrder(t *testing.T) {
 
 	lookup := buildAgentOpsLookup(relationships, peerIDToRelationship)
 
-	prodCA, _, _, ok := lookup(prodPeer)
-	if !ok {
-		t.Fatal("lookup(prodPeer) not ok")
+	if _, ok := lookup(prodPeer); !ok {
+		t.Error("lookup(prodPeer) not ok")
 	}
-	devCA, _, _, ok := lookup(devPeer)
-	if !ok {
-		t.Fatal("lookup(devPeer) not ok")
+	if _, ok := lookup(devPeer); !ok {
+		t.Error("lookup(devPeer) not ok")
 	}
-	if prodCA == devCA {
-		t.Fatal("production and development peers resolved to the same CA — cross-relationship contamination")
-	}
-	if prodCA != relationships["production"].caCert {
-		t.Error("prodPeer did not resolve to production's own CA")
-	}
-	if devCA != relationships["development"].caCert {
-		t.Error("devPeer did not resolve to development's own CA")
+	if _, ok := lookup(stranger); ok {
+		t.Error("lookup accepted a peer id belonging to no relationship")
 	}
 }
 
 func TestBuildAgentOpsLookupRejectsUnknownPeer(t *testing.T) {
 	t.Parallel()
 	lookup := buildAgentOpsLookup(map[string]*relationshipRuntime{}, map[peer.ID]string{})
-	if _, _, _, ok := lookup(testPeerID(t, "stranger")); ok {
+	if _, ok := lookup(testPeerID(t, "stranger")); ok {
 		t.Error("lookup accepted a peer id it has no relationship record for")
 	}
 }
 
 // A relationship whose peer id was known statically (from config) but which
-// did not survive bootstrap must not serve AgentOps — there is no live
-// credential to present.
+// did not survive bootstrap must not serve AgentOps — the Agent has no
+// working relationship with that control plane.
 func TestBuildAgentOpsLookupRejectsPeerOfARelationshipThatFailedBootstrap(t *testing.T) {
 	t.Parallel()
 	devPeer := testPeerID(t, "dev-cp")
@@ -199,7 +191,7 @@ func TestBuildAgentOpsLookupRejectsPeerOfARelationshipThatFailedBootstrap(t *tes
 	peerIDToRelationship := map[peer.ID]string{devPeer: "development"}
 	lookup := buildAgentOpsLookup(map[string]*relationshipRuntime{}, peerIDToRelationship)
 
-	if _, _, _, ok := lookup(devPeer); ok {
+	if _, ok := lookup(devPeer); ok {
 		t.Error("lookup served a peer belonging to a relationship that never finished bootstrapping")
 	}
 }
@@ -215,7 +207,7 @@ func TestBuildAgentOpsLookupHonorsPerRelationshipAuthorization(t *testing.T) {
 		map[peer.ID]string{prodPeer: "production"},
 	)
 
-	_, _, allow, ok := lookup(prodPeer)
+	allow, ok := lookup(prodPeer)
 	if !ok {
 		t.Fatal("lookup(prodPeer) not ok")
 	}
@@ -224,28 +216,22 @@ func TestBuildAgentOpsLookupHonorsPerRelationshipAuthorization(t *testing.T) {
 	}
 }
 
-func TestBuildAgentOpsLookupGetCertUsesTheRelationshipsOwnHolder(t *testing.T) {
+// A libp2p relationship holds no certificate at all now (no enrollment), so
+// the demux must still serve it — authorization is the peer id, never the
+// presence of a credential.
+func TestBuildAgentOpsLookupServesRelationshipWithNoCredential(t *testing.T) {
 	t.Parallel()
 	prodPeer := testPeerID(t, "prod-cp")
-	rt := testRelationshipRuntime("production")
-	leaf := &tls.Certificate{Certificate: [][]byte{{1, 2, 3}}}
-	rt.holder.set(leaf, nil)
+	rt := &relationshipRuntime{id: "production", relCfg: relationshipConfig{id: "production"}}
 
 	lookup := buildAgentOpsLookup(
 		map[string]*relationshipRuntime{"production": rt},
 		map[peer.ID]string{prodPeer: "production"},
 	)
 
-	_, getCert, _, ok := lookup(prodPeer)
-	if !ok {
-		t.Fatal("lookup(prodPeer) not ok")
-	}
-	got, err := getCert(nil)
-	if err != nil {
-		t.Fatalf("getCert: %v", err)
-	}
-	if got != leaf {
-		t.Error("getCert did not return this relationship's own current credential")
+	allow, ok := lookup(prodPeer)
+	if !ok || !allow {
+		t.Fatalf("lookup = (%v, %v), want (true, true) for a credential-free libp2p relationship", allow, ok)
 	}
 }
 

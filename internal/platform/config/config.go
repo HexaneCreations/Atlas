@@ -84,7 +84,8 @@ type Config struct {
 	Fleet      Fleet                `yaml:"fleet" json:"fleet" env:"FLEET"`
 }
 
-// Fleet configures the agent-facing mTLS listener. Disabled by default: a
+// Fleet configures the agent-facing listeners: the HTTPS/mTLS one, and
+// optionally the libp2p one (see LibP2PEnabled). Disabled by default: a
 // single-node deployment needs none of it.
 type Fleet struct {
 	Enabled bool   `yaml:"enabled" json:"enabled" env:"ENABLED"`
@@ -98,14 +99,16 @@ type Fleet struct {
 
 	// LibP2PEnabled starts a second agent-facing listener reachable by Peer
 	// ID instead of address — see docs/adr/0012-connect-by-identity.md. It
-	// serves the identical mux (enrollment, renewal, telemetry) as the HTTPS
-	// listener; only the wire underneath differs. Off by default: this is a
-	// POC transport, not a replacement for HTTPS + mTLS.
+	// serves the same mux as the HTTPS listener, but authenticates
+	// differently: the Noise handshake proves the caller's Peer ID and the
+	// agent_peers table authorizes it, so no TLS, certificate or enrollment
+	// token is involved on this listener. Off by default; the HTTPS + mTLS
+	// listener is unaffected either way.
 	LibP2PEnabled bool `yaml:"libp2p_enabled" json:"libp2p_enabled" env:"LIBP2P_ENABLED"`
 	// LibP2PListenAddrs are the multiaddrs this control plane accepts
 	// inbound libp2p streams on, e.g. "/ip4/0.0.0.0/tcp/4102". Required when
-	// LibP2PEnabled is true — this is the side of the POC that must be
-	// reachable.
+	// LibP2PEnabled is true — the control plane is the side that must be
+	// reachable; agents dial out and never listen.
 	LibP2PListenAddrs []string `yaml:"libp2p_listen_addrs" json:"libp2p_listen_addrs" env:"LIBP2P_LISTEN_ADDRS"`
 	// LibP2PRelayAddr is Atlas Relay's full multiaddr (including its Peer
 	// ID) — see docs/adr/0012-connect-by-identity.md. When set, the control
@@ -127,10 +130,11 @@ type Fleet struct {
 	RequestTimeout time.Duration `yaml:"request_timeout" json:"request_timeout" env:"REQUEST_TIMEOUT"`
 
 	// MaxRequestsPerMinute bounds how often one enrolled node may call the
-	// agent API. A single misconfigured or compromised agent must not be
-	// able to flood ingest for the whole fleet. Counted per node identity
-	// (mTLS peer certificate), not per IP: many agents can share an egress
-	// address, and one agent can move between addresses.
+	// agent API over the HTTPS listener. A single misconfigured or
+	// compromised agent must not be able to flood ingest for the whole
+	// fleet. Counted per node identity (mTLS peer certificate), not per IP:
+	// many agents can share an egress address, and one agent can move
+	// between addresses.
 	MaxRequestsPerMinute int `yaml:"max_requests_per_minute" json:"max_requests_per_minute" env:"MAX_REQUESTS_PER_MINUTE"`
 }
 

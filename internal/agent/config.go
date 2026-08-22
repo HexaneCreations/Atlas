@@ -18,13 +18,18 @@ type Config struct {
 	NodeID          string
 	Environment     string
 	// InsecureBootstrap permits first-contact enrollment with no CA bundle
-	// configured. See RelationshipBootstrap.InsecureBootstrap.
+	// configured. Applies to the https transport only — libp2p relationships
+	// never enroll. See RelationshipBootstrap.InsecureBootstrap.
 	InsecureBootstrap bool
 
-	// Transport selects what carries requests to the control plane: "https"
-	// (default, TCP + mTLS) or "libp2p" (POC — dial by Peer ID; see
-	// docs/adr/0012-connect-by-identity.md). Only the dial changes; the
-	// enrollment, renewal and telemetry HTTP calls are identical either way.
+	// Transport selects what carries requests to the control plane, and with
+	// it how the Agent authenticates: "https" (default) dials TCP and speaks
+	// mTLS with an enrollment-issued certificate, while "libp2p" dials by
+	// Peer ID and is authenticated by the Noise handshake alone — no token,
+	// no certificate, no renewal, with the control plane authorizing that
+	// Peer ID from its agent_peers table (see
+	// docs/adr/0012-connect-by-identity.md). The telemetry HTTP calls
+	// themselves are identical either way.
 	Transport string
 	// LibP2PServerAddr is a full manually-assembled control plane multiaddr,
 	// including its Peer ID (".../p2p/<id>", or a

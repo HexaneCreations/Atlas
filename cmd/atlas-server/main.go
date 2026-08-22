@@ -72,6 +72,8 @@ func run() error {
 		return printConfig(configPath)
 	case "enroll-token":
 		return enrollToken(configPath, flags.Args()[1:])
+	case "peer":
+		return peerCommand(configPath, flags.Args()[1:])
 	case "version":
 		fmt.Println(build.Current())
 		return nil
@@ -92,7 +94,8 @@ Commands:
   serve             run the server (default)
   migrate           apply pending database migrations and exit
   config            print the resolved configuration, with secrets redacted
-  enroll-token      create an agent enrollment token
+  enroll-token      create an agent enrollment token (HTTPS/mTLS transport only)
+  peer              authorize, list or revoke an agent libp2p Peer ID
   version           print build information
 
 Flags:

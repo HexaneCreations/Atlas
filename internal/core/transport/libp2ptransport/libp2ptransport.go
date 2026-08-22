@@ -1,14 +1,22 @@
-// Package libp2ptransport is the connect-by-identity POC transport described
-// in docs/adr/0012-connect-by-identity.md: a libp2p Peer ID carries an Atlas
+// Package libp2ptransport is the connect-by-identity transport described in
+// docs/adr/0012-connect-by-identity.md: a libp2p Peer ID carries an Atlas
 // [github.com/hexane/atlas/internal/core/transport.Transport] payload over an
 // encrypted stream instead of a plain TCP connection.
 //
+// The libp2p Noise handshake is the authentication layer on this path. It
+// proves both Peer IDs and encrypts the stream before any Atlas byte is
+// exchanged, so what rides on top is plain HTTP — there is no TLS, no
+// certificate and no enrollment inside a libp2p stream. Which node an
+// authenticated Peer ID may act as is a separate, server-side authorization
+// question, answered from the agent_peers table (see
+// migrations/0011_agent_peers.sql and internal/api/agent.PeerAuthMiddleware).
+//
+// The HTTPS transport is unaffected by any of this and keeps its existing
+// enrollment/token/X.509 mTLS flow.
+//
 // It deliberately does nothing beyond dialing and listening on one libp2p
-// protocol. Everything else — the HTTP telemetry protocol, X.509 mTLS
-// authorization, enrollment, spooling, retries — is unchanged; this package
-// only supplies the [net.Conn] / [net.Listener] that carries it, so the
-// existing http.Client and http.Server plumb straight through, per ADR-0012's
-// "libp2p answers how to reach this peer, X.509 answers whether to trust it."
+// protocol; the HTTP telemetry protocol, spooling and retries are unchanged,
+// so the existing http.Client and http.Server plumb straight through.
 package libp2ptransport
 
 import (
@@ -38,18 +46,18 @@ import (
 )
 
 // ProtocolID is the libp2p stream protocol Atlas telemetry travels on. One
-// protocol carries the entire existing agent-facing HTTP surface (enroll,
-// renew, telemetry) — a libp2p stream replaces the TCP connection underneath
-// http.Server/http.Client, it does not replace the HTTP semantics riding on
-// top.
+// protocol carries the whole agent-facing HTTP surface — a libp2p stream
+// replaces the TCP connection underneath http.Server/http.Client, it does not
+// replace the HTTP semantics riding on top.
 const ProtocolID = protocolID
 
 const protocolID = "/atlas/transport/1.0.0"
 
-// identityFileName is where the Peer ID keypair is persisted, alongside but
-// separate from the X.509 identity in the same data directory — see
-// ADR-0012: routing identity and authorization identity are deliberately two
-// keypairs, not one.
+// identityFileName is where the Peer ID keypair is persisted. On the libp2p
+// path this is the agent's only identity: it authenticates the connection,
+// and the control plane authorizes it by Peer ID. An agent that also uses the
+// HTTPS transport keeps its separate X.509 identity in the same data
+// directory — see ADR-0012: two transports, two keypairs, never conflated.
 const identityFileName = "p2p-identity.key"
 
 // LoadOrCreateIdentity returns this node's persistent libp2p identity,
@@ -173,9 +181,10 @@ func ParseTarget(addr string) (peer.AddrInfo, error) {
 }
 
 // Dial opens a stream to target on [ProtocolID] and returns it as a
-// [net.Conn], so it can be handed to an unmodified crypto/tls client — the
-// same Atlas mTLS handshake and certificate logic that runs over a plain TCP
-// dial runs unchanged over this stream.
+// [net.Conn], so it can be handed to an unmodified http.Client. The returned
+// conn is already authenticated and encrypted by the Noise handshake that
+// brought the connection up — target.ID is proven, not assumed — so the HTTP
+// on top of it needs no TLS of its own.
 func Dial(ctx context.Context, h host.Host, target peer.AddrInfo) (net.Conn, error) {
 	const op = "libp2ptransport.Dial"
 	if len(target.Addrs) > 0 {
@@ -191,8 +200,11 @@ func Dial(ctx context.Context, h host.Host, target peer.AddrInfo) (net.Conn, err
 }
 
 // Listen accepts inbound [ProtocolID] streams as a [net.Listener], so an
-// unmodified http.Server (already TLS-configured for agent mTLS) can Serve
-// on it exactly as it does on a TCP listener.
+// unmodified http.Server can Serve on it exactly as it does on a TCP
+// listener — without TLS, since each accepted stream is already
+// authenticated and encrypted by Noise. Each conn's RemoteAddr is the
+// verified remote Peer ID, which is what
+// internal/api/agent.PeerAuthMiddleware authorizes against agent_peers.
 func Listen(h host.Host) (net.Listener, error) {
 	const op = "libp2ptransport.Listen"
 	l, err := gostream.Listen(h, protocolID)

@@ -1,8 +1,64 @@
 # ADR-0012: Connect by identity, never by address
 
-- **Status:** Accepted
+- **Status:** Accepted (amended 2026-08-18)
 - **Date:** 2026-08-08
 - **Phase:** 4
+
+## Amendment (2026-08-18): the libp2p path authenticates by Peer ID alone
+
+The decision below is unchanged in its core — agents connect to an identity,
+not an address — but one part of it has since been superseded. As originally
+written, the libp2p stream carried the existing X.509 enrollment flow inside
+it: the agent still enrolled with a token, still received a certificate, and
+still spoke mTLS within the encrypted stream. That is no longer the case.
+
+The libp2p path now authenticates with the Noise handshake and nothing else:
+
+```text
+Agent → libp2p connection
+     ↓
+Noise handshake
+     ↓
+Peer ID cryptographically verified
+     ↓
+encrypted libp2p stream
+     ↓
+plain HTTP / AgentOps protocol
+     ↓
+Atlas server
+     ↓
+agent_peers lookup by Peer ID
+     ↓
+NodeID + Environment + Role
+     ↓
+authorization
+```
+
+Concretely, on the libp2p transport there is no enrollment, no token, no CSR,
+no certificate issuance, no renewal loop, and no TLS of any kind inside the
+stream — including for AgentOps, whose reversed mTLS handshake is gone. The
+identity that mattered was already proven by Noise before any Atlas byte was
+exchanged; proving a second, enrollment-derived identity on top of it bought
+nothing and made an agent's ability to talk at all depend on a token.
+
+What each mechanism now answers:
+
+| Concern | Mechanism |
+| --- | --- |
+| Authentication (libp2p) | libp2p Peer ID, proven by the Noise handshake |
+| Authorization (libp2p) | `agent_peers` allowlist, keyed by Peer ID (migration 0011) |
+| Machine identity | NodeID, read from the `agent_peers` record, never from a request body |
+| Operation authorization | `agent_operation_grants`, unchanged and still independent |
+| Authentication (HTTPS) | Existing enrollment + token + X.509 mTLS + renewal, **unchanged** |
+
+The separation the original decision insisted on is therefore stronger, not
+weaker: authentication and authorization are now two different mechanisms with
+two different owners, rather than one certificate standing in for both. What
+changed is only which mechanism authenticates a libp2p stream.
+
+The rest of this ADR is preserved as the original decision record. Where it
+says the X.509 enrollment flow runs inside the libp2p stream, read this
+amendment instead; everything it says about the HTTPS transport still holds.
 
 ## Context
 

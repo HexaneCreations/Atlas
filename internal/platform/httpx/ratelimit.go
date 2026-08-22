@@ -26,9 +26,11 @@ const limiterIdleTTL = 30 * time.Minute
 // many agents legitimately share an egress IP, and one agent moves between
 // addresses, so limiting by address would either punish a whole site or
 // miss the agent it was meant to bound. A request with no verified
-// certificate is not limited here — it has not been authenticated yet, and
-// the routes that accept it enforce their own admission (enrollment tokens
-// are single-use, bounded, and expiring).
+// certificate is not limited here, and the routes that accept it enforce
+// their own admission: on the HTTPS listener that is enrollment (tokens are
+// single-use, bounded and expiring), and on the libp2p listener it is the
+// Noise-authenticated Peer ID checked against agent_peers (see
+// internal/api/agent.PeerAuthMiddleware).
 func PerNodeRateLimit(requestsPerMinute int) Middleware {
 	limiters := newNodeLimiters(rate.Limit(float64(requestsPerMinute)/60), requestsPerMinute)
 

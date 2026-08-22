@@ -3,9 +3,9 @@ package libp2ptransport
 import (
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,12 +14,24 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 )
 
-// staticLookup adapts a single caCert/getCert/allowContainerLogs — the
-// pre-Phase-3 single-relationship shape — into an AgentOpsRelationshipLookup
-// that accepts any peer, for tests exercising one relationship in isolation.
-func staticLookup(caCert *x509.Certificate, getCert func(*tls.ClientHelloInfo) (*tls.Certificate, error), allowContainerLogs bool) AgentOpsRelationshipLookup {
-	return func(peer.ID) (*x509.Certificate, func(*tls.ClientHelloInfo) (*tls.Certificate, error), bool, bool) {
-		return caCert, getCert, allowContainerLogs, true
+// acceptAnyPeer accepts every peer, for tests exercising one relationship in
+// isolation. Peer-id-based rejection has its own tests below.
+func acceptAnyPeer(allowContainerLogs bool) AgentOpsRelationshipLookup {
+	return func(peer.ID) (bool, bool) { return allowContainerLogs, true }
+}
+
+// onlyPeers accepts exactly the listed peers — the shape a real Agent builds
+// from its own configured control-plane Peer IDs (see agent.buildAgentOpsLookup).
+func onlyPeers(allowContainerLogs bool, allowed ...peer.ID) AgentOpsRelationshipLookup {
+	set := make(map[peer.ID]bool, len(allowed))
+	for _, p := range allowed {
+		set[p] = true
+	}
+	return func(remote peer.ID) (bool, bool) {
+		if !set[remote] {
+			return false, false
+		}
+		return allowContainerLogs, true
 	}
 }
 
@@ -151,17 +163,14 @@ func TestAgentOpFrameJSONRoundTrip(t *testing.T) {
 // --- #11 / #12: non-follow and follow log delivery ----------------------
 
 func TestRequestContainerLogsNonFollow(t *testing.T) {
-	ca := testCA(t)
-	controlPlaneLeaf := testControlPlaneLeaf(t, ca)
-	agentLeaf := testAgentLeaf(t, ca, "node-a")
 	serverHost, agentHost := setupAgentOpsHosts(t)
 
 	want := []LogLine{{Message: "one"}, {Message: "two"}, {Message: "three"}}
-	RegisterAgentOpsHandler(agentHost, fixedLinesFunc(want), NewSessionLimiter(4), staticLookup(ca.Cert(), staticCert(agentLeaf), true))
+	RegisterAgentOpsHandler(agentHost, fixedLinesFunc(want), NewSessionLimiter(4), acceptAnyPeer(true))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	frames, err := RequestContainerLogs(ctx, serverHost, agentHost.ID(), "node-a", ca.Cert(), controlPlaneLeaf,
+	frames, err := RequestContainerLogs(ctx, serverHost, agentHost.ID(),
 		AgentOpRequest{ProtocolVersion: AgentOpsProtocolVersion, Op: AgentOpContainerLogs, ContainerID: "c1"})
 	if err != nil {
 		t.Fatalf("RequestContainerLogs: %v", err)
@@ -187,9 +196,6 @@ func TestRequestContainerLogsNonFollow(t *testing.T) {
 }
 
 func TestRequestContainerLogsFollow(t *testing.T) {
-	ca := testCA(t)
-	controlPlaneLeaf := testControlPlaneLeaf(t, ca)
-	agentLeaf := testAgentLeaf(t, ca, "node-a")
 	serverHost, agentHost := setupAgentOpsHosts(t)
 
 	produced := make(chan LogLine)
@@ -215,11 +221,11 @@ func TestRequestContainerLogsFollow(t *testing.T) {
 		}()
 		return out, errCh, nil
 	}
-	RegisterAgentOpsHandler(agentHost, logsFunc, NewSessionLimiter(4), staticLookup(ca.Cert(), staticCert(agentLeaf), true))
+	RegisterAgentOpsHandler(agentHost, logsFunc, NewSessionLimiter(4), acceptAnyPeer(true))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	frames, err := RequestContainerLogs(ctx, serverHost, agentHost.ID(), "node-a", ca.Cert(), controlPlaneLeaf,
+	frames, err := RequestContainerLogs(ctx, serverHost, agentHost.ID(),
 		AgentOpRequest{ProtocolVersion: AgentOpsProtocolVersion, Op: AgentOpContainerLogs, ContainerID: "c1", Follow: true})
 	if err != nil {
 		t.Fatalf("RequestContainerLogs: %v", err)
@@ -255,9 +261,6 @@ func TestRequestContainerLogsFollow(t *testing.T) {
 // --- #14: cancellation propagates to the agent-side (Docker-facing) ctx --
 
 func TestRequestContainerLogsCancellationReachesAgentContext(t *testing.T) {
-	ca := testCA(t)
-	controlPlaneLeaf := testControlPlaneLeaf(t, ca)
-	agentLeaf := testAgentLeaf(t, ca, "node-a")
 	serverHost, agentHost := setupAgentOpsHosts(t)
 
 	started := make(chan struct{})
@@ -272,10 +275,10 @@ func TestRequestContainerLogsCancellationReachesAgentContext(t *testing.T) {
 		}()
 		return out, errCh, nil
 	}
-	RegisterAgentOpsHandler(agentHost, logsFunc, NewSessionLimiter(4), staticLookup(ca.Cert(), staticCert(agentLeaf), true))
+	RegisterAgentOpsHandler(agentHost, logsFunc, NewSessionLimiter(4), acceptAnyPeer(true))
 
 	ctx, cancel := context.WithCancel(context.Background())
-	frames, err := RequestContainerLogs(ctx, serverHost, agentHost.ID(), "node-a", ca.Cert(), controlPlaneLeaf,
+	frames, err := RequestContainerLogs(ctx, serverHost, agentHost.ID(),
 		AgentOpRequest{ProtocolVersion: AgentOpsProtocolVersion, Op: AgentOpContainerLogs, ContainerID: "c1", Follow: true})
 	if err != nil {
 		t.Fatalf("RequestContainerLogs: %v", err)
@@ -342,27 +345,24 @@ func setupTwoControlPlaneHosts(t *testing.T) (serverA, serverB, agentHost host.H
 	return serverA, serverB, agentHost
 }
 
-// The core Phase 3 cross-package guarantee: a single shared Agent host,
-// talking to two relationships with two entirely independent CAs, must route
-// each inbound AgentOps stream to that relationship's own trust context —
-// never mixing them up regardless of which order they connect or which
-// order streams arrive in.
-func TestHandleAgentOpsStreamRoutesEachRelationshipToItsOwnCA(t *testing.T) {
-	caA, caB := testCA(t), testCA(t)
-	agentLeafA := testAgentLeaf(t, caA, "node-a")
-	agentLeafB := testAgentLeaf(t, caB, "node-a")
-	controlPlaneLeafA := testControlPlaneLeaf(t, caA)
-	controlPlaneLeafB := testControlPlaneLeaf(t, caB)
+// The core multi-relationship guarantee: a single shared Agent host talking
+// to two control planes must decide each inbound AgentOps stream on the Peer
+// ID that stream actually arrived from — the identity Noise proved — and
+// never mix the two up regardless of connection or stream order.
+func TestHandleAgentOpsStreamRoutesEachRelationshipByPeerID(t *testing.T) {
 	serverA, serverB, agentHost := setupTwoControlPlaneHosts(t)
 
-	lookup := func(remotePeer peer.ID) (*x509.Certificate, func(*tls.ClientHelloInfo) (*tls.Certificate, error), bool, bool) {
-		switch remotePeer {
-		case serverA.ID():
-			return caA.Cert(), staticCert(agentLeafA), true, true
-		case serverB.ID():
-			return caB.Cert(), staticCert(agentLeafB), true, true
+	var mu sync.Mutex
+	var seen []peer.ID
+	lookup := func(remote peer.ID) (bool, bool) {
+		mu.Lock()
+		seen = append(seen, remote)
+		mu.Unlock()
+		switch remote {
+		case serverA.ID(), serverB.ID():
+			return true, true
 		default:
-			return nil, nil, false, false
+			return false, false
 		}
 	}
 	RegisterAgentOpsHandler(agentHost, fixedLinesFunc([]LogLine{{Message: "ok"}}), NewSessionLimiter(4), lookup)
@@ -370,7 +370,7 @@ func TestHandleAgentOpsStreamRoutesEachRelationshipToItsOwnCA(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	framesA, err := RequestContainerLogs(ctx, serverA, agentHost.ID(), "node-a", caA.Cert(), controlPlaneLeafA,
+	framesA, err := RequestContainerLogs(ctx, serverA, agentHost.ID(),
 		AgentOpRequest{ProtocolVersion: AgentOpsProtocolVersion, Op: AgentOpContainerLogs, ContainerID: "c1"})
 	if err != nil {
 		t.Fatalf("RequestContainerLogs (A): %v", err)
@@ -379,7 +379,7 @@ func TestHandleAgentOpsStreamRoutesEachRelationshipToItsOwnCA(t *testing.T) {
 		t.Fatalf("relationship A frame = %+v, ok=%v, want a genuine line", f, ok)
 	}
 
-	framesB, err := RequestContainerLogs(ctx, serverB, agentHost.ID(), "node-a", caB.Cert(), controlPlaneLeafB,
+	framesB, err := RequestContainerLogs(ctx, serverB, agentHost.ID(),
 		AgentOpRequest{ProtocolVersion: AgentOpsProtocolVersion, Op: AgentOpContainerLogs, ContainerID: "c1"})
 	if err != nil {
 		t.Fatalf("RequestContainerLogs (B): %v", err)
@@ -387,37 +387,40 @@ func TestHandleAgentOpsStreamRoutesEachRelationshipToItsOwnCA(t *testing.T) {
 	if f, ok := <-framesB; !ok || f.Type != "line" || f.Message != "ok" {
 		t.Fatalf("relationship B frame = %+v, ok=%v, want a genuine line", f, ok)
 	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seen) != 2 || seen[0] != serverA.ID() || seen[1] != serverB.ID() {
+		t.Fatalf("lookup saw %v, want exactly [serverA, serverB] — the peer id each stream really arrived from", seen)
+	}
 }
 
-// Even though serverA's peer id is registered (it is relationship A's
-// control plane), presenting a certificate signed by relationship B's CA
-// must still be rejected — the peer-id-based routing selects *which* CA to
-// check against, it is never a substitute for the chain check itself.
-func TestHandleAgentOpsStreamRejectsPeerPresentingWrongRelationshipsCert(t *testing.T) {
-	caA, caB := testCA(t), testCA(t)
-	agentLeafA := testAgentLeaf(t, caA, "node-a")
-	wrongLeaf := testControlPlaneLeaf(t, caB) // valid CP leaf, but from B's CA
-	serverA, _, agentHost := setupTwoControlPlaneHosts(t)
+// A peer that is not one of this Agent's control planes gets no session, even
+// though the libp2p connection itself is perfectly valid. Authentication (the
+// Noise handshake) is never by itself authorization.
+func TestHandleAgentOpsStreamRejectsUnregisteredPeer(t *testing.T) {
+	serverA, serverB, agentHost := setupTwoControlPlaneHosts(t)
 
-	lookup := func(remotePeer peer.ID) (*x509.Certificate, func(*tls.ClientHelloInfo) (*tls.Certificate, error), bool, bool) {
-		if remotePeer == serverA.ID() {
-			return caA.Cert(), staticCert(agentLeafA), true, true
-		}
-		return nil, nil, false, false
+	called := false
+	logs := func(context.Context, string, int, time.Time, bool, bool) (<-chan LogLine, <-chan error, error) {
+		called = true
+		return nil, nil, nil
 	}
-	RegisterAgentOpsHandler(agentHost, fixedLinesFunc(nil), NewSessionLimiter(4), lookup)
+	// Only serverA is one of the Agent's relationships; serverB is a stranger.
+	RegisterAgentOpsHandler(agentHost, logs, NewSessionLimiter(4), onlyPeers(true, serverA.ID()))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	frames, err := RequestContainerLogs(ctx, serverA, agentHost.ID(), "node-a", caA.Cert(), wrongLeaf,
+	frames, err := RequestContainerLogs(ctx, serverB, agentHost.ID(),
 		AgentOpRequest{ProtocolVersion: AgentOpsProtocolVersion, Op: AgentOpContainerLogs, ContainerID: "c1"})
-	// Same TLS 1.3 handshake-asymmetry posture as the other CA-mismatch tests
-	// in this file.
 	if err != nil {
-		return
+		return // stream dropped before the request was even written
 	}
 	if f, ok := <-frames; ok {
-		t.Fatalf("expected no session: relationship A's registered peer presented a certificate from relationship B's CA, got frame %+v", f)
+		t.Fatalf("expected no session for an unregistered peer, got frame %+v", f)
+	}
+	if called {
+		t.Error("the Docker-facing logs func must never run for an unregistered peer")
 	}
 }
 
@@ -428,9 +431,6 @@ func TestHandleAgentOpsStreamRejectsPeerPresentingWrongRelationshipsCert(t *test
 // correct node) and still be refused: allowContainerLogs is a separate,
 // local gate. No Docker call must ever be attempted when it is false.
 func TestHandleAgentOpsStreamRefusesUnauthorizedContainerLogs(t *testing.T) {
-	ca := testCA(t)
-	controlPlaneLeaf := testControlPlaneLeaf(t, ca)
-	agentLeaf := testAgentLeaf(t, ca, "node-a")
 	serverHost, agentHost := setupAgentOpsHosts(t)
 
 	called := false
@@ -438,11 +438,11 @@ func TestHandleAgentOpsStreamRefusesUnauthorizedContainerLogs(t *testing.T) {
 		called = true
 		return nil, nil, nil
 	}
-	RegisterAgentOpsHandler(agentHost, logs, NewSessionLimiter(4), staticLookup(ca.Cert(), staticCert(agentLeaf), false))
+	RegisterAgentOpsHandler(agentHost, logs, NewSessionLimiter(4), acceptAnyPeer(false))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	frames, err := RequestContainerLogs(ctx, serverHost, agentHost.ID(), "node-a", ca.Cert(), controlPlaneLeaf,
+	frames, err := RequestContainerLogs(ctx, serverHost, agentHost.ID(),
 		AgentOpRequest{ProtocolVersion: AgentOpsProtocolVersion, Op: AgentOpContainerLogs, ContainerID: "c1"})
 	if err != nil {
 		t.Fatalf("RequestContainerLogs: %v", err)
@@ -460,16 +460,13 @@ func TestHandleAgentOpsStreamRefusesUnauthorizedContainerLogs(t *testing.T) {
 // --- #3: unsupported operation --------------------------------------------
 
 func TestRegisterAgentOpsHandlerRejectsUnknownOp(t *testing.T) {
-	ca := testCA(t)
-	controlPlaneLeaf := testControlPlaneLeaf(t, ca)
-	agentLeaf := testAgentLeaf(t, ca, "node-a")
 	serverHost, agentHost := setupAgentOpsHosts(t)
 
-	RegisterAgentOpsHandler(agentHost, fixedLinesFunc(nil), NewSessionLimiter(4), staticLookup(ca.Cert(), staticCert(agentLeaf), true))
+	RegisterAgentOpsHandler(agentHost, fixedLinesFunc(nil), NewSessionLimiter(4), acceptAnyPeer(true))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	frames, err := RequestContainerLogs(ctx, serverHost, agentHost.ID(), "node-a", ca.Cert(), controlPlaneLeaf,
+	frames, err := RequestContainerLogs(ctx, serverHost, agentHost.ID(),
 		AgentOpRequest{ProtocolVersion: AgentOpsProtocolVersion, Op: "container_restart", ContainerID: "c1"})
 	if err != nil {
 		t.Fatalf("RequestContainerLogs: %v", err)
@@ -487,16 +484,13 @@ func TestRegisterAgentOpsHandlerRejectsUnknownOp(t *testing.T) {
 // --- #7 / #8: agent-side error surfaced as an error frame -----------------
 
 func TestRequestContainerLogsSurfacesAgentSideError(t *testing.T) {
-	ca := testCA(t)
-	controlPlaneLeaf := testControlPlaneLeaf(t, ca)
-	agentLeaf := testAgentLeaf(t, ca, "node-a")
 	serverHost, agentHost := setupAgentOpsHosts(t)
 
-	RegisterAgentOpsHandler(agentHost, erroringLogsFunc("docker is not available on this host"), NewSessionLimiter(4), staticLookup(ca.Cert(), staticCert(agentLeaf), true))
+	RegisterAgentOpsHandler(agentHost, erroringLogsFunc("docker is not available on this host"), NewSessionLimiter(4), acceptAnyPeer(true))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	frames, err := RequestContainerLogs(ctx, serverHost, agentHost.ID(), "node-a", ca.Cert(), controlPlaneLeaf,
+	frames, err := RequestContainerLogs(ctx, serverHost, agentHost.ID(),
 		AgentOpRequest{ProtocolVersion: AgentOpsProtocolVersion, Op: AgentOpContainerLogs, ContainerID: "does-not-exist"})
 	if err != nil {
 		t.Fatalf("RequestContainerLogs: %v", err)
@@ -508,147 +502,40 @@ func TestRequestContainerLogsSurfacesAgentSideError(t *testing.T) {
 	}
 }
 
-// --- #4: authentication failure (untrusted CA) -----------------------------
+// --- authentication is the Noise handshake -------------------------------
+//
+// The reversed-mTLS handshake these tests used to exercise (untrusted CA,
+// wrong node identity, impostor control-plane certificate) is gone: it proved
+// a second, enrollment-derived identity on a channel whose identity libp2p
+// had already proven, which is the enrollment dependency ADR-0012 removes.
+// What replaced it is covered above — the Peer ID a stream arrived from is
+// the identity, and TestHandleAgentOpsStreamRejectsUnregisteredPeer is the
+// rejection case. go-libp2p itself guarantees the dial half: a stream is
+// never returned on a connection whose remote peer is not the requested one.
 
-func TestRequestContainerLogsRejectsAgentFromUntrustedCA(t *testing.T) {
-	ca := testCA(t)
-	otherCA := testCA(t) // a different fleet's CA — agentLeaf below is not signed by ca
-	controlPlaneLeaf := testControlPlaneLeaf(t, ca)
-	agentLeaf := testAgentLeaf(t, otherCA, "node-a")
+func TestRequestContainerLogsRefusesUnreachablePeer(t *testing.T) {
 	serverHost, agentHost := setupAgentOpsHosts(t)
-
-	RegisterAgentOpsHandler(agentHost, fixedLinesFunc(nil), NewSessionLimiter(4), staticLookup(ca.Cert(), staticCert(agentLeaf), true))
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	_, err := RequestContainerLogs(ctx, serverHost, agentHost.ID(), "node-a", ca.Cert(), controlPlaneLeaf,
-		AgentOpRequest{ProtocolVersion: AgentOpsProtocolVersion, Op: AgentOpContainerLogs, ContainerID: "c1"})
-	if err == nil {
-		t.Fatal("expected the handshake to fail against a certificate from an untrusted CA")
-	}
-}
-
-// --- #5: authorization failure (wrong node identity) -----------------------
-
-func TestRequestContainerLogsRejectsWrongNodeIdentity(t *testing.T) {
-	ca := testCA(t)
-	controlPlaneLeaf := testControlPlaneLeaf(t, ca)
-	// agentHost's certificate genuinely identifies "node-a", signed by the
-	// real fleet CA — but the control plane believes it is calling "node-b"
-	// (e.g. a stale registry entry). This must not be accepted.
-	agentLeaf := testAgentLeaf(t, ca, "node-a")
-	serverHost, agentHost := setupAgentOpsHosts(t)
-
-	RegisterAgentOpsHandler(agentHost, fixedLinesFunc(nil), NewSessionLimiter(4), staticLookup(ca.Cert(), staticCert(agentLeaf), true))
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	_, err := RequestContainerLogs(ctx, serverHost, agentHost.ID(), "node-b", ca.Cert(), controlPlaneLeaf,
-		AgentOpRequest{ProtocolVersion: AgentOpsProtocolVersion, Op: AgentOpContainerLogs, ContainerID: "c1"})
-	if err == nil {
-		t.Fatal("expected rejection when the presented certificate names a different node than expected")
-	}
-}
-
-// verifyControlPlaneCertificate's own authorization check: an Agent must not
-// accept a stream from a peer presenting another Agent's certificate, even
-// though it is signed by the same trusted fleet CA. The Agent's
-// VerifyPeerCertificate rejection aborts the TLS handshake, which the
-// control-plane side observes as its own handshake failing.
-func TestHandleAgentOpsStreamRejectsNonControlPlaneCertificate(t *testing.T) {
-	ca := testCA(t)
-	// The "control plane" side presents another Agent's leaf certificate
-	// instead of the real control plane's — same CA, wrong identity.
-	impostorLeaf := testAgentLeaf(t, ca, "some-other-node")
-	agentLeaf := testAgentLeaf(t, ca, "node-a")
-	serverHost, agentHost := setupAgentOpsHosts(t)
-
-	RegisterAgentOpsHandler(agentHost, fixedLinesFunc(nil), NewSessionLimiter(4), staticLookup(ca.Cert(), staticCert(agentLeaf), true))
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	frames, err := RequestContainerLogs(ctx, serverHost, agentHost.ID(), "node-a", ca.Cert(), impostorLeaf,
-		AgentOpRequest{ProtocolVersion: AgentOpsProtocolVersion, Op: AgentOpContainerLogs, ContainerID: "c1"})
-	// TLS 1.3 mutual auth is asymmetric here: the control-plane side's own
-	// Handshake call can return success before it has learned the Agent
-	// rejected its certificate — that only surfaces on the next read. So the
-	// real assertion is that no genuine session ever gets established: no
-	// frame is ever delivered, either because the setup itself errors or
-	// because the frames channel closes immediately empty.
+	stranger, err := NewHost(HostOptions{DataDir: t.TempDir()})
 	if err != nil {
-		return
+		t.Fatalf("stranger host: %v", err)
 	}
-	if f, ok := <-frames; ok {
-		t.Fatalf("expected no session to be established for an impostor certificate, got frame %+v", f)
-	}
-}
+	t.Cleanup(func() { _ = stranger.Close() })
 
-// --- Phase 1: control-plane identity must be scoped to the specific CA the
-// Agent pins for this relationship, not "any control plane certificate the
-// Agent happens to trust" -----------------------------------------------
-
-// A certificate that is a genuine, correctly-shaped control-plane leaf (real
-// ControlPlaneURI SAN, ServerAuth EKU) but signed by a *different* CA than
-// the one the Agent pinned must still be rejected. Before Phase 1 this check
-// only asked "does CommonName say atlas-control-plane", which a certificate
-// from any CA could satisfy identically; the chain-to-CA check existed
-// separately but the identity check itself carried no CA-specific signal.
-func TestHandleAgentOpsStreamRejectsControlPlaneFromWrongCA(t *testing.T) {
-	ca := testCA(t)      // the CA the Agent pins for this connection
-	otherCA := testCA(t) // a different control plane's CA
-	agentLeaf := testAgentLeaf(t, ca, "node-a")
-	wrongControlPlaneLeaf := testControlPlaneLeaf(t, otherCA) // valid CP leaf, wrong CA
-	serverHost, agentHost := setupAgentOpsHosts(t)
-
-	RegisterAgentOpsHandler(agentHost, fixedLinesFunc(nil), NewSessionLimiter(4), staticLookup(ca.Cert(), staticCert(agentLeaf), true))
+	RegisterAgentOpsHandler(agentHost, fixedLinesFunc(nil), NewSessionLimiter(4), acceptAnyPeer(true))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	frames, err := RequestContainerLogs(ctx, serverHost, agentHost.ID(), "node-a", ca.Cert(), wrongControlPlaneLeaf,
-		AgentOpRequest{ProtocolVersion: AgentOpsProtocolVersion, Op: AgentOpContainerLogs, ContainerID: "c1"})
-	// Same TLS 1.3 asymmetry as TestHandleAgentOpsStreamRejectsNonControlPlaneCertificate:
-	// the control-plane side's own Handshake call can return success before it
-	// has learned the Agent rejected its certificate. The real assertion is
-	// that no genuine session is ever established.
-	if err != nil {
-		return
-	}
-	if f, ok := <-frames; ok {
-		t.Fatalf("expected no session for a control-plane certificate signed by a CA the Agent does not pin, got frame %+v", f)
-	}
-}
-
-// The expected control-plane identity must be derived at verification time
-// from the pinned CA itself, and must be stable across independent
-// verification calls against the same CA — this is the property multi-
-// relationship support (a future phase) depends on.
-func TestHandleAgentOpsStreamAcceptsControlPlaneFromPinnedCA(t *testing.T) {
-	ca := testCA(t)
-	agentLeaf := testAgentLeaf(t, ca, "node-a")
-	controlPlaneLeaf := testControlPlaneLeaf(t, ca)
-	serverHost, agentHost := setupAgentOpsHosts(t)
-
-	RegisterAgentOpsHandler(agentHost, fixedLinesFunc([]LogLine{{Message: "ok"}}), NewSessionLimiter(4), staticLookup(ca.Cert(), staticCert(agentLeaf), true))
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	frames, err := RequestContainerLogs(ctx, serverHost, agentHost.ID(), "node-a", ca.Cert(), controlPlaneLeaf,
-		AgentOpRequest{ProtocolVersion: AgentOpsProtocolVersion, Op: AgentOpContainerLogs, ContainerID: "c1"})
-	if err != nil {
-		t.Fatalf("RequestContainerLogs: %v", err)
-	}
-	f, ok := <-frames
-	if !ok || f.Type != "line" || f.Message != "ok" {
-		t.Fatalf("frame = %+v, ok=%v, want a genuine line from a control plane presenting a leaf from the pinned CA", f, ok)
+	// stranger has never been dialed and has no listen address: there is no
+	// connection to open a stream over, so no session can be established.
+	if _, err := RequestContainerLogs(ctx, serverHost, stranger.ID(),
+		AgentOpRequest{ProtocolVersion: AgentOpsProtocolVersion, Op: AgentOpContainerLogs, ContainerID: "c1"}); err == nil {
+		t.Fatal("expected no agentops session to a peer this host has no connection to")
 	}
 }
 
 // --- #15: large stream / backpressure, no full buffering -------------------
 
 func TestRequestContainerLogsLargeStreamNoDeadlock(t *testing.T) {
-	ca := testCA(t)
-	controlPlaneLeaf := testControlPlaneLeaf(t, ca)
-	agentLeaf := testAgentLeaf(t, ca, "node-a")
 	serverHost, agentHost := setupAgentOpsHosts(t)
 
 	const total = 2000
@@ -668,11 +555,11 @@ func TestRequestContainerLogsLargeStreamNoDeadlock(t *testing.T) {
 		}()
 		return out, errCh, nil
 	}
-	RegisterAgentOpsHandler(agentHost, logsFunc, NewSessionLimiter(4), staticLookup(ca.Cert(), staticCert(agentLeaf), true))
+	RegisterAgentOpsHandler(agentHost, logsFunc, NewSessionLimiter(4), acceptAnyPeer(true))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	frames, err := RequestContainerLogs(ctx, serverHost, agentHost.ID(), "node-a", ca.Cert(), controlPlaneLeaf,
+	frames, err := RequestContainerLogs(ctx, serverHost, agentHost.ID(),
 		AgentOpRequest{ProtocolVersion: AgentOpsProtocolVersion, Op: AgentOpContainerLogs, ContainerID: "c1"})
 	if err != nil {
 		t.Fatalf("RequestContainerLogs: %v", err)
@@ -700,9 +587,6 @@ func TestRequestContainerLogsLargeStreamNoDeadlock(t *testing.T) {
 // --- #17 / #18: concurrency limit, and release on completion --------------
 
 func TestSessionLimiterBoundsConcurrencyAndReleases(t *testing.T) {
-	ca := testCA(t)
-	controlPlaneLeaf := testControlPlaneLeaf(t, ca)
-	agentLeaf := testAgentLeaf(t, ca, "node-a")
 	serverHost, agentHost := setupAgentOpsHosts(t)
 
 	release := make(chan struct{})
@@ -721,14 +605,14 @@ func TestSessionLimiterBoundsConcurrencyAndReleases(t *testing.T) {
 		}()
 		return out, errCh, nil
 	}
-	RegisterAgentOpsHandler(agentHost, logsFunc, NewSessionLimiter(1), staticLookup(ca.Cert(), staticCert(agentLeaf), true))
+	RegisterAgentOpsHandler(agentHost, logsFunc, NewSessionLimiter(1), acceptAnyPeer(true))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
 	req := AgentOpRequest{ProtocolVersion: AgentOpsProtocolVersion, Op: AgentOpContainerLogs, ContainerID: "c1", Follow: true}
 
-	frames1, err := RequestContainerLogs(ctx, serverHost, agentHost.ID(), "node-a", ca.Cert(), controlPlaneLeaf, req)
+	frames1, err := RequestContainerLogs(ctx, serverHost, agentHost.ID(), req)
 	if err != nil {
 		t.Fatalf("first session: %v", err)
 	}
@@ -739,7 +623,7 @@ func TestSessionLimiterBoundsConcurrencyAndReleases(t *testing.T) {
 	}
 
 	// A second concurrent session must be turned away — the limiter is 1.
-	frames2, err := RequestContainerLogs(ctx, serverHost, agentHost.ID(), "node-a", ca.Cert(), controlPlaneLeaf, req)
+	frames2, err := RequestContainerLogs(ctx, serverHost, agentHost.ID(), req)
 	if err != nil {
 		t.Fatalf("second session (stream open): %v", err)
 	}
@@ -754,7 +638,7 @@ func TestSessionLimiterBoundsConcurrencyAndReleases(t *testing.T) {
 	for range frames1 {
 	}
 
-	frames3, err := RequestContainerLogs(ctx, serverHost, agentHost.ID(), "node-a", ca.Cert(), controlPlaneLeaf, req)
+	frames3, err := RequestContainerLogs(ctx, serverHost, agentHost.ID(), req)
 	if err != nil {
 		t.Fatalf("third session: %v", err)
 	}

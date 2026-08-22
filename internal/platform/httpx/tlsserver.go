@@ -14,11 +14,15 @@ import (
 
 // TLSServer is a supervised HTTPS server with an explicit [tls.Config].
 //
-// Separate from [Server] because the agent-facing listener needs
+// Separate from [Server] because the agent-facing HTTPS listener needs
 // client-certificate verification the browser-facing API must not have —
 // see docs/architecture/agent-design.md §3. Two [lifecycle.Component]
 // instances with different TLS policy is simpler and safer than one server
 // whose TLS behavior branches by route.
+//
+// A nil tlsConfig serves the same lifecycle without terminating TLS at all,
+// for a listener that is already an authenticated, encrypted transport — see
+// [NewServerFromListener].
 type TLSServer struct {
 	name      string
 	addr      string
@@ -45,16 +49,39 @@ func NewTLSServer(name, addr string, handler http.Handler, tlsConfig *tls.Config
 }
 
 // NewTLSServerFromListener builds a server around an already-open listener
-// instead of binding "tcp" itself — the seam a non-TCP transport (e.g. a
-// libp2p stream listener) plugs into without duplicating any of TLSServer's
-// serve/shutdown/fault-reporting logic. TLS termination, the handler and
-// every lifecycle behaviour are identical to [NewTLSServer].
+// instead of binding "tcp" itself — the seam a non-TCP transport plugs into
+// without duplicating any of TLSServer's serve/shutdown/fault-reporting
+// logic. TLS termination, the handler and every lifecycle behaviour are
+// identical to [NewTLSServer]. A listener that already authenticates and
+// encrypts its own connections wants [NewServerFromListener] instead.
 func NewTLSServerFromListener(name string, listener net.Listener, handler http.Handler, tlsConfig *tls.Config, logger *slog.Logger) *TLSServer {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
 	return &TLSServer{
 		name: name, handler: handler, tlsConfig: tlsConfig,
+		logger: logger, faults: make(chan error, 1), preboundListener: listener,
+	}
+}
+
+// NewServerFromListener builds a server around an already-open listener that
+// is *already* an authenticated, encrypted transport, so no TLS is
+// terminated on top of it.
+//
+// The one such listener Atlas has is libp2p's: its Noise handshake has
+// already authenticated both peers by Peer ID and encrypted the stream
+// before a byte of HTTP is exchanged (see
+// docs/adr/0012-connect-by-identity.md). Running TLS inside that would be a
+// second handshake proving a second identity, which is precisely the
+// enrollment dependency ADR-0012 exists to remove — not additional security.
+// Every lifecycle behaviour is otherwise identical to
+// [NewTLSServerFromListener]; only the handshake is absent.
+func NewServerFromListener(name string, listener net.Listener, handler http.Handler, logger *slog.Logger) *TLSServer {
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
+	}
+	return &TLSServer{
+		name: name, handler: handler, tlsConfig: nil,
 		logger: logger, faults: make(chan error, 1), preboundListener: listener,
 	}
 }
@@ -71,9 +98,13 @@ func (s *TLSServer) Start(ctx context.Context) error {
 	// Callers such as fleetPipeline hand the same *tls.Config to two
 	// TLSServer instances (HTTPS and libp2p listeners); without a clone,
 	// their concurrent first requests race on that shared struct.
+	var clonedTLS *tls.Config
+	if s.tlsConfig != nil {
+		clonedTLS = s.tlsConfig.Clone()
+	}
 	srv := &http.Server{
 		Handler:           s.handler,
-		TLSConfig:         s.tlsConfig.Clone(),
+		TLSConfig:         clonedTLS,
 		ReadHeaderTimeout: 10 * time.Second,
 		ErrorLog:          slog.NewLogLogger(s.logger.Handler(), slog.LevelWarn),
 		BaseContext: func(net.Listener) context.Context {
@@ -96,13 +127,21 @@ func (s *TLSServer) Start(ctx context.Context) error {
 	s.listener = listener
 	s.mu.Unlock()
 
-	s.logger.InfoContext(ctx, "tls server listening",
-		slog.String("name", s.name), slog.String("addr", listener.Addr().String()))
+	s.logger.InfoContext(ctx, "server listening",
+		slog.String("name", s.name), slog.String("addr", listener.Addr().String()),
+		slog.Bool("tls", clonedTLS != nil))
 
 	go func() {
 		// TLSConfig already carries the server certificate, so ServeTLS
 		// needs no cert/key file paths — see the net/http doc on Server.TLSConfig.
-		if err := srv.ServeTLS(listener, "", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		// A nil config means the listener is already an authenticated,
+		// encrypted transport (see NewServerFromListener) and Serve is used
+		// unchanged.
+		serve := func() error { return srv.ServeTLS(listener, "", "") }
+		if clonedTLS == nil {
+			serve = func() error { return srv.Serve(listener) }
+		}
+		if err := serve(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			s.faults <- err
 			return
 		}

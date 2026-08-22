@@ -1,14 +1,16 @@
 //go:build integration
 
-// Proves the libp2p POC transport (docs/adr/0012-connect-by-identity.md)
-// carries the real Agent collection pipeline end to end: a real
-// internal/agent.Agent enrolls, then pushes metrics, inventory and events,
-// over a real libp2p stream into a real fleetPipeline listener, and X.509
-// mTLS authorization runs on top of that stream exactly as it does over TCP.
+// Proves the libp2p transport (docs/adr/0012-connect-by-identity.md) carries
+// the real Agent collection pipeline end to end: a real internal/agent.Agent
+// pushes metrics, inventory and events over a real libp2p stream into a real
+// fleetPipeline listener, with no enrollment, no token and no certificate
+// anywhere in the path. Authentication is the Noise handshake; authorization
+// is the agent_peers record registered for the Agent's Peer ID before it
+// starts (see authorizeAgentPeer).
 //
-// This is the automated (loopback) half of the POC's verification. The
-// physical Mac-behind-NAT -> reachable-Linux-server half is run manually —
-// see the POC report for exact commands and results.
+// This is the automated (loopback) half of the verification. The physical
+// Mac-behind-NAT -> reachable-Linux-server half is run manually — see the
+// deployment report for exact commands and results.
 package app_test
 
 import (
@@ -140,8 +142,8 @@ func TestAgentPushesTelemetryOverLibP2PTransport(t *testing.T) {
 // end to end: a real relay host (circuit-relay-v2 service, no Atlas logic),
 // a real control plane that reserves a slot on it instead of relying on its
 // own listen address, and a real agent that is only ever given the circuit
-// address — never a direct one — reaching it and completing enrollment plus
-// telemetry through the relay hop.
+// address — never a direct one — reaching it and delivering telemetry
+// through the relay hop.
 func TestAgentPushesTelemetryOverAtlasRelay(t *testing.T) {
 	dsn := os.Getenv(testDatabaseURLEnv)
 	if dsn == "" {
@@ -171,7 +173,7 @@ func TestAgentPushesTelemetryOverAtlasRelay(t *testing.T) {
 // assembled circuit multiaddr — looks the Server's addresses up via the
 // Relay's rendezvous registry, and reaches it (here, through the relay,
 // since this control plane has no direct listen address the Agent could
-// dial) to complete enrollment and telemetry.
+// dial) to deliver telemetry.
 func TestAgentPushesTelemetryOverRendezvousDiscovery(t *testing.T) {
 	dsn := os.Getenv(testDatabaseURLEnv)
 	if dsn == "" {
@@ -201,35 +203,48 @@ func TestAgentPushesTelemetryOverRendezvousDiscovery(t *testing.T) {
 	runDiscoveryAgentAndAssertObserved(t, instance, relayAddrs[0], serverTarget.ID.String(), "atlas-rendezvous-poc-node-"+id.New())
 }
 
+// authorizeAgentPeer registers the Peer ID an agent running out of dataDir
+// will dial with, binding it to nodeID and environment — the libp2p
+// transport's whole admission mechanism now that there is no enrollment
+// token (see migrations/0011_agent_peers.sql). agent.PeerID creates the
+// identity file if it does not exist yet, which is why the agent must be
+// started with this same dataDir afterwards.
+func authorizeAgentPeer(t *testing.T, instance *app.App, dataDir, nodeID, environment string) {
+	t.Helper()
+
+	peerID, err := agent.PeerID(dataDir)
+	if err != nil {
+		t.Fatalf("derive agent peer id: %v", err)
+	}
+	spec := corefleet.PeerSpec{
+		PeerID: peerID, NodeID: nodeID, Environment: environment, Role: corefleet.PeerRoleAgent,
+	}
+	if err := spec.Validate(); err != nil {
+		t.Fatalf("peer spec: %v", err)
+	}
+	repo := storagefleet.NewRepository(instance.Pool.DB())
+	if err := repo.RegisterPeer(context.Background(), spec); err != nil {
+		t.Fatalf("authorize agent peer: %v", err)
+	}
+}
+
 // runAgentAndAssertObserved starts a real libp2p-transport agent dialing
 // peerAddr and waits for the control plane to observe nodeID.
 func runAgentAndAssertObserved(t *testing.T, instance *app.App, peerAddr, nodeID string) {
 	t.Helper()
 
-	tok, err := corefleet.NewToken()
-	if err != nil {
-		t.Fatalf("generate token: %v", err)
-	}
-	spec := corefleet.TokenSpec{
-		Label: "libp2p-poc", Environment: "test", AllowedCIDR: "0.0.0.0/0",
-		MaxUses: 1, TTL: time.Hour,
-	}
-	if err := spec.Validate(); err != nil {
-		t.Fatalf("token spec: %v", err)
-	}
-	repo := storagefleet.NewRepository(instance.Pool.DB())
-	if err := repo.CreateToken(context.Background(), tok.Hash, spec, time.Now()); err != nil {
-		t.Fatalf("create token: %v", err)
-	}
+	// The operator flow, exactly: derive the agent's Peer ID from the data
+	// dir it will run with, authorize that Peer ID for this node, then start
+	// the agent. No enrollment token exists anywhere in this path.
+	dataDir := t.TempDir()
+	authorizeAgentPeer(t, instance, dataDir, nodeID, "test")
 
 	agentCfg := agent.Config{
 		// Unused for dialing under the libp2p transport — routing is by peer
-		// id, not address — but still validated as a TLS ServerName, so it
-		// must match a SAN on the control plane's leaf certificate, which
-		// defaults to localhost/127.0.0.1. See pki.NewServerLeaf.
+		// id, not address. Its scheme is rewritten to http by the agent: the
+		// libp2p stream is already authenticated and encrypted by Noise.
 		ControlPlaneURL:    "https://localhost",
-		Token:              tok.Plaintext,
-		DataDir:            t.TempDir(),
+		DataDir:            dataDir,
 		NodeID:             nodeID,
 		Environment:        "test",
 		Transport:          "libp2p",
@@ -241,7 +256,7 @@ func runAgentAndAssertObserved(t *testing.T, instance *app.App, peerAddr, nodeID
 
 	a, err := agent.New(context.Background(), agentCfg, log.Discard())
 	if err != nil {
-		t.Fatalf("agent.New() error = %v: agent enrollment over libp2p failed, so X.509 authorization never got a chance to run", err)
+		t.Fatalf("agent.New() error = %v: the agent could not start on the libp2p transport", err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -282,26 +297,12 @@ func runAgentAndAssertObserved(t *testing.T, instance *app.App, peerAddr, nodeID
 func runDiscoveryAgentAndAssertObserved(t *testing.T, instance *app.App, relayAddr, serverPeerID, nodeID string) {
 	t.Helper()
 
-	tok, err := corefleet.NewToken()
-	if err != nil {
-		t.Fatalf("generate token: %v", err)
-	}
-	spec := corefleet.TokenSpec{
-		Label: "rendezvous-poc", Environment: "test", AllowedCIDR: "0.0.0.0/0",
-		MaxUses: 1, TTL: time.Hour,
-	}
-	if err := spec.Validate(); err != nil {
-		t.Fatalf("token spec: %v", err)
-	}
-	repo := storagefleet.NewRepository(instance.Pool.DB())
-	if err := repo.CreateToken(context.Background(), tok.Hash, spec, time.Now()); err != nil {
-		t.Fatalf("create token: %v", err)
-	}
+	dataDir := t.TempDir()
+	authorizeAgentPeer(t, instance, dataDir, nodeID, "test")
 
 	agentCfg := agent.Config{
 		ControlPlaneURL:    "https://localhost", // unused for dialing; see runAgentAndAssertObserved
-		Token:              tok.Plaintext,
-		DataDir:            t.TempDir(),
+		DataDir:            dataDir,
 		NodeID:             nodeID,
 		Environment:        "test",
 		Transport:          "libp2p",
@@ -314,7 +315,7 @@ func runDiscoveryAgentAndAssertObserved(t *testing.T, instance *app.App, relayAd
 
 	a, err := agent.New(context.Background(), agentCfg, log.Discard())
 	if err != nil {
-		t.Fatalf("agent.New() error = %v: rendezvous discovery + enrollment over libp2p failed", err)
+		t.Fatalf("agent.New() error = %v: rendezvous discovery over libp2p failed", err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

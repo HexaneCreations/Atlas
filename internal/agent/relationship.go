@@ -22,7 +22,8 @@ const defaultRelationshipID = "default"
 // environment on every start, exactly like the pre-Phase-3 single-relationship
 // Agent already did: Token is a one-time bootstrap secret, and CABundlePath
 // names an operator-managed external file whose path may legitimately need
-// to keep being supplied.
+// to keep being supplied. Both apply to the https transport only — a libp2p
+// relationship is admitted by its Peer ID and needs neither.
 type RelationshipBootstrap struct {
 	ControlPlaneURL string
 	Token           string

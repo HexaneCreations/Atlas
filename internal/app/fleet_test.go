@@ -2,13 +2,10 @@ package app
 
 import (
 	"context"
-	"crypto/tls"
-	"crypto/x509"
-	"net/http"
-	"net/http/httptest"
 	"testing"
 	"time"
 
+	corefleet "github.com/hexane/atlas/internal/core/fleet"
 	"github.com/hexane/atlas/internal/core/transport/libp2ptransport"
 	"github.com/hexane/atlas/internal/platform/errs"
 	"github.com/hexane/atlas/internal/platform/pki"
@@ -38,39 +35,20 @@ func newTestFleetPipeline(t *testing.T) (*fleetPipeline, *pki.CA) {
 	if err != nil {
 		t.Fatalf("pki.New: %v", err)
 	}
-	serverLeaf, err := pki.NewServerLeaf(ca, nil)
-	if err != nil {
-		t.Fatalf("NewServerLeaf: %v", err)
-	}
 	f := &fleetPipeline{}
-	f.caCert = ca.Cert()
-	f.serverLeaf = serverLeaf
 	f.peerByNode = make(map[string]peer.ID)
 	f.grants = &fakeGrants{granted: true}
 	return f, ca
 }
 
-func testAgentCert(t *testing.T, ca *pki.CA, nodeID string) *x509.Certificate {
-	t.Helper()
-	csrDER, _, err := pki.NewCSR(nodeID)
-	if err != nil {
-		t.Fatalf("NewCSR: %v", err)
-	}
-	csr, err := pki.ParseCSR(csrDER)
-	if err != nil {
-		t.Fatalf("ParseCSR: %v", err)
-	}
-	leaf, err := ca.IssueLeaf(csr, nodeID)
-	if err != nil {
-		t.Fatalf("IssueLeaf: %v", err)
-	}
-	return leaf
-}
+// --- NodeID -> PeerID registry ----------------------------------------
 
-// --- Phase 1: NodeID -> PeerID registry -------------------------------
-
-func TestRecordAgentPeerPopulatesRegistryFromAuthenticatedRequest(t *testing.T) {
-	f, ca := newTestFleetPipeline(t)
+// recordAgentPeer is now fed by PeerAuthMiddleware rather than by a
+// certificate: both halves it stores are already-established facts (the Peer
+// ID from the Noise handshake, the node id from the operator's agent_peers
+// registration), so the test supplies them the same way the middleware does.
+func TestRecordAgentPeerPopulatesRegistryFromAuthorizedPeer(t *testing.T) {
+	f, _ := newTestFleetPipeline(t)
 
 	agentHost, err := libp2ptransport.NewHost(libp2ptransport.HostOptions{DataDir: t.TempDir()})
 	if err != nil {
@@ -78,20 +56,9 @@ func TestRecordAgentPeerPopulatesRegistryFromAuthenticatedRequest(t *testing.T) 
 	}
 	t.Cleanup(func() { _ = agentHost.Close() })
 
-	cert := testAgentCert(t, ca, "node-a")
-
-	handlerCalled := false
-	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { handlerCalled = true })
-
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/agent/renew", nil)
-	req.RemoteAddr = agentHost.ID().String()
-	req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{cert}}
-
-	f.recordAgentPeer(next).ServeHTTP(httptest.NewRecorder(), req)
-
-	if !handlerCalled {
-		t.Fatal("recordAgentPeer must always call the wrapped handler")
-	}
+	f.recordAgentPeer(corefleet.PeerIdentity{
+		PeerID: agentHost.ID().String(), NodeID: "node-a", Environment: "production", Role: corefleet.PeerRoleAgent,
+	}, agentHost.ID())
 
 	f.mu.RLock()
 	pid, ok := f.peerByNode["node-a"]
@@ -104,13 +71,11 @@ func TestRecordAgentPeerPopulatesRegistryFromAuthenticatedRequest(t *testing.T) 
 	}
 }
 
-// A node id that reconnects under a new Peer ID (e.g. a re-image, or a fresh
-// identity file) must overwrite the old mapping, not accumulate stale ones —
-// this is the "connect/disconnect maintained correctly" requirement.
+// A node that reconnects under a new Peer ID (a re-image, or a fresh identity
+// file plus a fresh authorization) must overwrite the old mapping, not
+// accumulate stale ones.
 func TestRecordAgentPeerUpdatesOnReconnectWithNewPeerID(t *testing.T) {
-	f, ca := newTestFleetPipeline(t)
-	cert := testAgentCert(t, ca, "node-a")
-	next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
+	f, _ := newTestFleetPipeline(t)
 
 	first, err := libp2ptransport.NewHost(libp2ptransport.HostOptions{DataDir: t.TempDir()})
 	if err != nil {
@@ -123,39 +88,14 @@ func TestRecordAgentPeerUpdatesOnReconnectWithNewPeerID(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = second.Close() })
 
-	req1 := httptest.NewRequest(http.MethodGet, "/api/v1/agent/renew", nil)
-	req1.RemoteAddr = first.ID().String()
-	req1.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{cert}}
-	f.recordAgentPeer(next).ServeHTTP(httptest.NewRecorder(), req1)
-
-	req2 := httptest.NewRequest(http.MethodGet, "/api/v1/agent/renew", nil)
-	req2.RemoteAddr = second.ID().String()
-	req2.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{cert}}
-	f.recordAgentPeer(next).ServeHTTP(httptest.NewRecorder(), req2)
+	f.recordAgentPeer(corefleet.PeerIdentity{PeerID: first.ID().String(), NodeID: "node-a"}, first.ID())
+	f.recordAgentPeer(corefleet.PeerIdentity{PeerID: second.ID().String(), NodeID: "node-a"}, second.ID())
 
 	f.mu.RLock()
 	pid := f.peerByNode["node-a"]
 	f.mu.RUnlock()
 	if pid != second.ID() {
 		t.Errorf("registry = %s after reconnect, want the new peer id %s", pid, second.ID())
-	}
-}
-
-// A request with no TLS client certificate (e.g. the enrollment endpoint,
-// which allows an unauthenticated call) must not panic and must not record
-// anything.
-func TestRecordAgentPeerIgnoresUnauthenticatedRequests(t *testing.T) {
-	f, _ := newTestFleetPipeline(t)
-	next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
-
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/agent/enroll", nil)
-	f.recordAgentPeer(next).ServeHTTP(httptest.NewRecorder(), req)
-
-	f.mu.RLock()
-	n := len(f.peerByNode)
-	f.mu.RUnlock()
-	if n != 0 {
-		t.Errorf("registry has %d entries, want 0 for an unauthenticated request", n)
 	}
 }
 

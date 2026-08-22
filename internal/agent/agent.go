@@ -1,6 +1,11 @@
 // Package agent is the composition root for atlas-agent: it collects the
-// local host and pushes observations to one or more control planes over
-// mTLS. See docs/architecture/agent-design.md.
+// local host and pushes observations to one or more control planes. How a
+// relationship authenticates depends on its transport: "https" enrolls with
+// a token and speaks mTLS with the certificate it receives, while "libp2p"
+// holds no certificate at all — the Noise handshake proves this Agent's Peer
+// ID, and the control plane authorizes that Peer ID against its agent_peers
+// table. See docs/architecture/agent-design.md and
+// docs/adr/0012-connect-by-identity.md.
 package agent
 
 import (
@@ -12,8 +17,10 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -58,11 +65,13 @@ type Agent struct {
 }
 
 // relationshipRuntime is one fully bootstrapped Control-Plane relationship:
-// its own trust (caCert), its own credential (holder), and its own delivery
-// transport (with its own spool). Independent of every other relationship's
-// runtime — nothing here is shared except the Agent's single node identity
-// and single libp2p host, both passed in, never owned here. A failure,
-// renewal, or shutdown of one relationship touches only its own fields.
+// its own delivery transport (with its own spool) and, on the https
+// transport, its own trust (caCert) and credential (holder). Both are nil for
+// a libp2p relationship, which authenticates by Peer ID and holds no
+// certificate. Independent of every other relationship's runtime — nothing
+// here is shared except the Agent's single node identity and single libp2p
+// host, both passed in, never owned here. A failure, renewal, or shutdown of
+// one relationship touches only its own fields.
 type relationshipRuntime struct {
 	id     string
 	relCfg relationshipConfig
@@ -152,6 +161,11 @@ func New(ctx context.Context, cfg Config, logger *slog.Logger) (*Agent, error) {
 			return nil, fmt.Errorf("start libp2p host: %w", err)
 		}
 		p2pHost = h
+		// This Agent's own Peer ID, logged at every start because it is what
+		// an operator registers with `atlas-server peer authorize` — the
+		// libp2p path is authorized by this value, not by a token.
+		logger.InfoContext(ctx, "agent libp2p identity",
+			slog.String("peer_id", libp2ptransport.PeerID(h)), slog.String("node_id", identity.NodeID))
 	}
 
 	relationshipIDs := make([]string, 0, len(relConfigs))
@@ -306,10 +320,13 @@ func bootstrapAllRelationships(ctx context.Context, relConfigs map[string]relati
 	return relationships, errors.Join(bootErrs...)
 }
 
-// bootstrapRelationship wires one relationship end-to-end: dial path (if
-// libp2p), credential bootstrap (enroll-or-load, with the existing bounded
-// retry), its renewal loop, and its own delivery transport with its own
-// spool. Fully independent of every other relationship.
+// bootstrapRelationship wires one relationship end-to-end: its dial path, its
+// delivery transport and its own spool, plus — on the https transport only —
+// credential bootstrap (enroll-or-load, with the existing bounded retry) and
+// the renewal loop that keeps that credential current. A libp2p relationship
+// skips all of that: it has nothing to enroll and nothing to renew, so it is
+// ready to send as soon as its dialer exists. Fully independent of every
+// other relationship.
 func bootstrapRelationship(ctx context.Context, relCfg relationshipConfig, nodeID string, p2pHost p2phost.Host, logger *slog.Logger) (*relationshipRuntime, error) {
 	logger.InfoContext(ctx, "bootstrapping relationship",
 		slog.String("relationship", relCfg.id), slog.String("transport", relCfg.Transport),
@@ -394,27 +411,60 @@ func bootstrapRelationship(ctx context.Context, relCfg relationshipConfig, nodeI
 		}
 	}
 
-	// Diagnostic (G): every dial-path decision is made; credential bootstrap
-	// (and its existing, unchanged retry budget) starts here.
-	logger.InfoContext(ctx, "entering credential bootstrap",
-		slog.String("relationship", relCfg.id), slog.String("transport", relCfg.Transport),
-		slog.String("control_plane_url", relCfg.ControlPlaneURL),
-		slog.Bool("custom_dialer", dial != nil), slog.String("peer_id", peerID.String()),
-		slog.Bool("insecure_bootstrap", relCfg.InsecureBootstrap),
-		slog.Bool("ca_bundle_configured", relCfg.CABundlePath != ""),
-		slog.Bool("token_configured", relCfg.Token != ""))
+	var (
+		caCert *x509.Certificate
+		holder *credentialHolder
+		tlsCfg *tls.Config
+		// baseURL is what the HTTP client actually addresses. Over libp2p it
+		// is the same host, downgraded to http: the stream underneath is
+		// already authenticated and encrypted by Noise, so there is no TLS
+		// to speak on it (see httpx.NewServerFromListener).
+		baseURL = relCfg.ControlPlaneURL
+	)
+	cancel := context.CancelFunc(func() {})
 
-	caCert, holder, err := bootstrapWithRetry(ctx, relCfg, nodeID, logger, dial)
-	if err != nil {
-		return nil, fmt.Errorf("bootstrap credentials: %w", err)
+	if dial != nil && relCfg.Transport == "libp2p" {
+		// The libp2p path holds no X.509 credential at all: no enrollment,
+		// no token, no CSR, no renewal loop, and nothing to wait for before
+		// the first request can go out. The Peer ID this agent dials with is
+		// its identity, and the control plane authorizes it from its
+		// agent_peers table (see docs/adr/0012-connect-by-identity.md). An
+		// unauthorized peer gets 403s on its telemetry, which the spool and
+		// the existing retry path already handle exactly like any other
+		// rejection — it does not stop the process from running.
+		baseURL = plaintextBaseURL(relCfg.ControlPlaneURL)
+		logger.InfoContext(ctx, "libp2p relationship needs no enrollment credential",
+			slog.String("relationship", relCfg.id), slog.String("server_peer_id", peerID.String()),
+			slog.String("base_url", baseURL))
+		if err := persistRelationshipConfig(relCfg); err != nil {
+			logger.WarnContext(ctx, "could not persist relationship config",
+				slog.String("relationship", relCfg.id), slog.String("error", err.Error()))
+		}
+	} else {
+		// Diagnostic (G): every dial-path decision is made; credential bootstrap
+		// (and its existing, unchanged retry budget) starts here.
+		logger.InfoContext(ctx, "entering credential bootstrap",
+			slog.String("relationship", relCfg.id), slog.String("transport", relCfg.Transport),
+			slog.String("control_plane_url", relCfg.ControlPlaneURL),
+			slog.Bool("custom_dialer", dial != nil), slog.String("peer_id", peerID.String()),
+			slog.Bool("insecure_bootstrap", relCfg.InsecureBootstrap),
+			slog.Bool("ca_bundle_configured", relCfg.CABundlePath != ""),
+			slog.Bool("token_configured", relCfg.Token != ""))
+
+		var err error
+		caCert, holder, err = bootstrapWithRetry(ctx, relCfg, nodeID, logger, dial)
+		if err != nil {
+			return nil, fmt.Errorf("bootstrap credentials: %w", err)
+		}
+
+		var renewCtx context.Context
+		renewCtx, cancel = context.WithCancel(ctx)
+		go renewalLoop(renewCtx, relCfg, nodeID, caCert, holder, logger, dial)
+
+		pool := x509.NewCertPool()
+		pool.AddCert(caCert)
+		tlsCfg = &tls.Config{MinVersion: tls.VersionTLS13, RootCAs: pool, GetClientCertificate: holder.GetClientCertificate}
 	}
-
-	renewCtx, cancel := context.WithCancel(ctx)
-	go renewalLoop(renewCtx, relCfg, nodeID, caCert, holder, logger, dial)
-
-	pool := x509.NewCertPool()
-	pool.AddCert(caCert)
-	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS13, RootCAs: pool, GetClientCertificate: holder.GetClientCertificate}
 
 	sp, err := spool.Open(spool.Options{Dir: filepath.Join(relCfg.dataDir, "spool")})
 	if err != nil {
@@ -433,7 +483,7 @@ func bootstrapRelationship(ctx context.Context, relCfg relationshipConfig, nodeI
 		}
 	}
 	tr, err := remote.New(remote.Options{
-		BaseURL: relCfg.ControlPlaneURL, TLSConfig: tlsCfg, HTTPClient: httpClient, Spool: sp, Logger: logger,
+		BaseURL: baseURL, TLSConfig: tlsCfg, HTTPClient: httpClient, Spool: sp, Logger: logger,
 	})
 	if err != nil {
 		cancel()
@@ -445,6 +495,21 @@ func bootstrapRelationship(ctx context.Context, relCfg relationshipConfig, nodeI
 		caCert: caCert, holder: holder, transport: tr, peerID: peerID,
 		cancelRenewal: cancel,
 	}, nil
+}
+
+// plaintextBaseURL rewrites a control plane URL's scheme to http, preserving
+// host and port. The host is never dialed on the libp2p path — the dialer is
+// overridden — but it still names the control plane in the Host header and
+// in logs, so it is kept rather than replaced with a placeholder. A URL that
+// does not parse is returned unchanged; remote.New is the one that decides
+// whether it is usable.
+func plaintextBaseURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return raw
+	}
+	u.Scheme = "http"
+	return strings.TrimSuffix(u.String(), "/")
 }
 
 // resolvePeerIDConflicts determines, without dialing anything, which
@@ -511,22 +576,41 @@ func resolveLibP2PServerPeerID(relCfg relationshipConfig) (peer.ID, bool) {
 // once, here, from data already validated duplicate-free in New, and never
 // mutated afterward. No locking needed.
 func buildAgentOpsLookup(relationships map[string]*relationshipRuntime, peerIDToRelationship map[peer.ID]string) libp2ptransport.AgentOpsRelationshipLookup {
-	return func(remotePeer peer.ID) (*x509.Certificate, func(*tls.ClientHelloInfo) (*tls.Certificate, error), bool, bool) {
+	return func(remotePeer peer.ID) (bool, bool) {
 		id, ok := peerIDToRelationship[remotePeer]
 		if !ok {
-			return nil, nil, false, false
+			return false, false
 		}
 		rt, ok := relationships[id]
 		if !ok {
 			// This relationship's peer id was known statically, but it did
-			// not survive bootstrap (see New) — no live credential exists to
-			// present, so this stream cannot be served.
-			return nil, nil, false, false
+			// not survive bootstrap (see New) — the Agent has no working
+			// relationship with that control plane, so this stream is not
+			// served.
+			return false, false
 		}
-		holder := rt.holder
-		getCert := func(*tls.ClientHelloInfo) (*tls.Certificate, error) { return holder.GetClientCertificate(nil) }
-		return rt.caCert, getCert, !rt.relCfg.AgentOpsContainerLogsDisabled, true
+		return !rt.relCfg.AgentOpsContainerLogsDisabled, true
 	}
+}
+
+// PeerID returns the Agent's persistent libp2p Peer ID for the identity
+// stored in dataDir, creating that identity if this host has none yet — the
+// same file and the same derivation the running Agent uses, so the value an
+// operator authorizes is necessarily the value it will dial with.
+//
+// Exported for `atlas-agent peer-id`: on the libp2p transport this Peer ID,
+// registered by an operator, is what admits the Agent. It is an identity,
+// not a secret — safe to print, paste and store.
+func PeerID(dataDir string) (string, error) {
+	priv, err := libp2ptransport.LoadOrCreateIdentity(dataDir)
+	if err != nil {
+		return "", err
+	}
+	id, err := peer.IDFromPrivateKey(priv)
+	if err != nil {
+		return "", fmt.Errorf("derive peer id: %w", err)
+	}
+	return id.String(), nil
 }
 
 // Run starts collection and blocks until ctx is cancelled.

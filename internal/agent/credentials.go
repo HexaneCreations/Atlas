@@ -22,10 +22,14 @@ import (
 )
 
 // dialContextFunc overrides how the control plane is reached. Nil selects
-// the default TCP dial. Set when the agent is configured for the libp2p POC
-// transport (see docs/adr/0012-connect-by-identity.md) — the enrollment and
-// renewal HTTP calls below are otherwise unchanged, they simply hand this
-// function to http.Transport instead of letting it dial "tcp" itself.
+// the default TCP dial. Set when the agent is configured for the libp2p
+// transport (see docs/adr/0012-connect-by-identity.md) — the HTTP calls
+// simply hand this function to http.Transport instead of letting it dial
+// "tcp" itself.
+//
+// Everything else in this file is the https transport's credential flow and
+// runs only there: a libp2p relationship enrolls nothing, holds no
+// certificate and renews nothing (see agent.bootstrapRelationship).
 type dialContextFunc func(ctx context.Context, network, addr string) (net.Conn, error)
 
 type certResponse struct {

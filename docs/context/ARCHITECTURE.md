@@ -102,23 +102,25 @@ Implementations
 
 - InProcess
 - HTTPS + mTLS
-
-Future
-
-- libp2p
+- libp2p (plain HTTP inside a Noise-encrypted stream)
 
 ---
 
 ## Identity
 
-Today
+HTTPS transport
 
 - X.509
 - CA
 - Leaf certificates
 - TOFU
+- Enrollment token
 
-Future
+libp2p transport
 
-- Peer ID
-- libp2p
+- Peer ID (authentication, proven by the Noise handshake)
+- agent_peers allowlist (authorization, keyed by Peer ID)
+- NodeID + environment read from the agent_peers record
+
+No X.509, token or TLS is involved inside a libp2p stream. See
+docs/adr/0012-connect-by-identity.md.

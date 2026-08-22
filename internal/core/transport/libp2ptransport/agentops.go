@@ -2,11 +2,8 @@ package libp2ptransport
 
 import (
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
 	"fmt"
-	"net"
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/host"
@@ -14,7 +11,6 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 
 	"github.com/hexane/atlas/internal/platform/errs"
-	"github.com/hexane/atlas/internal/platform/pki"
 )
 
 // AgentOpsProtocolID is the libp2p protocol the control plane uses to ask a
@@ -39,9 +35,10 @@ const AgentOpContainerLogs = "container_logs"
 // somewhere to be detected rather than silently misinterpreted.
 const AgentOpsProtocolVersion = 1
 
-// AgentOpRequest is the control-plane-to-Agent request, sent once as JSON
-// immediately after the reversed mTLS handshake (see
-// [RegisterAgentOpsHandler]) completes.
+// AgentOpRequest is the control-plane-to-Agent request, sent once as JSON as
+// the first message on the stream. There is no handshake of its own: the
+// libp2p Noise handshake already authenticated both Peer IDs and encrypted
+// the stream (see [RegisterAgentOpsHandler]).
 type AgentOpRequest struct {
 	ProtocolVersion int    `json:"protocol_version"`
 	Op              string `json:"op"`
@@ -93,16 +90,14 @@ type ContainerLogsFunc func(ctx context.Context, containerID string, tail int, s
 // internal/api/v1/containers.go, which maxSessionDuration mirrors).
 const (
 	// DefaultMaxConcurrentSessions bounds how many AgentOps sessions one
-	// Agent will run at once. Without this, a control-plane bug — or a
-	// credential-holding peer behaving badly — could open unbounded
-	// concurrent Docker log streams against a single host.
+	// Agent will run at once. Without this, a control-plane bug — or an
+	// authenticated peer behaving badly — could open unbounded concurrent
+	// Docker log streams against a single host.
 	DefaultMaxConcurrentSessions = 4
 	// streamOpenTimeout bounds NewStream, so a request against an Agent that
 	// looks connected but is actually wedged fails fast rather than hanging
 	// indefinitely — required behavior, not just a nicety.
 	streamOpenTimeout = 10 * time.Second
-	// handshakeTimeout bounds the reversed TLS handshake on both sides.
-	handshakeTimeout = 10 * time.Second
 	// maxSessionDuration mirrors containers.go's maxFollowDuration: an
 	// operator still watching after this long reconnects, which the
 	// frontend already does without asking.
@@ -135,113 +130,26 @@ func (l *SessionLimiter) tryAcquire() bool {
 
 func (l *SessionLimiter) release() { <-l.sem }
 
-// streamConn adapts a [network.Stream] into a [net.Conn] so crypto/tls can
-// wrap it. This is the same trick go-libp2p-gostream uses internally
-// (verified against its source: RemoteAddr's peer.ID, read through
-// net.Conn.RemoteAddr().String(), is exactly how fleet.go's NodeID-to-PeerID
-// recording gets an Agent's Peer ID off an ordinary HTTP request today) —
-// duplicated here in miniature because gostream's version is unexported and
-// tied to its own Dial/Listen, neither of which fits a stream opened
-// directly via host.NewStream/SetStreamHandler.
-type streamConn struct{ network.Stream }
-
-func (c streamConn) LocalAddr() net.Addr  { return peerAddr{c.Conn().LocalPeer()} }
-func (c streamConn) RemoteAddr() net.Addr { return peerAddr{c.Conn().RemotePeer()} }
-
-type peerAddr struct{ id peer.ID }
-
-func (a peerAddr) Network() string { return "libp2p-agentops" }
-func (a peerAddr) String() string  { return a.id.String() }
-
-// verifiedLeaf parses the certificate a TLS peer presented and checks it
-// chains to pool for the given key usage. It is the shared half of both
-// verification directions below; identity is checked by the caller once this
-// returns a cert known to be signed by the fleet's own CA.
-func verifiedLeaf(rawCerts [][]byte, pool *x509.CertPool, usage x509.ExtKeyUsage) (*x509.Certificate, error) {
-	if len(rawCerts) == 0 {
-		return nil, fmt.Errorf("no certificate was presented")
-	}
-	cert, err := x509.ParseCertificate(rawCerts[0])
-	if err != nil {
-		return nil, fmt.Errorf("parse presented certificate: %w", err)
-	}
-	if _, err := cert.Verify(x509.VerifyOptions{Roots: pool, KeyUsages: []x509.ExtKeyUsage{usage}}); err != nil {
-		return nil, fmt.Errorf("verify certificate chain: %w", err)
-	}
-	return cert, nil
-}
-
-// verifyControlPlaneCertificate is the Agent's check on the certificate the
-// control plane presents: real cert, signed by caCert, AND specifically
-// identifying the control plane that CA belongs to — not merely any
-// certificate that CA happens to have issued (agent leaf certs are signed by
-// the same CA). The expected identity is derived from caCert itself (its own
-// fingerprint — see pki.Fingerprint and pki.ControlPlaneID) at verification
-// time, never from a separately stored value, so there is exactly one source
-// of truth for which control plane a given pinned CA belongs to. This is
-// what stops one Agent from posing as the control plane to another, and —
-// once an Agent trusts more than one CA, one per Control-Plane relationship
-// — is what lets each relationship's check stay scoped to its own CA rather
-// than accepting a certificate from any CA the Agent happens to trust.
-func verifyControlPlaneCertificate(caCert *x509.Certificate) func([][]byte, [][]*x509.Certificate) error {
-	pool := x509.NewCertPool()
-	pool.AddCert(caCert)
-	expectedID := pki.Fingerprint(caCert)
-
-	return func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
-		cert, err := verifiedLeaf(rawCerts, pool, x509.ExtKeyUsageServerAuth)
-		if err != nil {
-			return err
-		}
-		gotID, err := pki.ControlPlaneID(cert)
-		if err != nil {
-			return err
-		}
-		if gotID != expectedID {
-			return fmt.Errorf("presented certificate identifies control plane %q, expected %q", gotID, expectedID)
-		}
-		return nil
-	}
-}
-
-// verifyAgentCertificate is the control plane's check on the certificate an
-// Agent presents: real cert, signed by the fleet CA, AND identifies exactly
-// the node the control plane meant to reach — using [pki.PeerNodeID], the
-// same authoritative node-identity extraction every other authenticated
-// endpoint in Atlas already uses (see internal/api/agent). This stops the
-// control plane from ever acting on a response from the wrong node, even if
-// the NodeID-to-PeerID mapping were ever stale.
-func verifyAgentCertificate(pool *x509.CertPool, expectedNodeID string) func([][]byte, [][]*x509.Certificate) error {
-	return func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
-		cert, err := verifiedLeaf(rawCerts, pool, x509.ExtKeyUsageClientAuth)
-		if err != nil {
-			return err
-		}
-		nodeID, err := pki.PeerNodeID(cert)
-		if err != nil {
-			return err
-		}
-		if nodeID != expectedNodeID {
-			return fmt.Errorf("certificate identifies node %q, expected %q", nodeID, expectedNodeID)
-		}
-		return nil
-	}
-}
-
 // RequestContainerLogs opens a container_logs AgentOps session with the
 // Agent at agentPeerID, over h's existing connection to it, and returns the
 // response as the same two-channel shape docker.Client.Logs uses locally —
 // so internal/api/v1/containers.go can forward a local and a remote session
 // through the identical loop (see RemoteLogSource/followLogs there).
 //
-// Authentication is mutual TLS, roles reversed from every other Atlas
-// connection: the control plane is the TLS client here, the Agent the TLS
-// server, because this stream is control-plane-initiated. Both sides present
-// their existing enrollment-issued certificates and trust the same fleet CA
-// — no new PKI. Standard hostname-based verification does not apply to a raw
-// libp2p stream (there is no DNS name), so both sides skip it and verify
-// explicitly instead: see verifyAgentCertificate.
-func RequestContainerLogs(ctx context.Context, h host.Host, agentPeerID peer.ID, expectedNodeID string, caCert *x509.Certificate, controlPlaneLeaf tls.Certificate, req AgentOpRequest) (<-chan AgentOpFrame, error) {
+// Authentication is the libp2p Noise handshake and nothing else. agentPeerID
+// is not an address hint that some later handshake re-checks: go-libp2p
+// refuses to hand back a stream on a connection whose remote peer is not
+// that exact Peer ID, so by the time this function returns a stream, the
+// identity of the far end is already proven. Which node that peer speaks for
+// is the caller's authorization question, answered from the agent_peers
+// table before this is ever called (see app.fleetPipeline.ContainerLogs) —
+// authentication here, authorization there, deliberately not conflated.
+//
+// This replaces an earlier reversed-mTLS handshake over the same stream. It
+// proved a second identity, derived from enrollment, on a channel whose
+// identity was already proven — which is exactly the enrollment dependency
+// ADR-0012 removes.
+func RequestContainerLogs(ctx context.Context, h host.Host, agentPeerID peer.ID, req AgentOpRequest) (<-chan AgentOpFrame, error) {
 	const op = "libp2ptransport.RequestContainerLogs"
 
 	openCtx, openCancel := context.WithTimeout(ctx, streamOpenTimeout)
@@ -251,29 +159,7 @@ func RequestContainerLogs(ctx context.Context, h host.Host, agentPeerID peer.ID,
 		return nil, errs.Wrap(err, errs.CodeUnavailable, "could not open an agentops stream to the agent").WithOp(op)
 	}
 
-	pool := x509.NewCertPool()
-	pool.AddCert(caCert)
-	tlsConn := tls.Client(streamConn{stream}, &tls.Config{
-		MinVersion:   tls.VersionTLS13,
-		Certificates: []tls.Certificate{controlPlaneLeaf},
-		// InsecureSkipVerify disables Go's built-in hostname/SAN check,
-		// which has no meaning on a raw libp2p stream; VerifyPeerCertificate
-		// below performs a strictly more specific check (chain-to-CA plus
-		// exact node identity) in its place. This is not "skip
-		// verification" — it is "verify differently, and check more."
-		InsecureSkipVerify:    true,
-		VerifyPeerCertificate: verifyAgentCertificate(pool, expectedNodeID),
-	})
-
-	hsCtx, hsCancel := context.WithTimeout(ctx, handshakeTimeout)
-	err = tlsConn.HandshakeContext(hsCtx)
-	hsCancel()
-	if err != nil {
-		_ = stream.Reset()
-		return nil, errs.Wrap(err, errs.CodeUnauthenticated, "could not verify the agent's identity").WithOp(op)
-	}
-
-	if err := json.NewEncoder(tlsConn).Encode(req); err != nil {
+	if err := json.NewEncoder(stream).Encode(req); err != nil {
 		_ = stream.Reset()
 		return nil, errs.Wrap(err, errs.CodeInternal, "could not send the log request").WithOp(op)
 	}
@@ -299,7 +185,7 @@ func RequestContainerLogs(ctx context.Context, h host.Host, agentPeerID peer.ID,
 	go func() {
 		defer close(frames)
 		defer close(done)
-		dec := json.NewDecoder(tlsConn)
+		dec := json.NewDecoder(stream)
 		for {
 			var frame AgentOpFrame
 			if err := dec.Decode(&frame); err != nil {
@@ -319,22 +205,17 @@ func RequestContainerLogs(ctx context.Context, h host.Host, agentPeerID peer.ID,
 	return frames, nil
 }
 
-// AgentOpsRelationshipLookup resolves the trust and authorization context for
-// an inbound AgentOps stream, keyed by the libp2p peer it arrived from. An
-// Agent with more than one Control-Plane relationship has more than one CA
-// and more than one certificate to present — remotePeer is how a single
-// shared host tells which relationship's context applies to this particular
-// stream, since the underlying libp2p connection identity (unlike a raw TCP
-// connection) is already known before any TLS byte is exchanged. ok is false
-// for a peer this lookup does not recognize as belonging to any relationship
-// — the stream is rejected outright, the same silent-drop posture as an
-// unrecognized certificate.
+// AgentOpsRelationshipLookup decides whether an inbound AgentOps stream may
+// be served, keyed by the libp2p peer it arrived from.
 //
-// caCert is the specific relationship's CA — never any CA the process
-// happens to trust elsewhere, which is what stops one relationship's control
-// plane from ever being accepted as another's. getCert supplies that same
-// relationship's own certificate to present in return.
-type AgentOpsRelationshipLookup func(remotePeer peer.ID) (caCert *x509.Certificate, getCert func(*tls.ClientHelloInfo) (*tls.Certificate, error), allowContainerLogs bool, ok bool)
+// remotePeer is not a claim: the Noise handshake proved it before this
+// stream existed. The Agent answers with the only question left — is this
+// Peer ID the control plane of one of my configured relationships, and is
+// the operation allowed on this host. ok is false for any peer that is not
+// one of the Agent's own control planes, and the stream is dropped outright.
+// That check is what stops one relationship's control plane, or any other
+// peer on the network, from driving an operation on behalf of another.
+type AgentOpsRelationshipLookup func(remotePeer peer.ID) (allowContainerLogs bool, ok bool)
 
 // RegisterAgentOpsHandler wires h to accept AgentOps streams from any
 // Control-Plane relationship the Agent is bootstrapped for. h need not, and
@@ -353,42 +234,22 @@ func RegisterAgentOpsHandler(h host.Host, logs ContainerLogsFunc, limiter *Sessi
 func handleAgentOpsStream(s network.Stream, lookup AgentOpsRelationshipLookup, logs ContainerLogsFunc, limiter *SessionLimiter) {
 	defer s.Close()
 
-	// Resolved once, before TLS starts, from the already-established libp2p
-	// connection's peer identity — not something learned mid-handshake. An
-	// unrecognized peer is dropped exactly like a failed handshake below:
-	// there is no one yet to report an error to.
-	caCert, getCert, allowContainerLogs, ok := lookup(s.Conn().RemotePeer())
+	// The peer identity is already established — cryptographically, by the
+	// Noise handshake that brought this connection up, before any Atlas byte
+	// was exchanged. A peer that is not one of this Agent's own control
+	// planes is dropped silently: there is no one to report an error to, the
+	// same posture as an HTTP listener refusing an unauthenticated request.
+	allowContainerLogs, ok := lookup(s.Conn().RemotePeer())
 	if !ok {
 		return
 	}
 
-	tlsConn := tls.Server(streamConn{s}, &tls.Config{
-		MinVersion:     tls.VersionTLS13,
-		GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) { return getCert(nil) },
-		// ClientAuth forces the peer to present a certificate at all; which
-		// certificate is acceptable is decided explicitly below, for the
-		// same reason as the control-plane side — see RequestContainerLogs.
-		ClientAuth:            tls.RequireAnyClientCert,
-		InsecureSkipVerify:    true,
-		VerifyPeerCertificate: verifyControlPlaneCertificate(caCert),
-	})
-
-	hsCtx, hsCancel := context.WithTimeout(context.Background(), handshakeTimeout)
-	err := tlsConn.HandshakeContext(hsCtx)
-	hsCancel()
-	if err != nil {
-		// Not a genuine control plane, or a transient failure — either way
-		// there is no one yet to report an error to. Drop silently, the same
-		// posture as an HTTP listener refusing an unauthenticated request.
-		return
-	}
-
 	var req AgentOpRequest
-	if err := json.NewDecoder(tlsConn).Decode(&req); err != nil {
+	if err := json.NewDecoder(s).Decode(&req); err != nil {
 		return
 	}
 
-	enc := json.NewEncoder(tlsConn)
+	enc := json.NewEncoder(s)
 
 	if req.ProtocolVersion != AgentOpsProtocolVersion {
 		_ = enc.Encode(AgentOpFrame{Type: "error", Reason: fmt.Sprintf("unsupported protocol version %d", req.ProtocolVersion)})
@@ -430,7 +291,7 @@ func handleAgentOpsStream(s network.Stream, lookup AgentOpsRelationshipLookup, l
 	// call below, same idiom as containers.go's conn.CloseRead(ctx).
 	go func() {
 		var discard [1]byte
-		_, _ = tlsConn.Read(discard[:])
+		_, _ = s.Read(discard[:])
 		cancel()
 	}()
 

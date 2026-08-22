@@ -4,6 +4,7 @@
 // Usage:
 //
 //	atlas-agent [-h|--help] [--version]
+//	atlas-agent peer-id
 //
 // Configuration is read entirely from ATLAS_AGENT_ environment variables; see
 // -h for the full list. On first run it enrolls using ATLAS_AGENT_TOKEN and
@@ -50,6 +51,20 @@ func run() error {
 
 	cfg := agent.LoadConfig()
 
+	// peer-id prints this agent's persistent libp2p Peer ID and exits. It is
+	// what an operator hands to `atlas-server peer authorize`; on the libp2p
+	// transport that authorization, not an enrollment token, is what admits
+	// this agent. Reads (or creates) the same identity file the agent itself
+	// uses, so the value printed is the value it will dial with.
+	if args := flags.Args(); len(args) > 0 && args[0] == "peer-id" {
+		peerID, err := agent.PeerID(cfg.DataDir)
+		if err != nil {
+			return err
+		}
+		fmt.Println(peerID)
+		return nil
+	}
+
 	level := slog.LevelInfo
 	if cfg.LogLevel == "debug" {
 		level = slog.LevelDebug
@@ -85,15 +100,26 @@ func usage(flags *flag.FlagSet) func() {
 
 Usage:
   atlas-agent [flags]
+  atlas-agent peer-id      print this host's libp2p Peer ID and exit
 
-On first run, atlas-agent enrolls with the control plane using
-ATLAS_AGENT_TOKEN and a locally generated keypair, then persists its
-certificate under ATLAS_AGENT_DATA_DIR. Every run after that reuses the
-persisted certificate and needs no token.
+How the agent authenticates depends on its transport:
+
+  libp2p   No token and no certificate. The agent's persistent Peer ID (see
+           the peer-id command above) is its identity, proven by the libp2p
+           Noise handshake. An operator authorizes it once, on the server:
+
+             atlas-server peer authorize --peer-id <id> --node-id <node> \
+               --environment <env>
+
+  https    On first run, atlas-agent enrolls using ATLAS_AGENT_TOKEN and a
+           locally generated keypair, then persists its certificate under
+           ATLAS_AGENT_DATA_DIR. Every run after that reuses the persisted
+           certificate and needs no token.
 
 Environment variables:
   ATLAS_AGENT_CONTROL_PLANE_URL   Control plane base URL (default https://127.0.0.1:8443)
-  ATLAS_AGENT_TOKEN               Enrollment token; required only on first run
+  ATLAS_AGENT_TOKEN               Enrollment token; https transport only, first run only.
+                                  Not used, and not needed, on the libp2p transport.
   ATLAS_AGENT_DATA_DIR            Certificate and spool storage (default /var/lib/atlas-agent)
   ATLAS_AGENT_CA_BUNDLE           Path to a PEM CA certificate, for verified bootstrap.
   ATLAS_AGENT_INSECURE_BOOTSTRAP  Enroll with no CA bundle, trusting and pinning the
@@ -123,7 +149,7 @@ Multiple Control Planes (optional):
   For each id, the equivalent of every ATLAS_AGENT_* variable above is read
   from ATLAS_AGENT_RELATIONSHIP_<ID>_*, e.g.
   ATLAS_AGENT_RELATIONSHIP_PRODUCTION_CONTROL_PLANE_URL,
-  ATLAS_AGENT_RELATIONSHIP_PRODUCTION_TOKEN, and so on. These variables are
+  ATLAS_AGENT_RELATIONSHIP_PRODUCTION_TOKEN (https only), and so on. These are
   consulted only until a relationship first bootstraps successfully — after
   that, its resolved configuration is persisted under its own data directory
   and is authoritative; the environment variables are ignored on later

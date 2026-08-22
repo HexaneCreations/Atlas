@@ -28,3 +28,4 @@ web/.vite/
 .idea/
 .vscode/*
 !.vscode/extensions.json
+.mcp.json

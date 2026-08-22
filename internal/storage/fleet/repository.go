@@ -89,6 +89,101 @@ func (r *Repository) Redeem(ctx context.Context, tokenHash string, sourceIP net.
 	return grant, nil
 }
 
+// AuthorizedPeer implements [corefleet.PeerStore].
+//
+// The lookup is by Peer ID only — the identity the Noise handshake already
+// proved. Nothing the agent sends in a request body participates in it, which
+// is what stops a node_id (public, present in every inventory payload) from
+// being usable to admit an unregistered keypair.
+func (r *Repository) AuthorizedPeer(ctx context.Context, peerID string) (corefleet.PeerIdentity, error) {
+	const op = "fleet.Repository.AuthorizedPeer"
+
+	const q = `
+		SELECT peer_id, node_id, environment, role
+		FROM agent_peers
+		WHERE peer_id = $1 AND status = $2`
+
+	var id corefleet.PeerIdentity
+	err := r.pool.QueryRow(ctx, q, peerID, corefleet.PeerStatusActive).
+		Scan(&id.PeerID, &id.NodeID, &id.Environment, &id.Role)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return corefleet.PeerIdentity{}, corefleet.ErrPeerNotAuthorized
+		}
+		return corefleet.PeerIdentity{}, errs.Wrap(err, errs.CodeUnavailable,
+			"could not check the peer authorization").WithOp(op)
+	}
+	return id, nil
+}
+
+// RegisterPeer implements [corefleet.PeerRegistry].
+//
+// Re-registering an existing Peer ID updates its binding and reactivates it,
+// so an operator correcting a typo'd environment does not have to delete a
+// row first. It does not create a second row for the same peer: one keypair
+// authorizes one binding, revocable in one place.
+func (r *Repository) RegisterPeer(ctx context.Context, spec corefleet.PeerSpec) error {
+	const op = "fleet.Repository.RegisterPeer"
+
+	role := spec.Role
+	if role == "" {
+		role = corefleet.PeerRoleAgent
+	}
+
+	const q = `
+		INSERT INTO agent_peers (peer_id, node_id, environment, role, status)
+		VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT (peer_id) DO UPDATE
+		SET node_id = EXCLUDED.node_id, environment = EXCLUDED.environment,
+		    role = EXCLUDED.role, status = EXCLUDED.status, updated_at = now()`
+
+	if _, err := r.pool.Exec(ctx, q, spec.PeerID, spec.NodeID, spec.Environment, role, corefleet.PeerStatusActive); err != nil {
+		return errs.Wrap(err, errs.CodeUnavailable, "could not register the peer authorization").WithOp(op)
+	}
+	return nil
+}
+
+// RevokePeer implements [corefleet.PeerRegistry]. Revoking an unknown or
+// already-revoked peer is not an error: the caller's intent — that this Peer
+// ID must not be authorized — holds either way.
+func (r *Repository) RevokePeer(ctx context.Context, peerID string) error {
+	const op = "fleet.Repository.RevokePeer"
+
+	const q = `UPDATE agent_peers SET status = $2, updated_at = now() WHERE peer_id = $1`
+	if _, err := r.pool.Exec(ctx, q, peerID, corefleet.PeerStatusRevoked); err != nil {
+		return errs.Wrap(err, errs.CodeUnavailable, "could not revoke the peer authorization").WithOp(op)
+	}
+	return nil
+}
+
+// ListPeers implements [corefleet.PeerRegistry].
+func (r *Repository) ListPeers(ctx context.Context) ([]corefleet.PeerAuthorization, error) {
+	const op = "fleet.Repository.ListPeers"
+
+	const q = `
+		SELECT peer_id, node_id, environment, role, status, created_at, updated_at
+		FROM agent_peers ORDER BY created_at DESC`
+
+	rows, err := r.pool.Query(ctx, q)
+	if err != nil {
+		return nil, errs.Wrap(err, errs.CodeUnavailable, "could not list peer authorizations").WithOp(op)
+	}
+	defer rows.Close()
+
+	var out []corefleet.PeerAuthorization
+	for rows.Next() {
+		var a corefleet.PeerAuthorization
+		if err := rows.Scan(&a.PeerID, &a.NodeID, &a.Environment, &a.Role, &a.Status, &a.CreatedAt, &a.UpdatedAt); err != nil {
+			return nil, errs.Wrap(err, errs.CodeUnavailable, "could not read a peer authorization").WithOp(op)
+		}
+		out = append(out, a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, errs.Wrap(err, errs.CodeUnavailable, "could not read peer authorizations").WithOp(op)
+	}
+	return out, nil
+}
+
 // ActiveCredential implements [corefleet.CredentialStore].
 func (r *Repository) ActiveCredential(ctx context.Context, nodeID string, now time.Time) (*corefleet.Credential, error) {
 	const op = "fleet.Repository.ActiveCredential"

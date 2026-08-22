@@ -1,10 +1,19 @@
-// Package agent serves the mTLS API agents use to enroll, renew their
+// Package agent serves the API agents use to enroll, renew their
 // certificate, and push telemetry. See docs/architecture/agent-design.md.
 //
-// Every handler except Enroll requires a verified client certificate; the
-// listener's [tls.Config] is VerifyClientCertIfGiven rather than
-// RequireAndVerifyClientCert because Enroll is reached by agents that do not
-// have one yet — see [httpx.TLSServer] and [pki.ServerTLSConfig].
+// The same handlers are mounted on two listeners that authenticate
+// differently, and every handler takes its node identity from whichever
+// proof the caller actually supplied:
+//
+//   - HTTPS: a verified client certificate. The listener's [tls.Config] is
+//     VerifyClientCertIfGiven rather than RequireAndVerifyClientCert because
+//     Enroll is reached by agents that do not have one yet — see
+//     [httpx.TLSServer] and [pki.ServerTLSConfig].
+//   - libp2p: no TLS and no certificate. The Noise handshake proves the
+//     caller's Peer ID, [PeerAuthMiddleware] authorizes that Peer ID against
+//     the agent_peers table, and the node id and environment come from that
+//     authorization record. Renew has nothing to renew on this path and
+//     refuses; see docs/adr/0012-connect-by-identity.md.
 package agent
 
 import (
@@ -187,12 +196,13 @@ type TelemetryResponse struct {
 	RetryAfterMs int    `json:"retry_after_ms,omitempty"`
 }
 
-// Telemetry accepts a batch of envelopes over an authenticated mTLS
-// connection.
+// Telemetry accepts a batch of envelopes over an authenticated connection.
 //
-// Every envelope's Origin.NodeID is overwritten from the verified peer
-// certificate before it reaches a receiver — this is C1: identity is bound to
-// the credential, never to a claim in the request body. A payload naming a
+// Every envelope's Origin.NodeID is overwritten from the caller's
+// authenticated identity — the verified peer certificate over HTTPS, or the
+// authorized Peer ID's agent_peers record over libp2p — before it reaches a
+// receiver. This is C1: identity is bound to what the caller proved, never
+// to a claim in the request body. A payload naming a
 // different node is rejected outright and logged as a security event, since a
 // mismatch is what impersonation looks like.
 func (h *Handler) Telemetry(w http.ResponseWriter, r *http.Request) error {
@@ -224,6 +234,15 @@ func (h *Handler) Telemetry(w http.ResponseWriter, r *http.Request) error {
 			WithDetail("server_protocol_version", ProtocolVersion)
 	}
 
+	// Set only for a libp2p peer, whose authorization names the environment
+	// it was registered for. That registration is an operator's statement
+	// about the machine, so it outranks the agent's own configuration for
+	// the same reason the node id does.
+	authorizedEnvironment := ""
+	if id, ok := PeerIdentityFrom(r.Context()); ok {
+		authorizedEnvironment = id.Environment
+	}
+
 	now := time.Now()
 	resp := TelemetryResponse{Directive: "ok"}
 
@@ -239,9 +258,12 @@ func (h *Handler) Telemetry(w http.ResponseWriter, r *http.Request) error {
 			continue
 		}
 		env.Origin.NodeID = nodeID
+		if authorizedEnvironment != "" {
+			env.Origin.Environment = authorizedEnvironment
+		}
 
 		// After the identity rebind: an empty claimed NodeID is only valid
-		// once the peer certificate has supplied one.
+		// once the authenticated identity has supplied one.
 		if err := env.Validate(); err != nil {
 			h.deps.Logger.WarnContext(r.Context(), "envelope failed validation",
 				slog.String("node_id", nodeID), slog.String("envelope_id", env.ID),
@@ -327,7 +349,19 @@ func peerCert(r *http.Request) (*x509.Certificate, error) {
 	return r.TLS.PeerCertificates[0], nil
 }
 
+// peerNodeID returns the authenticated node identity for this request.
+//
+// Two transports, two proofs, one rule: the node id is always taken from
+// something the caller proved, never from something it claimed. Over libp2p
+// the proof is the Noise handshake plus the operator-registered peer
+// authorization [PeerAuthMiddleware] resolved (see docs/adr/0012); over
+// HTTPS it is the verified client certificate. A request body naming a node
+// participates in neither, which is what keeps [Handler.Telemetry]'s
+// identity rebinding meaningful on both paths.
 func (h *Handler) peerNodeID(r *http.Request) (string, error) {
+	if id, ok := PeerIdentityFrom(r.Context()); ok {
+		return id.NodeID, nil
+	}
 	cert, err := peerCert(r)
 	if err != nil {
 		return "", err
