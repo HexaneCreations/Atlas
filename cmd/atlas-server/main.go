@@ -74,6 +74,8 @@ func run() error {
 		return enrollToken(configPath, flags.Args()[1:])
 	case "peer":
 		return peerCommand(configPath, flags.Args()[1:])
+	case "grant":
+		return grantCommand(configPath, flags.Args()[1:])
 	case "version":
 		fmt.Println(build.Current())
 		return nil
@@ -96,6 +98,7 @@ Commands:
   config            print the resolved configuration, with secrets redacted
   enroll-token      create an agent enrollment token (HTTPS/mTLS transport only)
   peer              authorize, list or revoke an agent libp2p Peer ID
+  grant             authorize or revoke an AgentOps operation grant for a node
   version           print build information
 
 Flags:
