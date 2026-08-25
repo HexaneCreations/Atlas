@@ -29,3 +29,4 @@ web/.vite/
 .vscode/*
 !.vscode/extensions.json
 .mcp.json
+atlas-agent-linux-amd64
