@@ -76,7 +76,8 @@ func TestCostEstimateReflectsEverySeededSignal(t *testing.T) {
 	nodeID := fmt.Sprintf("costtest-node-%d", time.Now().UnixNano())
 	seedCostFixture(t, seedPool, nodeID)
 
-	resp, err := http.Get(base + "/api/v1/cost/estimate?node=" + nodeID)
+	client := authenticatedTestClient(t, base, "viewer")
+	resp, err := client.Get(base + "/api/v1/cost/estimate?node=" + nodeID)
 	if err != nil {
 		t.Fatalf("GET cost/estimate: %v", err)
 	}

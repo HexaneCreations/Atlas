@@ -1,6 +1,6 @@
 # ADR-0011: Authentication and RBAC, deferred with a fixed shape
 
-- **Status:** Accepted
+- **Status:** Superseded by [ADR-0013](0013-human-user-authentication-and-authorization.md)
 - **Date:** 2026-08-07
 - **Phase:** 4
 

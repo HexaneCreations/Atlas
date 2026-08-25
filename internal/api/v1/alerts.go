@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/hexane/atlas/internal/core/alert"
+	"github.com/hexane/atlas/internal/core/user"
 	"github.com/hexane/atlas/internal/platform/errs"
 	"github.com/hexane/atlas/internal/platform/httpx"
 )
@@ -128,6 +129,9 @@ func (h *Handler) GetAlertRule(w http.ResponseWriter, r *http.Request) error {
 // CreateAlertRule defines a new rule.
 func (h *Handler) CreateAlertRule(w http.ResponseWriter, r *http.Request) error {
 	const op = "v1.Handler.CreateAlertRule"
+	if err := h.requirePermission(r, user.PermissionFleetWrite); err != nil {
+		return err
+	}
 	store, err := h.alerts(op)
 	if err != nil {
 		return err
@@ -153,6 +157,9 @@ func (h *Handler) CreateAlertRule(w http.ResponseWriter, r *http.Request) error 
 // UpdateAlertRule replaces an existing rule's definition.
 func (h *Handler) UpdateAlertRule(w http.ResponseWriter, r *http.Request) error {
 	const op = "v1.Handler.UpdateAlertRule"
+	if err := h.requirePermission(r, user.PermissionFleetWrite); err != nil {
+		return err
+	}
 	store, err := h.alerts(op)
 	if err != nil {
 		return err
@@ -178,6 +185,9 @@ func (h *Handler) UpdateAlertRule(w http.ResponseWriter, r *http.Request) error 
 // DeleteAlertRule removes a rule. Its history survives as an audit trail.
 func (h *Handler) DeleteAlertRule(w http.ResponseWriter, r *http.Request) error {
 	const op = "v1.Handler.DeleteAlertRule"
+	if err := h.requirePermission(r, user.PermissionFleetWrite); err != nil {
+		return err
+	}
 	store, err := h.alerts(op)
 	if err != nil {
 		return err

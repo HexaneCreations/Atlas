@@ -45,8 +45,9 @@ constraint nobody can justify, or removes one whose reason they never learned.
 | [0008](0008-lossy-event-bus.md) | A lossy, non-blocking event bus | Accepted | 0 |
 | [0009](0009-typed-error-kernel.md) | A typed error kernel with a redaction boundary | Accepted | 0 |
 | [0010](0010-url-path-api-versioning.md) | URL-path API versioning | Accepted | 0 |
-| [0011](0011-deferred-rbac.md) | Authentication and RBAC, deferred with a fixed shape | Accepted | 4 |
+| [0011](0011-deferred-rbac.md) | Authentication and RBAC, deferred with a fixed shape | Superseded by 0013 | 4 |
 | [0012](0012-connect-by-identity.md) | Connect by identity, never by address | Accepted | 4 |
+| [0013](0013-human-user-authentication-and-authorization.md) | Human-user authentication and authorization | Accepted | 4 |
 
 ## Template
 

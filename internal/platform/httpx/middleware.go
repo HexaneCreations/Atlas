@@ -3,7 +3,6 @@ package httpx
 import (
 	"context"
 	"log/slog"
-	"net"
 	"net/http"
 	"runtime/debug"
 	"slices"
@@ -150,7 +149,7 @@ func AccessLog() Middleware {
 				slog.Int("status", rec.status),
 				slog.Int64("bytes", rec.written),
 				slog.Duration("duration", time.Since(start)),
-				slog.String("remote_addr", clientIP(r)),
+				slog.String("remote_addr", ClientIP(r)),
 			}
 
 			logger := log.FromContext(ctx)
@@ -168,21 +167,6 @@ func AccessLog() Middleware {
 
 func isProbePath(path string) bool {
 	return path == "/healthz" || path == "/readyz"
-}
-
-// clientIP returns the peer address.
-//
-// It deliberately ignores X-Forwarded-For. That header is client-controlled
-// and trustworthy only when a known proxy overwrites it; honouring it
-// unconditionally would let any caller forge the address that appears in
-// audit logs. Proxy-aware address resolution arrives with the authentication
-// work, where the trusted-proxy list it requires also belongs.
-func clientIP(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
-	return host
 }
 
 // recordingWriter captures the status and byte count of a response.
@@ -248,9 +232,13 @@ func SecurityHeaders() Middleware {
 // policy, and returning a normal response keeps non-browser clients — curl,
 // the agent, monitoring probes — working unchanged.
 //
-// Credentials are not enabled. Atlas has no session cookie yet; the header
-// will be added alongside authentication, together with the stricter origin
-// rules it requires.
+// Access-Control-Allow-Credentials is set only for an explicitly listed
+// origin, never for the "*" wildcard: the two together are forbidden by the
+// fetch spec (a browser ignores the credentials header when the origin is a
+// wildcard) and would be a real weakening if honoured, since it is the
+// session cookie that credentialed request would carry. This is the
+// "stricter origin rules" this function's doc previously promised alongside
+// authentication — see docs/adr/0011-deferred-rbac.md.
 func CORS(allowedOrigins []string) Middleware {
 	allowAll := slices.Contains(allowedOrigins, "*")
 
@@ -261,13 +249,17 @@ func CORS(allowedOrigins []string) Middleware {
 			// shared cache may serve one origin's response to another.
 			w.Header().Add("Vary", "Origin")
 
-			if origin != "" && (allowAll || slices.Contains(allowedOrigins, origin)) {
+			explicitlyAllowed := origin != "" && slices.Contains(allowedOrigins, origin)
+			if origin != "" && (allowAll || explicitlyAllowed) {
 				h := w.Header()
 				h.Set("Access-Control-Allow-Origin", origin)
 				h.Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
 				h.Set("Access-Control-Allow-Headers", "Content-Type, "+RequestIDHeader)
 				h.Set("Access-Control-Expose-Headers", RequestIDHeader)
 				h.Set("Access-Control-Max-Age", "600")
+				if explicitlyAllowed {
+					h.Set("Access-Control-Allow-Credentials", "true")
+				}
 			}
 
 			if r.Method == http.MethodOptions && r.Header.Get("Access-Control-Request-Method") != "" {
@@ -348,12 +340,22 @@ func IsWebSocketUpgrade(r *http.Request) bool {
 // protection for it has to happen inside the handshake itself (see
 // websocket.AcceptOptions.OriginPatterns), and adding CORS response headers
 // here would suggest a protection that is not actually in effect.
-func StreamMiddleware(cfg config.Server) Middleware {
+//
+// authenticate is the same middleware value [BaseMiddleware] receives — see
+// its doc for why this is passed in rather than built locally. This is the
+// endpoint docs/adr/0011-deferred-rbac.md calls out by name as the highest
+// risk if authentication is ever added to one chain and not the other:
+// GET /api/v1/containers/{id}/logs/follow dispatches through this chain, and
+// a browser's WebSocket handshake carries no Authorization header for a
+// route-level check to fall back on — the cookie resolved here is the only
+// mechanism available to it.
+func StreamMiddleware(cfg config.Server, authenticate Middleware) Middleware {
 	return Chain(
 		Recoverer(),
 		RequestID(),
 		AccessLog(),
 		SecurityHeaders(),
+		authenticate,
 		MaxBodyBytes(cfg.MaxRequestBytes),
 	)
 }

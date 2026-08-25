@@ -7,6 +7,7 @@ import (
 
 	"github.com/hexane/atlas/internal/core/alert"
 	"github.com/hexane/atlas/internal/core/slo"
+	"github.com/hexane/atlas/internal/core/user"
 	"github.com/hexane/atlas/internal/platform/errs"
 	"github.com/hexane/atlas/internal/platform/httpx"
 )
@@ -110,6 +111,9 @@ func (h *Handler) GetSLO(w http.ResponseWriter, r *http.Request) error {
 // CreateSLO defines a new SLO.
 func (h *Handler) CreateSLO(w http.ResponseWriter, r *http.Request) error {
 	const op = "v1.Handler.CreateSLO"
+	if err := h.requirePermission(r, user.PermissionFleetWrite); err != nil {
+		return err
+	}
 	store, err := h.slos(op)
 	if err != nil {
 		return err
@@ -135,6 +139,9 @@ func (h *Handler) CreateSLO(w http.ResponseWriter, r *http.Request) error {
 // UpdateSLO replaces an existing SLO's definition.
 func (h *Handler) UpdateSLO(w http.ResponseWriter, r *http.Request) error {
 	const op = "v1.Handler.UpdateSLO"
+	if err := h.requirePermission(r, user.PermissionFleetWrite); err != nil {
+		return err
+	}
 	store, err := h.slos(op)
 	if err != nil {
 		return err
@@ -160,6 +167,9 @@ func (h *Handler) UpdateSLO(w http.ResponseWriter, r *http.Request) error {
 // DeleteSLO removes an SLO definition.
 func (h *Handler) DeleteSLO(w http.ResponseWriter, r *http.Request) error {
 	const op = "v1.Handler.DeleteSLO"
+	if err := h.requirePermission(r, user.PermissionFleetWrite); err != nil {
+		return err
+	}
 	store, err := h.slos(op)
 	if err != nil {
 		return err

@@ -59,7 +59,11 @@ func TestEnvironmentOverridesDefaults(t *testing.T) {
 	t.Parallel()
 
 	cfg, err := config.Load(config.Options{Lookup: env(map[string]string{
-		"ATLAS_SERVER_HOST":               "0.0.0.0",
+		// 127.0.0.2, not the default 127.0.0.1: proves the override actually
+		// moved a non-default value through, while staying loopback so this
+		// test (about override plumbing, not security posture) doesn't trip
+		// the non-loopback-requires-production check below.
+		"ATLAS_SERVER_HOST":               "127.0.0.2",
 		"ATLAS_SERVER_PORT":               "9000",
 		"ATLAS_SERVER_READ_TIMEOUT":       "45s",
 		"ATLAS_SERVER_ALLOWED_ORIGINS":    "https://atlas.example.com, https://ops.example.com",
@@ -72,7 +76,7 @@ func TestEnvironmentOverridesDefaults(t *testing.T) {
 		t.Fatalf("Load() error = %v", err)
 	}
 
-	if got, want := cfg.Server.Addr(), "0.0.0.0:9000"; got != want {
+	if got, want := cfg.Server.Addr(), "127.0.0.2:9000"; got != want {
 		t.Errorf("Addr() = %q, want %q", got, want)
 	}
 	if got, want := cfg.Server.ReadTimeout, 45*time.Second; got != want {
@@ -251,6 +255,70 @@ func TestProductionHardening(t *testing.T) {
 			name:    "plaintext origin",
 			vars:    with(map[string]string{"ATLAS_SERVER_ALLOWED_ORIGINS": "http://ops.example.com"}),
 			wantErr: "plaintext http",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := config.Load(config.Options{Lookup: env(tt.vars)})
+			switch {
+			case tt.wantErr == "" && err != nil:
+				t.Fatalf("Load() error = %v, want success", err)
+			case tt.wantErr == "":
+			case err == nil:
+				t.Fatalf("Load() succeeded, want error containing %q", tt.wantErr)
+			case !strings.Contains(err.Error(), tt.wantErr):
+				t.Errorf("error = %v, want it to contain %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// The session cookie's Secure attribute is only set in production (see
+// internal/api/router.go): outside production, that cookie is only safe to
+// hand out over loopback, where the traffic never leaves the machine. A
+// non-loopback bind outside production must therefore be refused at
+// startup, the same fail-fast posture every other production-hardening rule
+// in this file uses — see docs/adr/0013-human-user-authentication-and-authorization.md.
+func TestNonLoopbackBindRequiresProduction(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		vars    map[string]string
+		wantErr string
+	}{
+		{
+			name: "loopback IPv4, development — fine",
+			vars: map[string]string{"ATLAS_SERVER_HOST": "127.0.0.1"},
+		},
+		{
+			name: "loopback IPv6, development — fine",
+			vars: map[string]string{"ATLAS_SERVER_HOST": "::1"},
+		},
+		{
+			name: "localhost by name, development — fine",
+			vars: map[string]string{"ATLAS_SERVER_HOST": "localhost"},
+		},
+		{
+			name:    "all interfaces, development — refused",
+			vars:    map[string]string{"ATLAS_SERVER_HOST": "0.0.0.0"},
+			wantErr: "is not loopback while environment is not production",
+		},
+		{
+			name:    "a real LAN address, staging — refused",
+			vars:    map[string]string{"ATLAS_ENVIRONMENT": "staging", "ATLAS_SERVER_HOST": "192.168.1.10"},
+			wantErr: "is not loopback while environment is not production",
+		},
+		{
+			name: "all interfaces, production — allowed (Secure is set)",
+			vars: map[string]string{
+				"ATLAS_ENVIRONMENT":       "production",
+				"ATLAS_SERVER_HOST":       "0.0.0.0",
+				"ATLAS_DATABASE_PASSWORD": "pw",
+				"ATLAS_DATABASE_SSL_MODE": "verify-full",
+			},
 		},
 	}
 

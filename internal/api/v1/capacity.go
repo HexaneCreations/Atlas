@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/hexane/atlas/internal/core/capacityplanning"
+	"github.com/hexane/atlas/internal/core/user"
 	"github.com/hexane/atlas/internal/platform/errs"
 	"github.com/hexane/atlas/internal/platform/httpx"
 )
@@ -49,7 +50,10 @@ func (h *Handler) CapacitySummary(w http.ResponseWriter, r *http.Request) error 
 		return errs.New(errs.CodeUnavailable, "capacity planning is not configured").WithOp("v1.Handler.CapacitySummary")
 	}
 
-	nodeID := h.resolvedNode(h.scopeFrom(r))
+	nodeID, err := h.requireNode(r, user.PermissionNodeRead)
+	if err != nil {
+		return err
+	}
 	if nodeID == "" {
 		return errs.New(errs.CodeInvalidArgument, "a node id is required").WithOp("v1.Handler.CapacitySummary")
 	}

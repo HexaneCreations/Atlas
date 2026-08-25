@@ -120,6 +120,20 @@ type Deps struct {
 	// Nil disables the endpoints rather than crashing them, the same
 	// convention as the others above.
 	NotificationStore NotificationStore
+	// Users, Sessions and Authz back human-user authentication and
+	// authorization (see internal/core/user). Nil disables login and leaves
+	// every node-scoped read unauthenticated, the same convention as the
+	// other stores above — see [Handler.Login] and [Handler.requireScope].
+	Users    UserStore
+	Sessions SessionStore
+	Authz    Authorizer
+	// SessionSecure sets the session cookie's Secure attribute. Must be true
+	// whenever Atlas is reachable over anything but plain-HTTP loopback.
+	SessionSecure bool
+	// LoginLimiter bounds POST /auth/login attempts. Nil disables throttling
+	// rather than crashing it, the same convention as the other stores
+	// above — see [Handler.Login].
+	LoginLimiter LoginLimiter
 }
 
 // SLOStore is the SLO definition store the API reads and writes. Satisfied
@@ -244,6 +258,11 @@ func (h *Handler) Mount(mux *http.ServeMux) {
 	mux.Handle("GET "+Prefix+"/system/info", httpx.Handler(h.SystemInfo))
 	mux.Handle("GET "+Prefix+"/system/health", httpx.Handler(h.SystemHealth))
 	mux.Handle("GET "+Prefix+"/system/runtime", httpx.Handler(h.SystemRuntime))
+
+	// Deliberately reachable without a session — see [Handler.Login]'s doc.
+	mux.Handle("POST "+Prefix+"/auth/login", httpx.Handler(h.Login))
+	mux.Handle("POST "+Prefix+"/auth/logout", httpx.Handler(h.Logout))
+	mux.Handle("GET "+Prefix+"/auth/me", httpx.Handler(h.CurrentUser))
 
 	mux.Handle("GET "+Prefix+"/nodes", httpx.Handler(h.ListNodes))
 	mux.Handle("GET "+Prefix+"/nodes/{nodeID}", httpx.Handler(h.GetNode))

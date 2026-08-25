@@ -352,8 +352,9 @@ func TestGetContainerReportsInspectFailure(t *testing.T) {
 	}
 }
 
-// Environment variables must never reach the API. They carry credentials, and
-// this endpoint is unauthenticated.
+// Environment variables must never reach the API. They carry credentials,
+// and this response shape is the defense regardless of who is authenticated
+// — a container's env block is not something any role should be handed.
 func TestContainerDetailHasNoEnvironmentField(t *testing.T) {
 	t.Parallel()
 
