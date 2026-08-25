@@ -16,7 +16,11 @@ FROM golang:1.25-alpine AS build
 # not re-download the module graph.
 WORKDIR /src
 COPY go.mod go.sum ./
-RUN go mod download
+# proxy.golang.org occasionally drops mid-download with an HTTP/2
+# INTERNAL_ERROR; GODEBUG disables HTTP/2 to the proxy and the retry loop
+# absorbs the rest.
+ENV GODEBUG=http2client=0
+RUN for i in 1 2 3; do go mod download && break || sleep 5; done
 
 COPY . .
 
