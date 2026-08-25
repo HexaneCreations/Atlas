@@ -1,8 +1,10 @@
 import { Suspense, lazy, useCallback, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { Route, Routes, useLocation } from "react-router";
+import { Navigate, Route, Routes, useLocation } from "react-router";
 import { Sidebar } from "./shell/Sidebar";
 import { Topbar } from "./shell/Topbar";
+import { LoginPage } from "./pages/LoginPage";
+import { useAuth } from "./auth/AuthContext";
 const OverviewPage = lazy(() =>
   import("./pages/OverviewPage").then((m) => ({ default: m.OverviewPage })),
 );
@@ -39,13 +41,38 @@ import { chromeFor } from "./lib/pageChrome";
  * The Atlas shell: a fixed sidebar and top bar around a routed page body.
  *
  * Routing lives here rather than behind a nested layout route, because there
- * is exactly one layout in this application — every page is a peer inside
- * the same shell. A `<Outlet>`-based layout route earns its keep once a
- * second layout (a full-bleed page, an auth screen) exists; until then it is
- * a level of indirection with nothing on the other side of it.
+ * are exactly two layouts in this application: the shell below, and the
+ * full-bleed login screen, which is simple enough to branch on directly
+ * without a `<Outlet>`-based layout route. A third layout is what would
+ * earn that indirection.
  */
 export function App() {
   const { pathname } = useLocation();
+  const { user, isLoading } = useAuth();
+
+  // The login screen is deliberately outside the shell entirely: showing a
+  // sidebar full of links that would all 401 before a session exists is not
+  // useful chrome, and an already-authenticated visit to /login goes
+  // straight back in rather than showing a form with nothing to do.
+  if (pathname === "/login") {
+    return user ? <Navigate to="/" replace /> : <LoginPage />;
+  }
+
+  // Nothing is known yet about whether a session exists — rendering the
+  // shell now would flash protected content for a moment even when the
+  // caller turns out to be anonymous.
+  if (isLoading) {
+    return <PageSkeleton />;
+  }
+
+  if (!user) {
+    return <Navigate to="/login" replace />;
+  }
+
+  return <AuthenticatedApp pathname={pathname} />;
+}
+
+function AuthenticatedApp({ pathname }: { pathname: string }) {
   const chrome = chromeFor(pathname);
   const [navOpen, setNavOpen] = useState(false);
   const closeNav = useCallback(() => {

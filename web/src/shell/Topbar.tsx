@@ -1,23 +1,27 @@
 import { Link } from "react-router";
-import { AlertTriangle, Menu } from "lucide-react";
+import { AlertTriangle, LogOut, Menu } from "lucide-react";
 import { useCollectors, useSystemHealth } from "../api/queries";
 import type { HealthStatus } from "../api/types";
+import { useAuth } from "../auth/AuthContext";
 import { CommandPalette } from "./CommandPalette";
 import { NodeSwitcher } from "./NodeSwitcher";
 
 /**
- * The top bar: quick navigation, and the two things worth seeing from every
- * page without navigating away — overall health, and whether any collector
- * is failing to produce the data the rest of the UI depends on.
+ * The top bar: quick navigation, and the things worth seeing from every page
+ * without navigating away — overall health, whether any collector is
+ * failing to produce the data the rest of the UI depends on, and who is
+ * signed in.
  *
- * There is no notification bell or user menu here. Atlas has no alerting
- * engine and no authentication yet — a bell with a fabricated badge count,
- * or an avatar for a user model that does not exist, is exactly the kind of
- * placeholder this project was built without from the start.
+ * There is still no notification bell or full user menu here — Atlas has no
+ * alerting engine, and a bell with a fabricated badge count is exactly the
+ * kind of placeholder this project was built without from the start. The
+ * signed-in username and a logout control are not that: they reflect a real
+ * session, not a stand-in for one.
  */
 export function Topbar({ onOpenNav }: { onOpenNav: () => void }) {
   const health = useSystemHealth();
   const collectors = useCollectors();
+  const { user, logout } = useAuth();
 
   const failing = collectors.data?.collectors.filter((c) => !c.healthy).length ?? 0;
 
@@ -49,6 +53,20 @@ export function Topbar({ onOpenNav }: { onOpenNav: () => void }) {
         <NodeSwitcher />
 
         {health.data ? <HealthPill status={health.data.status} /> : null}
+
+        {user ? (
+          <button
+            type="button"
+            onClick={() => {
+              void logout();
+            }}
+            title={`Signed in as ${user.username} — sign out`}
+            className="flex items-center gap-1.5 rounded-full border border-border bg-surface px-3 py-1.5 text-xs font-medium text-text-muted hover:bg-surface-hover hover:text-text"
+          >
+            <LogOut size={13} />
+            {user.username}
+          </button>
+        ) : null}
       </div>
     </header>
   );

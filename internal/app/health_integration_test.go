@@ -80,7 +80,8 @@ func TestHealthScoreReflectsEverySeededSignal(t *testing.T) {
 	nodeID := fmt.Sprintf("healthtest-node-%d", time.Now().UnixNano())
 	seedHealthScoreFixture(t, seedPool, nodeID)
 
-	resp, err := http.Get(base + "/api/v1/health/score?node=" + nodeID)
+	client := authenticatedTestClient(t, base, "viewer")
+	resp, err := client.Get(base + "/api/v1/health/score?node=" + nodeID)
 	if err != nil {
 		t.Fatalf("GET health/score: %v", err)
 	}

@@ -12,6 +12,7 @@ import (
 	"github.com/coder/websocket/wsjson"
 
 	"github.com/hexane/atlas/internal/core/inventory"
+	"github.com/hexane/atlas/internal/core/user"
 	"github.com/hexane/atlas/internal/platform/errs"
 	"github.com/hexane/atlas/internal/platform/httpx"
 	"github.com/hexane/atlas/internal/plugin/docker"
@@ -178,7 +179,10 @@ type ListContainersResponse struct {
 // so a remote container list gets the same freshness disclosure and the same
 // three-way not_found/unavailable/not_implemented distinction as the rest.
 func (h *Handler) ListContainers(w http.ResponseWriter, r *http.Request) error {
-	scope := h.scopeFrom(r)
+	scope, err := h.requireScope(r, user.PermissionNodeRead)
+	if err != nil {
+		return err
+	}
 
 	var (
 		containers []docker.Container
@@ -224,7 +228,11 @@ func (h *Handler) ListContainers(w http.ResponseWriter, r *http.Request) error {
 func (h *Handler) GetContainer(w http.ResponseWriter, r *http.Request) error {
 	const op = "v1.Handler.GetContainer"
 
-	client, err := h.dockerClient(h.scopeFrom(r))
+	scope, err := h.requireScope(r, user.PermissionNodeRead)
+	if err != nil {
+		return err
+	}
+	client, err := h.dockerClient(scope)
 	if err != nil {
 		return err
 	}
@@ -346,7 +354,14 @@ type ContainerLogsResponse struct {
 func (h *Handler) ContainerLogs(w http.ResponseWriter, r *http.Request) error {
 	const op = "v1.Handler.ContainerLogs"
 
-	scope := h.scopeFrom(r)
+	// node.logs.read, not node.read: docs/adr/0011-deferred-rbac.md names
+	// container log content as uniquely sensitive — the single most
+	// sensitive thing the API serves — so it is gated separately from the
+	// rest of a node's inventory.
+	scope, err := h.requireScope(r, user.PermissionNodeLogsRead)
+	if err != nil {
+		return err
+	}
 	id := r.PathValue("containerID")
 	if id == "" {
 		return errs.New(errs.CodeInvalidArgument, "a container id is required").
@@ -444,7 +459,18 @@ func (h *Handler) ContainerLogsFollow(w http.ResponseWriter, r *http.Request) er
 			WithOp(op)
 	}
 
-	scope := h.scopeFrom(r)
+	// node.logs.read — see the same check and its doc in [Handler.ContainerLogs].
+	// This is the endpoint docs/adr/0011-deferred-rbac.md calls out by name
+	// as the highest-risk one if authentication were ever missing from the
+	// streaming chain: it dispatches through [httpx.StreamMiddleware], not
+	// [httpx.BaseMiddleware], and a browser's WebSocket handshake has no
+	// Authorization header for a fallback check to use — the session cookie
+	// [session.AuthMiddleware] resolves ahead of this handler is the only
+	// mechanism available to it.
+	scope, err := h.requireScope(r, user.PermissionNodeLogsRead)
+	if err != nil {
+		return err
+	}
 	id := r.PathValue("containerID")
 	if id == "" {
 		return errs.New(errs.CodeInvalidArgument, "a container id is required").

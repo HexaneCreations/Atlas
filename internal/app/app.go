@@ -25,6 +25,7 @@ import (
 	"github.com/hexane/atlas/internal/core/activity"
 	corealert "github.com/hexane/atlas/internal/core/alert"
 	coreeventstore "github.com/hexane/atlas/internal/core/eventstore"
+	coreuser "github.com/hexane/atlas/internal/core/user"
 	"github.com/hexane/atlas/internal/platform/build"
 	"github.com/hexane/atlas/internal/platform/config"
 	"github.com/hexane/atlas/internal/platform/errs"
@@ -140,6 +141,11 @@ func New(cfg *config.Config, logger *slog.Logger) (*App, error) {
 		SLO:               sloEngine,
 		SLOStore:          lazySLOStore{pool: pool},
 		NotificationStore: lazyNotificationStore{pool: pool},
+		Users:             lazyUserStore{pool: pool},
+		Sessions:          lazyUserStore{pool: pool},
+		Authz:             lazyAuthorizer{pool: pool},
+		LoginLimiter:      coreuser.NewLoginLimiter(),
+		Logger:            logger,
 	})
 	server := httpx.NewServer(cfg.Server, handler, logger)
 

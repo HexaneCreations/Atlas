@@ -22,9 +22,9 @@ import (
 	"time"
 )
 
-func postJSON(t *testing.T, url, body string) (int, map[string]any) {
+func postJSON(t *testing.T, client *http.Client, url, body string) (int, map[string]any) {
 	t.Helper()
-	resp, err := http.Post(url, "application/json", strings.NewReader(body))
+	resp, err := client.Post(url, "application/json", strings.NewReader(body))
 	if err != nil {
 		t.Fatalf("POST %s: %v", url, err)
 	}
@@ -52,6 +52,10 @@ func TestAlertTransitionDeliversARealSignedWebhook(t *testing.T) {
 		t.Skipf("%s is not set; run `make db-up` first", testDatabaseURLEnv)
 	}
 	base := bootServer(t)
+	// Registering a notification channel and an alert rule are both
+	// fleet.write actions now — see docs/adr/0013-human-user-authentication-and-authorization.md
+	// and migrations/0013_fleet_write_permission.sql.
+	client := authenticatedTestClient(t, base, "operator")
 
 	const secret = "integration-secret"
 	var (
@@ -71,7 +75,7 @@ func TestAlertTransitionDeliversARealSignedWebhook(t *testing.T) {
 
 	// Register the webhook channel.
 	channelBody := `{"name":"it-webhook","type":"webhook","webhook_url":"` + webhook.URL + `","webhook_secret":"` + secret + `"}`
-	status, _ := postJSON(t, base+"/api/v1/notifications/channels", channelBody)
+	status, _ := postJSON(t, client, base+"/api/v1/notifications/channels", channelBody)
 	if status != http.StatusCreated {
 		t.Fatalf("create channel status = %d", status)
 	}
@@ -81,7 +85,7 @@ func TestAlertTransitionDeliversARealSignedWebhook(t *testing.T) {
 	// it evaluates against whatever node is actually reporting.
 	ruleBody := `{"name":"it-always-fires","kind":"threshold","severity":"critical",
 		"metric":"system.cpu.usage","comparison":"gt","threshold":-1,"for_seconds":0}`
-	status, _ = postJSON(t, base+"/api/v1/alerts/rules", ruleBody)
+	status, _ = postJSON(t, client, base+"/api/v1/alerts/rules", ruleBody)
 	if status != http.StatusCreated {
 		t.Fatalf("create rule status = %d", status)
 	}

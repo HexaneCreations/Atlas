@@ -8,9 +8,11 @@ package api
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"time"
 
+	"github.com/hexane/atlas/internal/api/session"
 	v1 "github.com/hexane/atlas/internal/api/v1"
 	"github.com/hexane/atlas/internal/core/activity"
 	corecapacityplanning "github.com/hexane/atlas/internal/core/capacityplanning"
@@ -52,6 +54,22 @@ type Deps struct {
 	SLO               *coreslo.Engine
 	SLOStore          v1.SLOStore
 	NotificationStore v1.NotificationStore
+	// Users, Sessions and Authz back human-user authentication and
+	// authorization (see internal/core/user and internal/api/v1's auth
+	// endpoints). Nil disables login entirely rather than crashing it — the
+	// same convention as Activity, EventStore and the other stores above —
+	// which is what lets [router_test.go]'s minimal Deps keep working
+	// unchanged.
+	Users    v1.UserStore
+	Sessions v1.SessionStore
+	Authz    v1.Authorizer
+	// LoginLimiter bounds POST /auth/login attempts. Nil disables
+	// throttling rather than crashing it, the same convention as the
+	// stores above.
+	LoginLimiter v1.LoginLimiter
+	// Logger is used only to build the authentication middleware; nil is
+	// valid and falls back to slog's default handler.
+	Logger *slog.Logger
 }
 
 // New builds the complete HTTP handler, middleware included.
@@ -84,6 +102,11 @@ func New(deps Deps) http.Handler {
 		SLO:               deps.SLO,
 		SLOStore:          deps.SLOStore,
 		NotificationStore: deps.NotificationStore,
+		Users:             deps.Users,
+		Sessions:          deps.Sessions,
+		Authz:             deps.Authz,
+		LoginLimiter:      deps.LoginLimiter,
+		SessionSecure:     deps.Config.Environment.IsProduction(),
 	}).Mount(mux)
 
 	requestTimeout := deps.Config.Server.WriteTimeout - time.Second
@@ -91,14 +114,26 @@ func New(deps Deps) http.Handler {
 		requestTimeout = deps.Config.Server.WriteTimeout
 	}
 
+	// authenticate is the one shared authentication segment both chains
+	// below splice in — see docs/adr/0011-deferred-rbac.md sec 1 and
+	// [httpx.BaseMiddleware]'s doc. A nil Sessions store (no database-backed
+	// session store wired in, e.g. a minimal test harness) leaves every
+	// request anonymous rather than panicking, the same "nil disables rather
+	// than crashes" convention every other optional dependency in [Deps]
+	// follows.
+	authenticate := httpx.Middleware(func(next http.Handler) http.Handler { return next })
+	if deps.Sessions != nil {
+		authenticate = session.AuthMiddleware(deps.Sessions, deps.Logger)
+	}
+
 	// JSONErrorFallback sits directly outside the mux, so it sees the router's
 	// own 404 and 405 responses and rewrites them into the standard envelope.
 	// It must be inside the base chain, so those rewritten responses still get
 	// a request id, security headers, and an access-log line.
-	base := httpx.BaseMiddleware(deps.Config.Server, requestTimeout)(
+	base := httpx.BaseMiddleware(deps.Config.Server, requestTimeout, authenticate)(
 		httpx.JSONErrorFallback()(mux),
 	)
-	stream := httpx.StreamMiddleware(deps.Config.Server)(mux)
+	stream := httpx.StreamMiddleware(deps.Config.Server, authenticate)(mux)
 
 	// A WebSocket upgrade is dispatched through the streaming chain instead of
 	// the base one — same mux, same routes, but without the fixed request

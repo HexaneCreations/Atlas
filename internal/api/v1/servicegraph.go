@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/hexane/atlas/internal/core/inventory"
+	"github.com/hexane/atlas/internal/core/user"
 	"github.com/hexane/atlas/internal/platform/errs"
 	"github.com/hexane/atlas/internal/platform/httpx"
 	"github.com/hexane/atlas/internal/plugin/service"
@@ -109,7 +110,11 @@ type ServiceGraphResponse struct {
 func (h *Handler) ServiceGraph(w http.ResponseWriter, r *http.Request) error {
 	const op = "v1.Handler.ServiceGraph"
 
-	graph, err := h.serviceGraph(r.Context(), h.scopeFrom(r))
+	scope, err := h.requireScope(r, user.PermissionNodeRead)
+	if err != nil {
+		return err
+	}
+	graph, err := h.serviceGraph(r.Context(), scope)
 	if err != nil {
 		return err
 	}
@@ -221,7 +226,11 @@ type ServiceImpactResponse struct {
 func (h *Handler) ServiceDetail(w http.ResponseWriter, r *http.Request) error {
 	const op = "v1.Handler.ServiceDetail"
 
-	graph, err := h.serviceGraph(r.Context(), h.scopeFrom(r))
+	scope, err := h.requireScope(r, user.PermissionNodeRead)
+	if err != nil {
+		return err
+	}
+	graph, err := h.serviceGraph(r.Context(), scope)
 	if err != nil {
 		return err
 	}
@@ -258,7 +267,11 @@ func (h *Handler) ServiceDetail(w http.ResponseWriter, r *http.Request) error {
 func (h *Handler) ServiceImpact(w http.ResponseWriter, r *http.Request) error {
 	const op = "v1.Handler.ServiceImpact"
 
-	graph, err := h.serviceGraph(r.Context(), h.scopeFrom(r))
+	scope, err := h.requireScope(r, user.PermissionNodeRead)
+	if err != nil {
+		return err
+	}
+	graph, err := h.serviceGraph(r.Context(), scope)
 	if err != nil {
 		return err
 	}

@@ -158,19 +158,33 @@ var (
 //     include everything the request actually did.
 //  4. SecurityHeaders and CORS run before the handler so headers are set
 //     before any handler starts writing.
-//  5. MaxBodyBytes and Timeout are innermost, closest to the handler whose
+//  5. authenticate resolves the session cookie into a principal, once
+//     headers are set and after AccessLog is already wrapping the request,
+//     so an authentication outcome is logged like everything else.
+//  6. MaxBodyBytes and Timeout are innermost, closest to the handler whose
 //     resource use they bound.
 //
 // Recoverer above RequestID means a panic in RequestID itself is still caught,
 // at the cost of that one response having no correlation id — the right trade,
 // since the alternative is an unrecovered panic.
-func BaseMiddleware(cfg config.Server, requestTimeout time.Duration) Middleware {
+//
+// authenticate is the single shared authentication segment — see
+// [session.AuthMiddleware] — passed in rather than constructed here so that
+// httpx stays free of any dependency on the user/session domain (this
+// package "knows nothing about servers, containers, or metrics", per the
+// package doc, and authentication is no exception). The caller (see
+// internal/api/router.go) builds it once and passes the identical value into
+// both this and [StreamMiddleware], per docs/adr/0011-deferred-rbac.md
+// sec 1: adding it to one chain and not the other is the failure mode that
+// decision exists to make impossible by construction.
+func BaseMiddleware(cfg config.Server, requestTimeout time.Duration, authenticate Middleware) Middleware {
 	return Chain(
 		Recoverer(),
 		RequestID(),
 		AccessLog(),
 		SecurityHeaders(),
 		CORS(cfg.AllowedOrigins),
+		authenticate,
 		MaxBodyBytes(cfg.MaxRequestBytes),
 		Timeout(requestTimeout),
 	)

@@ -60,6 +60,17 @@ export interface SystemInfo {
   api_version: string;
 }
 
+/**
+ * The authenticated caller. Returned by POST /api/v1/auth/login and
+ * GET /api/v1/auth/me. Deliberately minimal: it carries only what the
+ * authorization layer and the UI need, never a password hash — see
+ * internal/core/user.Principal, which this mirrors.
+ */
+export interface CurrentUser {
+  user_id: string;
+  username: string;
+}
+
 /** GET /api/v1/system/health */
 export interface SystemHealth {
   status: HealthStatus;

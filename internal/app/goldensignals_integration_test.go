@@ -58,7 +58,8 @@ func TestGoldenSignalsHonestlyReportsLatencyUnavailableAndMeasuresTheRest(t *tes
 	sample("system.network.rx.errors", 2, `{"interface":"eth0"}`)
 	sample("system.network.tx.dropped", 1, `{"interface":"eth0"}`)
 
-	resp, err := http.Get(base + "/api/v1/signals?node=" + nodeID)
+	client := authenticatedTestClient(t, base, "viewer")
+	resp, err := client.Get(base + "/api/v1/signals?node=" + nodeID)
 	if err != nil {
 		t.Fatalf("GET signals: %v", err)
 	}
@@ -119,6 +120,9 @@ func TestSLOLifecycleAndStatusAgainstRealHistory(t *testing.T) {
 	}
 
 	base := bootServer(t)
+	// Creating an SLO is a fleet.write action now — see
+	// docs/adr/0013-human-user-authentication-and-authorization.md.
+	client := authenticatedTestClient(t, base, "operator")
 
 	seedPool, err := pgxpool.New(context.Background(), dsn)
 	if err != nil {
@@ -157,7 +161,7 @@ func TestSLOLifecycleAndStatusAgainstRealHistory(t *testing.T) {
 		"metric": "system.cpu.usage", "comparison": "lt", "threshold": 80,
 		"target_percentage": 80, "window_seconds": 3600,
 	})
-	createResp, err := http.Post(base+"/api/v1/slo", "application/json", bytes.NewReader(body))
+	createResp, err := client.Post(base+"/api/v1/slo", "application/json", bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("POST slo: %v", err)
 	}
@@ -176,7 +180,8 @@ func TestSLOLifecycleAndStatusAgainstRealHistory(t *testing.T) {
 		t.Fatal("created SLO has no id")
 	}
 
-	// List includes it.
+	// List includes it. Reads on /slo are still open — not in scope for
+	// this pass, see docs/adr/0013-human-user-authentication-and-authorization.md.
 	listResp, err := http.Get(base + "/api/v1/slo")
 	if err != nil {
 		t.Fatalf("GET slo list: %v", err)
@@ -233,9 +238,9 @@ func TestSLOLifecycleAndStatusAgainstRealHistory(t *testing.T) {
 		t.Errorf("status = %q, want healthy", eval.Status)
 	}
 
-	// Delete removes it.
+	// Delete removes it — also fleet.write.
 	delReq, _ := http.NewRequest(http.MethodDelete, base+"/api/v1/slo/"+created.ID, nil)
-	delResp, err := http.DefaultClient.Do(delReq)
+	delResp, err := client.Do(delReq)
 	if err != nil {
 		t.Fatalf("DELETE slo: %v", err)
 	}
@@ -261,13 +266,14 @@ func TestSLOStatusUnavailableWithNoSamplesInWindow(t *testing.T) {
 	}
 
 	base := bootServer(t)
+	client := authenticatedTestClient(t, base, "operator")
 	nodeID := fmt.Sprintf("slotest-empty-node-%d", time.Now().UnixNano())
 
 	body, _ := json.Marshal(map[string]any{
 		"name": "no-data", "node_id": nodeID, "metric": "system.cpu.usage",
 		"comparison": "lt", "threshold": 80, "target_percentage": 99, "window_seconds": 3600,
 	})
-	createResp, err := http.Post(base+"/api/v1/slo", "application/json", bytes.NewReader(body))
+	createResp, err := client.Post(base+"/api/v1/slo", "application/json", bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("POST slo: %v", err)
 	}

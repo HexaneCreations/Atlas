@@ -1,4 +1,4 @@
-import type { ApiErrorBody, ApiErrorResponse, ErrorCode } from "./types";
+import type { ApiErrorBody, ApiErrorResponse, CurrentUser, ErrorCode } from "./types";
 
 /**
  * The single HTTP client for the Atlas API.
@@ -8,6 +8,12 @@ import type { ApiErrorBody, ApiErrorResponse, ErrorCode } from "./types";
  * router-level 404s and 405s — the client can turn any failed response into
  * the same [ApiError], and a caller never has to distinguish "the endpoint
  * failed" from "the request never reached an endpoint".
+ *
+ * apiGet remains the only verb for monitored-infrastructure data — Atlas is
+ * read-only toward what it observes, and this client makes that guarantee
+ * visible by offering no write verb for it. The three /auth endpoints below
+ * are the one exception, and a deliberate one: they write to Atlas's own
+ * control-plane session state, never to a monitored host.
  */
 
 /** Base path for version 1. Requests are same-origin; see vite.config.ts. */
@@ -134,6 +140,44 @@ function isApiErrorResponse(value: unknown): value is ApiErrorResponse {
     "message" in error &&
     typeof error.message === "string"
   );
+}
+
+/**
+ * Logs in with a username and password, and returns the authenticated
+ * principal on success. The server sets the session cookie on the response;
+ * this function never sees or handles the cookie itself, since it is
+ * HttpOnly by design.
+ */
+export async function login(username: string, password: string): Promise<CurrentUser> {
+  const response = await fetch(`${API_BASE}/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    credentials: "same-origin",
+    body: JSON.stringify({ username, password }),
+  });
+  if (!response.ok) {
+    throw await toApiError(response);
+  }
+  return (await response.json()) as CurrentUser;
+}
+
+/**
+ * Logs out. Succeeds even with no active session — the caller's intent
+ * ("I am logged out") holds either way, mirroring the server's own
+ * idempotent revoke.
+ */
+export async function logout(): Promise<void> {
+  await fetch(`${API_BASE}/auth/logout`, { method: "POST", credentials: "same-origin" });
+}
+
+/**
+ * Fetches the authenticated caller, or throws an [ApiError] with code
+ * "unauthenticated" if there is none. This is how the app learns its own
+ * login state on load: the session cookie is HttpOnly, so the frontend
+ * cannot read it directly and must ask the server.
+ */
+export async function fetchCurrentUser(signal?: AbortSignal): Promise<CurrentUser> {
+  return apiGet<CurrentUser>("/auth/me", signal ? { signal } : {});
 }
 
 /**

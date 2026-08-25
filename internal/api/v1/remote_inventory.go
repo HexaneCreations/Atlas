@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/hexane/atlas/internal/core/inventory"
+	"github.com/hexane/atlas/internal/core/user"
 	"github.com/hexane/atlas/internal/platform/errs"
 )
 
@@ -19,6 +20,12 @@ import (
 // was already threaded through the API in Phase 0. `local` is the existing
 // per-subject method on [CollectionSource]; this function decides whether to
 // call it at all.
+//
+// It is also the single point that authorizes every inventory.go handler
+// (ListProcesses, ListServices, ListCronJobs, ListPorts, ListMounts): all
+// five call through here, so gating node.read once here covers all five
+// rather than five separate checks — the same reasoning that put the scope
+// seam itself in one place.
 func resolveInventory[T any](
 	h *Handler, r *http.Request, pluginID string, subject inventory.Subject,
 	local func(ctx context.Context, scope inventory.Scope) (T, error),
@@ -30,7 +37,10 @@ func resolveInventory[T any](
 		return zero, inventory.Meta{}, errs.New(errs.CodeUnavailable, "collection is not configured").WithOp(op)
 	}
 
-	scope := h.scopeFrom(r)
+	scope, err := h.requireScope(r, user.PermissionNodeRead)
+	if err != nil {
+		return zero, inventory.Meta{}, err
+	}
 	if scope.IsLocal(h.deps.Collection.Identity().NodeID) {
 		if err := h.requirePlugin(pluginID); err != nil {
 			return zero, inventory.Meta{}, err

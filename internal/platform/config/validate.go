@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"slices"
 	"strings"
@@ -91,6 +92,20 @@ func (s Server) validate(v *violations, prod bool) {
 	if s.Host == "" {
 		v.addf("server.host", "must not be empty")
 	}
+
+	// The session cookie's Secure attribute is only set when
+	// Environment.IsProduction() (see internal/api/router.go), because a
+	// loopback-only bind is the one case a plain-HTTP cookie is safe: the
+	// traffic never leaves the machine. Binding non-loopback while still in
+	// development or staging would ship that same non-Secure cookie onto a
+	// network someone else can be on — the same class of mistake
+	// "wildcard cors in production" below guards against, just the opposite
+	// combination of settings. atlas.cyreneai.com being reachable and
+	// unauthenticated is exactly what this is meant to make unrepeatable.
+	if !prod && s.Host != "" && !isLoopbackHost(s.Host) {
+		v.addf("server.host",
+			"%q is not loopback while environment is not production; the session cookie's Secure attribute is only set in production, so this would serve it in plaintext over a reachable network — bind to 127.0.0.1/localhost, or set environment: production", s.Host)
+	}
 	// Port 0 is meaningful, not missing: it asks the kernel for an ephemeral
 	// port. Tests and sidecar deployments rely on it, and httpx.Server.Addr
 	// reports whatever was actually bound.
@@ -140,6 +155,19 @@ func (s Server) validate(v *violations, prod bool) {
 			v.addf("server.allowed_origins", "%q uses plaintext http in production", origin)
 		}
 	}
+}
+
+// isLoopbackHost reports whether host only ever resolves inside this
+// machine. "localhost" is accepted by name rather than resolved, the same
+// way [Server.validate]'s origin check treats it as a known-safe literal —
+// resolving it would need a lookup this validation pass has no business
+// performing.
+func isLoopbackHost(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func (d Database) validate(v *violations, prod bool) {

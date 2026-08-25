@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"net"
 	"net/http"
+	neturl "net/url"
 	"os"
 	"strings"
 	"testing"
@@ -394,6 +395,15 @@ func TestRemoteContainerLogsOverAgentOps(t *testing.T) {
 		t.Fatalf("create token: %v", err)
 	}
 
+	// This test exercises the human-facing container/logs endpoints
+	// (GET /containers, GET .../logs, the WebSocket follow), which now sit
+	// behind human-user authentication and authorization — see
+	// docs/adr/0011-deferred-rbac.md. It has nothing to do with the Agent's
+	// own libp2p identity above; a human operator authenticates separately
+	// to view what an already-authenticated Agent reported.
+	base := "http://" + waitForBoundAddress(t, instance)
+	client := authenticatedTestClient(t, base, "operator")
+
 	agentCfg := agent.Config{
 		ControlPlaneURL:    "https://localhost",
 		Token:              tok.Plaintext,
@@ -424,8 +434,6 @@ func TestRemoteContainerLogsOverAgentOps(t *testing.T) {
 		}
 	})
 
-	base := "http://" + waitForBoundAddress(t, instance)
-
 	// Wait for the agent's real container inventory to arrive — whatever is
 	// actually running on this machine's Docker daemon. If nothing is
 	// running (or Docker is absent here), that is an environment fact this
@@ -434,7 +442,8 @@ func TestRemoteContainerLogsOverAgentOps(t *testing.T) {
 	var containerID string
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
-		resp, err := http.Get(base + "/api/v1/containers?node=" + nodeID)
+		req, _ := http.NewRequest(http.MethodGet, base+"/api/v1/containers?node="+nodeID, nil)
+		resp, err := client.Do(req)
 		if err == nil {
 			var payload struct {
 				Containers []struct {
@@ -456,7 +465,8 @@ func TestRemoteContainerLogsOverAgentOps(t *testing.T) {
 
 	// Non-follow: the real request/response path, Browser/API -> Server ->
 	// AgentOps -> Agent -> real docker.Client.Logs -> back.
-	resp, err := http.Get(base + "/api/v1/containers/" + containerID + "/logs?node=" + nodeID + "&tail=5")
+	logsReq, _ := http.NewRequest(http.MethodGet, base+"/api/v1/containers/"+containerID+"/logs?node="+nodeID+"&tail=5", nil)
+	resp, err := client.Do(logsReq)
 	if err != nil {
 		t.Fatalf("GET logs: %v", err)
 	}
@@ -478,10 +488,21 @@ func TestRemoteContainerLogsOverAgentOps(t *testing.T) {
 	// Follow: a real WebSocket upgrade over the same remote path, proving
 	// the live-follow leg (not just the tail request above) reaches the
 	// Agent's real Docker connection and a clean session teardown works.
+	//
+	// The browser has no Authorization header available to a WebSocket
+	// handshake — this is exactly why docs/adr/0011-deferred-rbac.md
+	// requires cookie-based auth here — so the session cookie is attached
+	// explicitly from the same jar the two requests above already used.
 	wsURL := "ws" + strings.TrimPrefix(base, "http") + "/api/v1/containers/" + containerID + "/logs/follow?node=" + nodeID + "&tail=1"
 	wsCtx, wsCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer wsCancel()
-	conn, wsResp, err := websocket.Dial(wsCtx, wsURL, nil)
+	wsHeader := http.Header{}
+	if u, err := neturl.Parse(base); err == nil {
+		for _, c := range client.Jar.Cookies(u) {
+			wsHeader.Add("Cookie", c.String())
+		}
+	}
+	conn, wsResp, err := websocket.Dial(wsCtx, wsURL, &websocket.DialOptions{HTTPHeader: wsHeader})
 	if err != nil {
 		t.Fatalf("follow dial: %v (status %v)", err, wsResp)
 	}

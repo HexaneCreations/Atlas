@@ -10,18 +10,23 @@
 package app_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/cookiejar"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/hexane/atlas/internal/app"
+	coreuser "github.com/hexane/atlas/internal/core/user"
 	"github.com/hexane/atlas/internal/platform/config"
+	"github.com/hexane/atlas/internal/platform/id"
 	"github.com/hexane/atlas/internal/platform/log"
+	storageuser "github.com/hexane/atlas/internal/storage/user"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -112,6 +117,78 @@ func waitUntilReady(t *testing.T, base string) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	t.Fatal("Atlas never became ready")
+}
+
+// authenticatedTestClient creates a human user with a fleet-wide grant of
+// role, logs in over the real HTTP auth endpoints, and returns an
+// *http.Client whose cookie jar carries the resulting session — the same
+// path a browser follows, exercised for real rather than by injecting a
+// principal directly.
+//
+// Node-scoped endpoints (health/score, cost/estimate, capacity/summary,
+// signals, containers, and the rest reachable through
+// [Handler.requireScope]) now require this; every test in this package that
+// calls one directly needs a client from here instead of the bare
+// http.Get/http.DefaultClient the pre-authentication tests used. See
+// docs/adr/0011-deferred-rbac.md and internal/core/user — this is a
+// completely separate identity domain from an Agent's own libp2p Peer ID.
+func authenticatedTestClient(t *testing.T, base, role string) *http.Client {
+	t.Helper()
+
+	dsn := os.Getenv(testDatabaseURLEnv)
+	if dsn == "" {
+		t.Skipf("%s is not set; run `make db-up` first", testDatabaseURLEnv)
+	}
+	pool, err := pgxpool.New(context.Background(), dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer pool.Close()
+
+	// Unique per call: bootServer reuses one persistent database across
+	// tests and reruns (unlike the storage-layer integration tests, which
+	// each create a fresh one), so a fixed username collides with the
+	// unique index on username the moment this runs twice.
+	username := "it-operator-" + strings.ToLower(role) + "-" + id.New()
+	const password = "integration-test-password"
+
+	hash, err := coreuser.HashPassword(password)
+	if err != nil {
+		t.Fatalf("HashPassword: %v", err)
+	}
+	repo := storageuser.NewRepository(pool)
+	if err := repo.CreateUser(context.Background(), coreuser.User{Username: username, PasswordHash: hash}); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	u, err := repo.ByUsername(context.Background(), username)
+	if err != nil {
+		t.Fatalf("ByUsername: %v", err)
+	}
+	grant := coreuser.GrantSpec{UserID: u.ID, FleetWide: true, Role: role, GrantedBy: "integration-test"}
+	if err := repo.Grant(context.Background(), grant, time.Now()); err != nil {
+		t.Fatalf("Grant: %v", err)
+	}
+
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatalf("cookiejar.New: %v", err)
+	}
+	client := &http.Client{Jar: jar}
+
+	body, err := json.Marshal(map[string]string{"username": username, "password": password})
+	if err != nil {
+		t.Fatalf("marshal login body: %v", err)
+	}
+	resp, err := client.Post(base+"/api/v1/auth/login", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("login status = %d, want 200", resp.StatusCode)
+	}
+
+	return client
 }
 
 func getJSON(t *testing.T, url string) (int, map[string]any) {

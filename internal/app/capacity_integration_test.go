@@ -76,7 +76,8 @@ func TestCapacitySummaryReflectsEverySeededSignal(t *testing.T) {
 	nodeID := fmt.Sprintf("capacitytest-node-%d", time.Now().UnixNano())
 	seedCapacityFixture(t, seedPool, nodeID)
 
-	resp, err := http.Get(base + "/api/v1/capacity/summary?node=" + nodeID)
+	client := authenticatedTestClient(t, base, "viewer")
+	resp, err := client.Get(base + "/api/v1/capacity/summary?node=" + nodeID)
 	if err != nil {
 		t.Fatalf("GET capacity/summary: %v", err)
 	}
