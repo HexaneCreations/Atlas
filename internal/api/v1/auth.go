@@ -43,6 +43,10 @@ type SessionStore interface {
 // a handler has resolved which node a request names.
 type Authorizer interface {
 	Require(ctx context.Context, principal user.Principal, permission user.Permission, nodeID string) error
+	// AuthorizedNodes reports which nodes principal may see for permission —
+	// see [Handler.ListNodes], which filters a result set rather than
+	// gating one pass/fail check.
+	AuthorizedNodes(ctx context.Context, principal user.Principal, permission user.Permission) (fleetWide bool, nodeIDs map[string]bool, err error)
 }
 
 // LoginLimiter bounds POST /auth/login attempts. Satisfied by

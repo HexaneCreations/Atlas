@@ -166,6 +166,12 @@ func TestGrantSpecValidateRejectsUnknownRole(t *testing.T) {
 type stubAuthzStore struct {
 	granted bool
 	err     error
+
+	// For GrantedNodeIDs — independent of granted/err above, which only
+	// drive HasPermission.
+	fleetWide      bool
+	grantedNodeIDs []string
+	grantedNodeErr error
 }
 
 func (s stubAuthzStore) HasPermission(context.Context, string, string, user.Permission) (bool, error) {
@@ -176,6 +182,9 @@ func (s stubAuthzStore) RevokeGrant(context.Context, string, string, time.Time) 
 	return nil
 }
 func (s stubAuthzStore) ListGrants(context.Context, string) ([]user.NodeRole, error) { return nil, nil }
+func (s stubAuthzStore) GrantedNodeIDs(context.Context, string, user.Permission) (bool, []string, error) {
+	return s.fleetWide, s.grantedNodeIDs, s.grantedNodeErr
+}
 
 var _ user.AuthzStore = stubAuthzStore{}
 
@@ -219,5 +228,74 @@ func TestAuthorizerRequirePropagatesStoreFailureRatherThanTreatingItAsDenial(t *
 	}
 	if errs.Is(err, storeErr) == false && errs.CodeOf(err) != errs.CodeUnavailable {
 		t.Errorf("code = %v, want unavailable — a database failure must not present as a false permission denial", errs.CodeOf(err))
+	}
+}
+
+// --- AuthorizedNodes ---------------------------------------------------
+
+func TestAuthorizedNodesReturnsFleetWideWithNoNodeIDsWhenTheStoreReportsFleetWide(t *testing.T) {
+	t.Parallel()
+
+	az := user.NewAuthorizer(stubAuthzStore{fleetWide: true, grantedNodeIDs: []string{"should-be-ignored"}})
+	fleetWide, nodeIDs, err := az.AuthorizedNodes(context.Background(), user.Principal{UserID: "u1"}, user.PermissionNodeRead)
+	if err != nil {
+		t.Fatalf("AuthorizedNodes: %v", err)
+	}
+	if !fleetWide {
+		t.Error("fleetWide = false, want true")
+	}
+	if nodeIDs != nil {
+		t.Errorf("nodeIDs = %v, want nil — a fleet-wide grant has nothing left to enumerate", nodeIDs)
+	}
+}
+
+func TestAuthorizedNodesReturnsExactlyTheGrantedSetForANodeScopedPrincipal(t *testing.T) {
+	t.Parallel()
+
+	az := user.NewAuthorizer(stubAuthzStore{grantedNodeIDs: []string{"node-1", "node-2"}})
+	fleetWide, nodeIDs, err := az.AuthorizedNodes(context.Background(), user.Principal{UserID: "u1"}, user.PermissionNodeRead)
+	if err != nil {
+		t.Fatalf("AuthorizedNodes: %v", err)
+	}
+	if fleetWide {
+		t.Error("fleetWide = true, want false")
+	}
+	if !nodeIDs["node-1"] || !nodeIDs["node-2"] || len(nodeIDs) != 2 {
+		t.Errorf("nodeIDs = %v, want exactly {node-1, node-2}", nodeIDs)
+	}
+	if nodeIDs["node-3"] {
+		t.Error("nodeIDs contains a node never granted")
+	}
+}
+
+// The central case this exists for: a principal with no grant at all sees
+// an empty set, not an error and not every node.
+func TestAuthorizedNodesReturnsAnEmptySetForAPrincipalWithNoGrant(t *testing.T) {
+	t.Parallel()
+
+	az := user.NewAuthorizer(stubAuthzStore{grantedNodeIDs: nil})
+	fleetWide, nodeIDs, err := az.AuthorizedNodes(context.Background(), user.Principal{UserID: "u1"}, user.PermissionNodeRead)
+	if err != nil {
+		t.Fatalf("AuthorizedNodes: %v", err)
+	}
+	if fleetWide {
+		t.Error("fleetWide = true for a principal with no grant")
+	}
+	if len(nodeIDs) != 0 {
+		t.Errorf("nodeIDs = %v, want empty", nodeIDs)
+	}
+}
+
+func TestAuthorizedNodesPropagatesStoreFailure(t *testing.T) {
+	t.Parallel()
+
+	storeErr := errs.New(errs.CodeUnavailable, "database is down")
+	az := user.NewAuthorizer(stubAuthzStore{fleetWide: true, grantedNodeErr: storeErr})
+	_, _, err := az.AuthorizedNodes(context.Background(), user.Principal{UserID: "u1"}, user.PermissionNodeRead)
+	if err == nil {
+		t.Fatal("AuthorizedNodes returned nil for a failing store")
+	}
+	if errs.CodeOf(err) != errs.CodeUnavailable {
+		t.Errorf("code = %v, want unavailable", errs.CodeOf(err))
 	}
 }

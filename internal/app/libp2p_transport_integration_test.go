@@ -273,10 +273,14 @@ func runAgentAndAssertObserved(t *testing.T, instance *app.App, peerAddr, nodeID
 	})
 
 	base := "http://" + waitForBoundAddress(t, instance)
+	// GetNode is gated by node.read same as every other node-scoped
+	// endpoint; a fleet-wide viewer can poll any node id, including one
+	// created for this one test run.
+	client := authenticatedTestClient(t, base, "viewer")
 	deadline := time.Now().Add(30 * time.Second)
 	var found bool
 	for time.Now().Before(deadline) {
-		resp, err := http.Get(base + "/api/v1/nodes/" + agentCfg.NodeID)
+		resp, err := client.Get(base + "/api/v1/nodes/" + agentCfg.NodeID)
 		if err == nil {
 			resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
@@ -332,10 +336,11 @@ func runDiscoveryAgentAndAssertObserved(t *testing.T, instance *app.App, relayAd
 	})
 
 	base := "http://" + waitForBoundAddress(t, instance)
+	client := authenticatedTestClient(t, base, "viewer")
 	deadline := time.Now().Add(30 * time.Second)
 	var found bool
 	for time.Now().Before(deadline) {
-		resp, err := http.Get(base + "/api/v1/nodes/" + agentCfg.NodeID)
+		resp, err := client.Get(base + "/api/v1/nodes/" + agentCfg.NodeID)
 		if err == nil {
 			resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {

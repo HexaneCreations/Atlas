@@ -688,6 +688,41 @@ func (r *Repository) ListGrants(ctx context.Context, userID string) ([]coreuser.
 	return out, nil
 }
 
+// GrantedNodeIDs implements [coreuser.AuthzStore].
+func (r *Repository) GrantedNodeIDs(ctx context.Context, userID string, permission coreuser.Permission) (bool, []string, error) {
+	const op = "user.Repository.GrantedNodeIDs"
+
+	const q = `
+		SELECT unr.node_id
+		FROM user_node_roles unr
+		JOIN role_permissions rp ON rp.role_name = unr.role_name
+		WHERE unr.user_id = $1 AND unr.revoked_at IS NULL AND rp.permission_key = $2`
+
+	rows, err := r.pool.Query(ctx, q, userID, string(permission))
+	if err != nil {
+		return false, nil, errs.Wrap(err, errs.CodeUnavailable, "could not list granted nodes").WithOp(op)
+	}
+	defer rows.Close()
+
+	var nodeIDs []string
+	for rows.Next() {
+		var nodeID *string
+		if err := rows.Scan(&nodeID); err != nil {
+			return false, nil, errs.Wrap(err, errs.CodeUnavailable, "could not read a granted node").WithOp(op)
+		}
+		if nodeID == nil {
+			// A fleet-wide grant applies to every node; nothing else in the
+			// result set can narrow that, so there is nothing left to read.
+			return true, nil, nil
+		}
+		nodeIDs = append(nodeIDs, *nodeID)
+	}
+	if err := rows.Err(); err != nil {
+		return false, nil, errs.Wrap(err, errs.CodeUnavailable, "could not list granted nodes").WithOp(op)
+	}
+	return false, nodeIDs, nil
+}
+
 // isUniqueViolation reports whether err is a Postgres unique_violation
 // (SQLSTATE 23505).
 func isUniqueViolation(err error) bool {

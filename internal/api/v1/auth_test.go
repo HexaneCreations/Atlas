@@ -122,6 +122,11 @@ type fakeAuthorizer struct {
 	failWith      error
 	gotPermission user.Permission
 	gotNodeID     string
+
+	// For AuthorizedNodes — independent of allow/failWith above, which only
+	// drive Require's single pass/fail check.
+	fleetWide      bool
+	allowedNodeIDs map[string]bool
 }
 
 func (f *fakeAuthorizer) Require(_ context.Context, _ user.Principal, permission user.Permission, nodeID string) error {
@@ -135,6 +140,16 @@ func (f *fakeAuthorizer) Require(_ context.Context, _ user.Principal, permission
 		return nil
 	}
 	return user.ErrPermissionDenied
+}
+
+func (f *fakeAuthorizer) AuthorizedNodes(_ context.Context, _ user.Principal, permission user.Permission) (bool, map[string]bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.gotPermission = permission
+	if f.failWith != nil {
+		return false, nil, f.failWith
+	}
+	return f.fleetWide, f.allowedNodeIDs, nil
 }
 
 // authTestServer wires a real user + session + authz stack into the router,

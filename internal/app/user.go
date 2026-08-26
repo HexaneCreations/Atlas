@@ -70,3 +70,7 @@ type lazyAuthorizer struct{ pool *postgres.Pool }
 func (l lazyAuthorizer) Require(ctx context.Context, principal coreuser.Principal, permission coreuser.Permission, nodeID string) error {
 	return coreuser.NewAuthorizer(storageuser.NewRepository(l.pool.DB())).Require(ctx, principal, permission, nodeID)
 }
+
+func (l lazyAuthorizer) AuthorizedNodes(ctx context.Context, principal coreuser.Principal, permission coreuser.Permission) (bool, map[string]bool, error) {
+	return coreuser.NewAuthorizer(storageuser.NewRepository(l.pool.DB())).AuthorizedNodes(ctx, principal, permission)
+}

@@ -4,6 +4,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/hexane/atlas/internal/api/session"
+	"github.com/hexane/atlas/internal/core/user"
 	"github.com/hexane/atlas/internal/platform/errs"
 	"github.com/hexane/atlas/internal/platform/httpx"
 	"github.com/hexane/atlas/internal/storage/metric"
@@ -45,8 +47,17 @@ type ListNodesResponse struct {
 	Total int            `json:"total"`
 }
 
-// ListNodes returns every machine Atlas has observed.
+// ListNodes returns every machine the caller is authorized to see: every
+// machine Atlas has observed, filtered to the caller's own user_node_roles
+// grants for node.read — a node-scoped viewer sees only the node(s) they
+// were granted, a fleet-wide grant sees everything, and a caller with no
+// grant at all sees an empty list rather than every node or a 403. Compare
+// [Handler.requireScope], which gates a single node-scoped request
+// pass/fail; this instead filters a result set, since "which nodes can you
+// see" has no one node to gate against.
 func (h *Handler) ListNodes(w http.ResponseWriter, r *http.Request) error {
+	const op = "v1.Handler.ListNodes"
+
 	repo, err := h.repository()
 	if err != nil {
 		return err
@@ -55,6 +66,26 @@ func (h *Handler) ListNodes(w http.ResponseWriter, r *http.Request) error {
 	nodes, err := repo.ListNodes(r.Context())
 	if err != nil {
 		return err
+	}
+
+	if h.deps.Authz != nil {
+		principal, ok := session.PrincipalFrom(r.Context())
+		if !ok {
+			return errs.New(errs.CodeUnauthenticated, "authentication required").WithOp(op)
+		}
+		fleetWide, allowed, err := h.deps.Authz.AuthorizedNodes(r.Context(), principal, user.PermissionNodeRead)
+		if err != nil {
+			return err
+		}
+		if !fleetWide {
+			filtered := make([]metric.Node, 0, len(nodes))
+			for _, n := range nodes {
+				if allowed[n.NodeID] {
+					filtered = append(filtered, n)
+				}
+			}
+			nodes = filtered
+		}
 	}
 
 	now := time.Now()
@@ -67,8 +98,13 @@ func (h *Handler) ListNodes(w http.ResponseWriter, r *http.Request) error {
 	return nil
 }
 
-// GetNode returns one machine.
+// GetNode returns one machine, gated by node.read for that specific node —
+// unlike [Handler.ListNodes]'s filtered-list shape, a direct lookup by id
+// has exactly one node to gate against, so this uses [Authorizer.Require]
+// the same way every other node-scoped endpoint does.
 func (h *Handler) GetNode(w http.ResponseWriter, r *http.Request) error {
+	const op = "v1.Handler.GetNode"
+
 	repo, err := h.repository()
 	if err != nil {
 		return err
@@ -77,7 +113,17 @@ func (h *Handler) GetNode(w http.ResponseWriter, r *http.Request) error {
 	nodeID := r.PathValue("nodeID")
 	if nodeID == "" {
 		return errs.New(errs.CodeInvalidArgument, "a node id is required").
-			WithOp("v1.Handler.GetNode").WithDetail("field", "nodeID")
+			WithOp(op).WithDetail("field", "nodeID")
+	}
+
+	if h.deps.Authz != nil {
+		principal, ok := session.PrincipalFrom(r.Context())
+		if !ok {
+			return errs.New(errs.CodeUnauthenticated, "authentication required").WithOp(op)
+		}
+		if err := h.deps.Authz.Require(r.Context(), principal, user.PermissionNodeRead, nodeID); err != nil {
+			return err
+		}
 	}
 
 	node, err := repo.GetNode(r.Context(), nodeID)

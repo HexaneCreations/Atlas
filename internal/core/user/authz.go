@@ -123,6 +123,12 @@ type AuthzStore interface {
 	RevokeGrant(ctx context.Context, grantID, revokedBy string, now time.Time) error
 	// ListGrants returns every grant for a user, for operator tooling.
 	ListGrants(ctx context.Context, userID string) ([]NodeRole, error)
+	// GrantedNodeIDs reports which nodes userID holds permission for: true
+	// and a nil slice when any active grant is fleet-wide (node_id IS NULL),
+	// since that applies to every node and no enumeration is meaningful;
+	// otherwise false and the specific node ids granted, which may be empty
+	// for a user with no active grant for this permission at all.
+	GrantedNodeIDs(ctx context.Context, userID string, permission Permission) (fleetWide bool, nodeIDs []string, err error)
 }
 
 // ErrPermissionDenied is returned by [Authorizer.Require] when the principal
@@ -173,4 +179,26 @@ func (a Authorizer) Require(ctx context.Context, principal Principal, permission
 		return ErrPermissionDenied
 	}
 	return nil
+}
+
+// AuthorizedNodes reports which nodes principal may see for permission, for
+// an endpoint that must filter a result set rather than gate one pass/fail
+// check — see [Handler.ListNodes] in internal/api/v1. fleetWide true means
+// every node; otherwise nodeIDs names exactly the ones principal holds a
+// grant for, and may be empty for a principal with no grant at all — an
+// empty result, not [ErrPermissionDenied], since a filtered list is the
+// correct answer to "which nodes can this caller see", not a rejection.
+func (a Authorizer) AuthorizedNodes(ctx context.Context, principal Principal, permission Permission) (fleetWide bool, nodeIDs map[string]bool, err error) {
+	fw, ids, err := a.store.GrantedNodeIDs(ctx, principal.UserID, permission)
+	if err != nil {
+		return false, nil, err
+	}
+	if fw {
+		return true, nil, nil
+	}
+	set := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		set[id] = true
+	}
+	return false, set, nil
 }

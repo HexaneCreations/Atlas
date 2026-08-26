@@ -178,25 +178,42 @@ export function useMetricSeries(nodeID: string | undefined, metrics: string[], r
  * Every inventory page describes this host, so resolving the node once here
  * keeps each of them from re-deriving it from the node list.
  */
+/**
+ * Picks the default node id from `visibleNodes` — a pure function so the
+ * decision is testable without a query client or a rendered hook.
+ *
+ * Regression this guards: GET /nodes now returns only the nodes the caller
+ * is authorized for (see internal/api/v1.Handler.ListNodes), but the
+ * default here used to be `collectorNodeID` unconditionally — the node the
+ * control-plane process itself runs on. A node-scoped viewer with no grant
+ * for that host defaulted onto it anyway, and every subsequent per-node
+ * request (Containers, Processes, …) then 403'd against a node the operator
+ * never selected and could not see in their own node list.
+ */
+export function selectPrimaryNodeID(
+  visibleNodes: { node_id: string }[],
+  collectorNodeID: string | undefined,
+  explicitlySelected: string | null,
+): string | undefined {
+  if (explicitlySelected) return explicitlySelected;
+
+  // The collectors endpoint reports the node this Atlas instance is actually
+  // collecting for — stable across the reporting-order churn `nodes[0]`
+  // suffers the instant a second node reports (the API orders by
+  // `last_seen_at DESC`; two live nodes swap places every few seconds,
+  // re-keying every metric query on the page). Preferred only when it is
+  // actually one of the nodes the caller can see, per the regression above.
+  if (collectorNodeID && visibleNodes.some((n) => n.node_id === collectorNodeID)) {
+    return collectorNodeID;
+  }
+  return visibleNodes[0]?.node_id;
+}
+
 export function usePrimaryNodeID(): string | undefined {
   const selected = useSelectedNodeID();
   const collectors = useCollectors();
   const nodes = useNodes();
-
-  if (selected) return selected;
-
-  // The collectors endpoint reports the node this Atlas instance is actually
-  // collecting for. That is the stable answer.
-  //
-  // This used to be `nodes[0]`, which the API orders by `last_seen_at DESC` —
-  // fine with a single node, and wrong the instant a second one reports. Two
-  // live nodes swap places every few seconds, which re-keys every metric query
-  // on the page and makes the data blank and return roughly twice a second.
-  // Observed exactly that with a second Atlas writing to the same database.
-  //
-  // The node list is only a fallback, for the window before /collectors
-  // answers.
-  return collectors.data?.node_id ?? nodes.data?.nodes[0]?.node_id;
+  return selectPrimaryNodeID(nodes.data?.nodes ?? [], collectors.data?.node_id, selected);
 }
 
 /**
