@@ -1,4 +1,5 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   Ban,
   Check,
@@ -63,8 +64,16 @@ function isFleetWideAdmin(g: Grant): boolean {
   return g.role === "admin" && g.fleet_wide;
 }
 
-function scopeLabel(g: Grant): string {
-  return g.fleet_wide ? "fleet-wide" : (g.node_id ?? "unknown node");
+/**
+ * The display scope for a grant — "fleet-wide", or the node's human-readable
+ * hostname (the same one Nodes/NodeSwitcher show), never the raw node id.
+ * Falls back to the id only when the node isn't in `nodeNames` — e.g. it no
+ * longer exists — rather than showing nothing or erroring.
+ */
+function scopeLabel(g: Grant, nodeNames: Map<string, string>): string {
+  if (g.fleet_wide) return "fleet-wide";
+  if (!g.node_id) return "unknown node";
+  return nodeNames.get(g.node_id) ?? g.node_id;
 }
 
 /**
@@ -99,6 +108,18 @@ export function UsersPage() {
     if (!q) return all;
     return all.filter((u) => u.username.toLowerCase().includes(q));
   }, [all, search]);
+
+  // Grants only carry a node_id; every other page identifies a node by its
+  // hostname (see NodesPage, NodeSwitcher), so this page reuses the same
+  // /nodes data rather than showing the raw id or building a second lookup.
+  // Shares its cache with GrantRoleModal's own useNodes() call below — one
+  // request either way.
+  const nodesQuery = useNodes();
+  const nodeNames = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const n of nodesQuery.data?.nodes ?? []) map.set(n.node_id, n.hostname);
+    return map;
+  }, [nodesQuery.data]);
 
   // How many *other* enabled users hold a fleet-wide admin grant — the same
   // condition the backend's last-admin guard checks (see
@@ -187,6 +208,7 @@ export function UsersPage() {
                     key={u.id}
                     user={u}
                     isSelf={u.id === me.user_id}
+                    nodeNames={nodeNames}
                     isOnlyFleetAdmin={enabledFleetAdmins.has(u.id) && enabledFleetAdmins.size <= 1}
                     onGrant={() => { setModal({ kind: "grant", target: u }); }}
                     onRevokePick={() => { setModal({ kind: "revokePick", target: u }); }}
@@ -229,6 +251,7 @@ export function UsersPage() {
       {modal?.kind === "revokePick" ? (
         <RevokePickModal
           target={modal.target}
+          nodeNames={nodeNames}
           isBlocked={(g) => isFleetWideAdmin(g) && enabledFleetAdmins.size <= 1}
           onClose={() => { setModal(null); }}
           onPick={(grant) => { setModal({ kind: "revokeConfirm", target: modal.target, grant }); }}
@@ -238,6 +261,7 @@ export function UsersPage() {
         <RevokeConfirmModal
           target={modal.target}
           grant={modal.grant}
+          nodeNames={nodeNames}
           revokeRole={revokeRole}
           onClose={() => { setModal(null); }}
         />
@@ -302,6 +326,7 @@ function Th({ children, align = "left" }: { children: React.ReactNode; align?: "
 function UserRow({
   user: u,
   isSelf,
+  nodeNames,
   isOnlyFleetAdmin,
   onGrant,
   onRevokePick,
@@ -313,6 +338,7 @@ function UserRow({
 }: {
   user: UserAccount;
   isSelf: boolean;
+  nodeNames: Map<string, string>;
   isOnlyFleetAdmin: boolean;
   onGrant: () => void;
   onRevokePick: () => void;
@@ -379,7 +405,7 @@ function UserRow({
                 className="rounded bg-primary/10 px-1.5 py-0.5 text-[11px] font-medium text-primary"
                 title={`Granted ${formatTime(g.granted_at)}${g.granted_by ? ` by ${g.granted_by}` : ""}`}
               >
-                {g.role} · {scopeLabel(g)}
+                {g.role} · {scopeLabel(g, nodeNames)}
               </span>
             ))}
           </div>
@@ -405,24 +431,73 @@ interface RowMenuItem {
   disabledReason?: string | undefined;
 }
 
+/** Estimated menu geometry, for flipping above the trigger when there isn't
+ *  room below — computed before paint since the menu doesn't exist yet to
+ *  measure. w-56 below matches MENU_WIDTH_PX. */
+const MENU_WIDTH_PX = 224;
+const MENU_ITEM_HEIGHT_PX = 36;
+
+/**
+ * The row action menu. Rendered through a portal into document.body rather
+ * than positioned relative to its trigger in place: the table's own
+ * scroll-thin max-h-[34rem] overflow-auto container clips anything
+ * absolutely positioned inside it, which cut this menu off for any row near
+ * the container's bottom edge — worst for the last row, which has nowhere
+ * left to clip *into*. Positioning is computed in viewport (fixed)
+ * coordinates from the trigger's own bounding rect instead, which no
+ * ancestor's overflow can clip.
+ */
 function RowMenu({ items }: { items: RowMenuItem[] }) {
   const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
+  const [coords, setCoords] = useState<{ top: number; left: number } | null>(null);
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  function openMenu() {
+    const rect = buttonRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const menuHeight = items.length * MENU_ITEM_HEIGHT_PX + 8;
+    const opensUp = rect.bottom + menuHeight > window.innerHeight;
+    setCoords({
+      top: opensUp ? rect.top - menuHeight - 4 : rect.bottom + 4,
+      left: Math.max(8, rect.right - MENU_WIDTH_PX),
+    });
+    setOpen(true);
+  }
+
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (e: MouseEvent) => {
+      const target = e.target as Node;
+      if (buttonRef.current?.contains(target) || menuRef.current?.contains(target)) return;
+      setOpen(false);
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    // A scroll anywhere (the table's own overflow-auto included, via
+    // capture) or a resize would leave the portal's fixed coordinates
+    // stale relative to the trigger — closing is simpler and safer than
+    // tracking every scrollable ancestor to reposition live.
+    const onScrollOrResize = () => { setOpen(false); };
+    document.addEventListener("mousedown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    window.addEventListener("scroll", onScrollOrResize, true);
+    window.addEventListener("resize", onScrollOrResize);
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("scroll", onScrollOrResize, true);
+      window.removeEventListener("resize", onScrollOrResize);
+    };
+  }, [open]);
 
   return (
-    <div
-      ref={ref}
-      className="relative inline-block text-left"
-      onBlur={(e) => {
-        if (!ref.current?.contains(e.relatedTarget)) setOpen(false);
-      }}
-      onKeyDown={(e) => {
-        if (e.key === "Escape") setOpen(false);
-      }}
-    >
+    <>
       <button
+        ref={buttonRef}
         type="button"
-        onClick={() => { setOpen((o) => !o); }}
+        onClick={() => { if (open) setOpen(false); else openMenu(); }}
         aria-label="Actions"
         aria-haspopup="menu"
         aria-expanded={open}
@@ -430,27 +505,35 @@ function RowMenu({ items }: { items: RowMenuItem[] }) {
       >
         <MoreHorizontal size={16} />
       </button>
-      {open ? (
-        <div role="menu" className="absolute right-0 z-20 mt-1 w-56 rounded-lg border border-border bg-surface py-1 shadow-lg">
-          {items.map((it) => (
-            <button
-              key={it.label}
-              type="button"
-              role="menuitem"
-              disabled={it.disabled}
-              title={it.disabledReason}
-              onClick={() => { setOpen(false); it.onClick(); }}
-              className={`flex w-full items-center gap-2 px-3 py-2 text-left text-sm disabled:cursor-not-allowed disabled:opacity-40 ${
-                it.tone === "danger" ? "text-danger hover:bg-danger/10" : "text-text hover:bg-surface-hover"
-              }`}
+      {open && coords
+        ? createPortal(
+            <div
+              ref={menuRef}
+              role="menu"
+              style={{ position: "fixed", top: coords.top, left: coords.left, width: MENU_WIDTH_PX }}
+              className="z-50 rounded-lg border border-border bg-surface py-1 shadow-lg"
             >
-              <it.icon size={14} />
-              {it.label}
-            </button>
-          ))}
-        </div>
-      ) : null}
-    </div>
+              {items.map((it) => (
+                <button
+                  key={it.label}
+                  type="button"
+                  role="menuitem"
+                  disabled={it.disabled}
+                  title={it.disabledReason}
+                  onClick={() => { setOpen(false); it.onClick(); }}
+                  className={`flex w-full items-center gap-2 px-3 py-2 text-left text-sm disabled:cursor-not-allowed disabled:opacity-40 ${
+                    it.tone === "danger" ? "text-danger hover:bg-danger/10" : "text-text hover:bg-surface-hover"
+                  }`}
+                >
+                  <it.icon size={14} />
+                  {it.label}
+                </button>
+              ))}
+            </div>,
+            document.body,
+          )
+        : null}
+    </>
   );
 }
 
@@ -684,11 +767,13 @@ function GrantRoleModal({
 
 function RevokePickModal({
   target,
+  nodeNames,
   isBlocked,
   onClose,
   onPick,
 }: {
   target: UserAccount;
+  nodeNames: Map<string, string>;
   isBlocked: (g: Grant) => boolean;
   onClose: () => void;
   onPick: (g: Grant) => void;
@@ -713,7 +798,7 @@ function RevokePickModal({
               >
                 <span>
                   <span className="font-medium text-text">{g.role}</span>{" "}
-                  <span className="text-text-muted">· {scopeLabel(g)}</span>
+                  <span className="text-text-muted">· {scopeLabel(g, nodeNames)}</span>
                 </span>
                 <span className="text-xs text-text-subtle">{formatTime(g.granted_at)}</span>
               </button>
@@ -731,11 +816,13 @@ function RevokePickModal({
 function RevokeConfirmModal({
   target,
   grant,
+  nodeNames,
   revokeRole,
   onClose,
 }: {
   target: UserAccount;
   grant: Grant;
+  nodeNames: Map<string, string>;
   revokeRole: ReturnType<typeof useRevokeRole>;
   onClose: () => void;
 }) {
@@ -747,7 +834,7 @@ function RevokeConfirmModal({
       <p className="text-sm text-text-muted">
         Remove <span className="font-medium text-text">{grant.role}</span> access for{" "}
         <span className="font-medium text-text">{target.username}</span> on{" "}
-        <span className="font-medium text-text">{scopeLabel(grant)}</span>?
+        <span className="font-medium text-text">{scopeLabel(grant, nodeNames)}</span>?
       </p>
       <ErrorLine error={error} />
       <ModalActions>
