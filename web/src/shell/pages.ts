@@ -7,6 +7,7 @@ import {
   Clock,
   Network,
   HardDrive,
+  Users,
   type LucideIcon,
 } from "lucide-react";
 
@@ -20,7 +21,7 @@ export interface NavPage {
   label: string;
   icon: LucideIcon;
   end?: boolean;
-  section: "Monitor" | "Infrastructure";
+  section: "Monitor" | "Infrastructure" | "Admin";
 }
 
 export const NAV_PAGES: NavPage[] = [
@@ -32,4 +33,8 @@ export const NAV_PAGES: NavPage[] = [
   { to: "/cron", label: "Scheduled jobs", icon: Clock, section: "Infrastructure" },
   { to: "/ports", label: "Ports", icon: Network, section: "Infrastructure" },
   { to: "/disks", label: "Disks", icon: HardDrive, section: "Infrastructure" },
+  // Shown only to a caller CurrentUser.can_manage_users names — see
+  // shell/Sidebar.tsx — never a static nav entry every viewer sees, since
+  // this is the one section that reaches a privileged control-plane surface.
+  { to: "/users", label: "Users", icon: Users, section: "Admin" },
 ];

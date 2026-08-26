@@ -69,6 +69,92 @@ export interface SystemInfo {
 export interface CurrentUser {
   user_id: string;
   username: string;
+  /** Display hint for the admin Users page's nav entry — never the
+   *  enforcement point; every /users endpoint checks this independently. */
+  can_manage_users: boolean;
+}
+
+// ------------------------------------------------------- Admin: Users ----
+
+/** The fixed role set — see internal/core/user.KnownRoles. Not an open set:
+ *  the backend rejects anything else. */
+export type Role = "viewer" | "operator" | "admin";
+
+/** One role grant. Scoped to one node, or fleet-wide when `fleet_wide` is
+ *  true — the two are mutually exclusive, mirroring the backend's own
+ *  no-default-between-them rule (see GrantRoleRequest). */
+export interface Grant {
+  id: string;
+  role: Role;
+  node_id?: string;
+  fleet_wide: boolean;
+  granted_at: string;
+  granted_by?: string;
+  revoked_at?: string;
+  revoked_by?: string;
+}
+
+/** GET /api/v1/users, one entry. */
+export interface UserAccount {
+  id: string;
+  username: string;
+  email?: string;
+  disabled: boolean;
+  created_at: string;
+  /** Active grants only — a revoked grant does not appear here. */
+  grants?: Grant[];
+}
+
+export interface ListUsersResponse {
+  users: UserAccount[];
+  total: number;
+}
+
+/** POST /api/v1/users. There is no password field — the server always
+ *  generates one, returned exactly once in the response. */
+export interface CreateUserRequest {
+  username: string;
+  email?: string;
+}
+
+export interface CreateUserResponse {
+  user: UserAccount;
+  password: string;
+}
+
+/** POST /api/v1/users/{id}/grants. No default between a specific node and
+ *  fleet-wide: exactly one of `node_id` or `fleet_wide: true` is required. */
+export interface GrantRoleRequest {
+  role: Role;
+  node_id?: string;
+  fleet_wide?: boolean;
+}
+
+export interface ResetPasswordResponse {
+  password: string;
+}
+
+/** GET /api/v1/users/{id}/audit, one entry — who did what, to whom, when. */
+export interface AuditEntry {
+  id: string;
+  actor_user_id: string;
+  actor_username?: string;
+  target_user_id: string;
+  action:
+    | "create_user"
+    | "grant_role"
+    | "revoke_role"
+    | "disable_user"
+    | "enable_user"
+    | "reset_password"
+    | "force_logout";
+  detail?: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface ListUserAuditResponse {
+  entries: AuditEntry[];
+  total: number;
 }
 
 /** GET /api/v1/system/health */

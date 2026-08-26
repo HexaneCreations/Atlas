@@ -32,6 +32,7 @@ type SessionStore interface {
 	CreateSession(ctx context.Context, s user.Session) error
 	Resolve(ctx context.Context, tokenHash string, now time.Time) (user.Principal, error)
 	RevokeSession(ctx context.Context, tokenHash string, now time.Time) error
+	RevokeAllSessions(ctx context.Context, userID, actorUserID string, now time.Time) error
 }
 
 // Authorizer is the authorization policy layer node-scoped handlers call.
@@ -61,6 +62,21 @@ type LoginRequest struct {
 type CurrentUserResponse struct {
 	UserID   string `json:"user_id"`
 	Username string `json:"username"`
+	// CanManageUsers tells the frontend whether to show the admin Users
+	// page's nav entry — a display hint only, never the enforcement point:
+	// every /users endpoint independently checks PermissionUserManage
+	// itself regardless of what this says.
+	CanManageUsers bool `json:"can_manage_users"`
+}
+
+// currentUserResponse builds [CurrentUserResponse] for principal, checking
+// PermissionUserManage the same way [Handler.requirePermission] does.
+func (h *Handler) currentUserResponse(ctx context.Context, principal user.Principal) CurrentUserResponse {
+	resp := CurrentUserResponse{UserID: principal.UserID, Username: principal.Username}
+	if h.deps.Authz != nil {
+		resp.CanManageUsers = h.deps.Authz.Require(ctx, principal, user.PermissionUserManage, "") == nil
+	}
+	return resp
 }
 
 // Login authenticates a username and password and, on success, issues a
@@ -123,7 +139,8 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) error {
 	}
 
 	session.SetCookie(w, generated.Plaintext, sess.ExpiresAt, h.deps.SessionSecure)
-	httpx.JSON(w, r, http.StatusOK, CurrentUserResponse{UserID: u.ID, Username: u.Username})
+	principal := user.Principal{UserID: u.ID, Username: u.Username}
+	httpx.JSON(w, r, http.StatusOK, h.currentUserResponse(r.Context(), principal))
 	return nil
 }
 
@@ -153,7 +170,7 @@ func (h *Handler) CurrentUser(w http.ResponseWriter, r *http.Request) error {
 	if !ok {
 		return errs.New(errs.CodeUnauthenticated, "not logged in").WithOp(op)
 	}
-	httpx.JSON(w, r, http.StatusOK, CurrentUserResponse{UserID: principal.UserID, Username: principal.Username})
+	httpx.JSON(w, r, http.StatusOK, h.currentUserResponse(r.Context(), principal))
 	return nil
 }
 

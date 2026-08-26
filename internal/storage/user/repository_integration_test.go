@@ -401,3 +401,401 @@ func TestGrantAfterRevokeCreatesANewActiveGrant(t *testing.T) {
 		t.Error("HasPermission false after re-granting a previously revoked role")
 	}
 }
+
+// grantFleetAdmin is a small helper so the last-admin-guard tests below read
+// as "given these admins exist" rather than repeating Grant/ListGrants
+// boilerplate.
+func grantFleetAdmin(t *testing.T, repo *user.Repository, userID string, now time.Time) {
+	t.Helper()
+	spec := coreuser.GrantSpec{UserID: userID, FleetWide: true, Role: coreuser.RoleAdmin, GrantedBy: "test"}
+	if err := repo.Grant(context.Background(), spec, now); err != nil {
+		t.Fatalf("Grant(admin, fleet-wide): %v", err)
+	}
+}
+
+// This is the guard item 3 of the admin-users-page addendum asks to be
+// proven directly: revoking the sole remaining fleet-wide admin grant must
+// be refused, not silently leave every user locked out of user management.
+func TestRevokeGrantRefusesToRemoveTheLastFleetWideAdmin(t *testing.T) {
+	repo := newRepository(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	admin := createTestUser(t, repo, "mallory-admin")
+	grantFleetAdmin(t, repo, admin.ID, now)
+
+	grants, err := repo.ListGrants(ctx, admin.ID)
+	if err != nil {
+		t.Fatalf("ListGrants: %v", err)
+	}
+
+	err = repo.RevokeGrant(ctx, grants[0].ID, "operator", now)
+	if !errs.Is(err, coreuser.ErrLastAdminGrant) {
+		t.Fatalf("RevokeGrant(last admin) = %v, want ErrLastAdminGrant", err)
+	}
+
+	ok, err := repo.HasPermission(ctx, admin.ID, "", coreuser.PermissionUserManage)
+	if err != nil {
+		t.Fatalf("HasPermission: %v", err)
+	}
+	if !ok {
+		t.Error("the refused revoke still removed the grant")
+	}
+}
+
+// With a second enabled fleet-wide admin present, revoking the first must
+// succeed — the guard blocks only the *last* one, not every revoke of an
+// admin grant.
+func TestRevokeGrantAllowsRemovingAnAdminWhenAnotherRemains(t *testing.T) {
+	repo := newRepository(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	first := createTestUser(t, repo, "nathan-admin")
+	second := createTestUser(t, repo, "olivia-admin")
+	grantFleetAdmin(t, repo, first.ID, now)
+	grantFleetAdmin(t, repo, second.ID, now)
+
+	grants, err := repo.ListGrants(ctx, first.ID)
+	if err != nil {
+		t.Fatalf("ListGrants: %v", err)
+	}
+	if err := repo.RevokeGrant(ctx, grants[0].ID, "operator", now); err != nil {
+		t.Fatalf("RevokeGrant: %v", err)
+	}
+
+	ok, err := repo.HasPermission(ctx, first.ID, "", coreuser.PermissionUserManage)
+	if err != nil {
+		t.Fatalf("HasPermission: %v", err)
+	}
+	if ok {
+		t.Error("HasPermission true after a successful revoke")
+	}
+}
+
+// A fleet-wide admin grant held by a *disabled* user must not count as
+// "someone else still has it" — a disabled account cannot log in to use
+// that access, so it provides no real recovery path.
+func TestRevokeGrantTreatsADisabledAdminAsNotCounting(t *testing.T) {
+	repo := newRepository(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	active := createTestUser(t, repo, "peter-admin")
+	disabled := createTestUser(t, repo, "quinn-admin")
+	grantFleetAdmin(t, repo, active.ID, now)
+	grantFleetAdmin(t, repo, disabled.ID, now)
+	if err := repo.DisableUser(ctx, disabled.ID, "operator", now); err != nil {
+		t.Fatalf("DisableUser: %v", err)
+	}
+
+	grants, err := repo.ListGrants(ctx, active.ID)
+	if err != nil {
+		t.Fatalf("ListGrants: %v", err)
+	}
+
+	err = repo.RevokeGrant(ctx, grants[0].ID, "operator", now)
+	if !errs.Is(err, coreuser.ErrLastAdminGrant) {
+		t.Fatalf("RevokeGrant = %v, want ErrLastAdminGrant (the other admin is disabled)", err)
+	}
+}
+
+// Item 3's other half: DisableUser must hit the same guard, not a separate
+// and possibly inconsistent implementation of it.
+func TestDisableUserRefusesToDisableTheLastFleetWideAdmin(t *testing.T) {
+	repo := newRepository(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	admin := createTestUser(t, repo, "rachel-admin")
+	grantFleetAdmin(t, repo, admin.ID, now)
+
+	err := repo.DisableUser(ctx, admin.ID, "operator", now)
+	if !errs.Is(err, coreuser.ErrLastAdminGrant) {
+		t.Fatalf("DisableUser(last admin) = %v, want ErrLastAdminGrant", err)
+	}
+
+	got, err := repo.GetUser(ctx, admin.ID)
+	if err != nil {
+		t.Fatalf("GetUser: %v", err)
+	}
+	if got.Disabled() {
+		t.Error("the refused disable still disabled the user")
+	}
+}
+
+// Disabling a non-admin, or an admin while another remains, must both
+// succeed and terminate the user's live sessions.
+func TestDisableUserTerminatesSessionsAndIsIdempotent(t *testing.T) {
+	repo := newRepository(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	u := createTestUser(t, repo, "sam-viewer")
+
+	generated, err := coreuser.NewSession()
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	sess := coreuser.Session{TokenHash: generated.Hash, UserID: u.ID, CreatedAt: now, ExpiresAt: now.Add(time.Hour)}
+	if err := repo.CreateSession(ctx, sess); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	if err := repo.DisableUser(ctx, u.ID, "operator", now); err != nil {
+		t.Fatalf("DisableUser: %v", err)
+	}
+	if _, err := repo.Resolve(ctx, generated.Hash, now); !errs.Is(err, coreuser.ErrSessionInvalid) {
+		t.Errorf("Resolve after DisableUser = %v, want ErrSessionInvalid", err)
+	}
+
+	// Disabling an already-disabled user is a no-op, not an error.
+	if err := repo.DisableUser(ctx, u.ID, "operator", now); err != nil {
+		t.Errorf("DisableUser(already disabled) = %v, want nil", err)
+	}
+}
+
+func TestEnableUserReversesDisableAndIsIdempotent(t *testing.T) {
+	repo := newRepository(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	u := createTestUser(t, repo, "tara-viewer")
+
+	if err := repo.DisableUser(ctx, u.ID, "operator", now); err != nil {
+		t.Fatalf("DisableUser: %v", err)
+	}
+	if err := repo.EnableUser(ctx, u.ID, "operator", now); err != nil {
+		t.Fatalf("EnableUser: %v", err)
+	}
+
+	got, err := repo.GetUser(ctx, u.ID)
+	if err != nil {
+		t.Fatalf("GetUser: %v", err)
+	}
+	if got.Disabled() {
+		t.Error("user still disabled after EnableUser")
+	}
+
+	if err := repo.EnableUser(ctx, u.ID, "operator", now); err != nil {
+		t.Errorf("EnableUser(already enabled) = %v, want nil", err)
+	}
+}
+
+func TestResetPasswordIssuesAWorkingNewPassword(t *testing.T) {
+	repo := newRepository(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	u := createTestUser(t, repo, "ursula-viewer")
+
+	plaintext, err := repo.ResetPassword(ctx, u.ID, "operator", now)
+	if err != nil {
+		t.Fatalf("ResetPassword: %v", err)
+	}
+	if plaintext == "" {
+		t.Fatal("ResetPassword returned an empty password")
+	}
+
+	got, err := repo.ByUsername(ctx, u.Username)
+	if err != nil {
+		t.Fatalf("ByUsername: %v", err)
+	}
+	if !coreuser.VerifyPassword(got.PasswordHash, plaintext) {
+		t.Error("the returned plaintext does not verify against the stored hash")
+	}
+	if coreuser.VerifyPassword(got.PasswordHash, "a-long-enough-password") {
+		t.Error("the original password still verifies after ResetPassword")
+	}
+}
+
+func TestRevokeAllSessionsTerminatesEveryLiveSession(t *testing.T) {
+	repo := newRepository(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	u := createTestUser(t, repo, "victor-viewer")
+
+	var hashes []string
+	for range 3 {
+		generated, err := coreuser.NewSession()
+		if err != nil {
+			t.Fatalf("NewSession: %v", err)
+		}
+		hashes = append(hashes, generated.Hash)
+		sess := coreuser.Session{TokenHash: generated.Hash, UserID: u.ID, CreatedAt: now, ExpiresAt: now.Add(time.Hour)}
+		if err := repo.CreateSession(ctx, sess); err != nil {
+			t.Fatalf("CreateSession: %v", err)
+		}
+	}
+
+	if err := repo.RevokeAllSessions(ctx, u.ID, "operator", now); err != nil {
+		t.Fatalf("RevokeAllSessions: %v", err)
+	}
+	for _, h := range hashes {
+		if _, err := repo.Resolve(ctx, h, now); !errs.Is(err, coreuser.ErrSessionInvalid) {
+			t.Errorf("Resolve(%s) after RevokeAllSessions = %v, want ErrSessionInvalid", h, err)
+		}
+	}
+}
+
+func TestRevokeAllSessionsNotFoundForUnknownUser(t *testing.T) {
+	repo := newRepository(t)
+	err := repo.RevokeAllSessions(context.Background(), "does-not-exist", "operator", time.Now())
+	if errs.CodeOf(err) != errs.CodeNotFound {
+		t.Errorf("code = %v, want not_found", errs.CodeOf(err))
+	}
+}
+
+func TestAdminCreateUserPersistsAWorkingGeneratedPassword(t *testing.T) {
+	repo := newRepository(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	created, plaintext, err := repo.AdminCreateUser(ctx, "wendy", "wendy@example.com", "operator-id", now)
+	if err != nil {
+		t.Fatalf("AdminCreateUser: %v", err)
+	}
+	if created.ID == "" || plaintext == "" {
+		t.Fatalf("AdminCreateUser returned an empty id or password: %+v", created)
+	}
+	if !coreuser.VerifyPassword(created.PasswordHash, plaintext) {
+		t.Error("the returned plaintext does not verify against the stored hash")
+	}
+
+	entries, err := repo.ListAudit(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("ListAudit: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Action != coreuser.AuditActionCreateUser {
+		t.Fatalf("audit entries = %+v, want exactly one create_user entry", entries)
+	}
+}
+
+// Item 1 of the admin-users-page addendum: every grant, revoke, disable,
+// enable, reset-password and force-logout must be readable back, not just
+// written — this walks one user through all of them and checks the full
+// trail.
+func TestListAuditRecordsEveryUserManagementAction(t *testing.T) {
+	repo := newRepository(t)
+	ctx := context.Background()
+	base := time.Now().UTC()
+	actor := createTestUser(t, repo, "xavier-admin")
+	target := createTestUser(t, repo, "yolanda-viewer")
+
+	// Each action gets a strictly later timestamp: ListAudit orders by
+	// created_at DESC, which is only well-defined across distinct instants —
+	// real actions never share one to the microsecond the way a single
+	// reused `now` would here.
+	var step int
+	nextNow := func() time.Time {
+		step++
+		return base.Add(time.Duration(step) * time.Second)
+	}
+
+	spec := coreuser.GrantSpec{UserID: target.ID, NodeID: "node-1", Role: coreuser.RoleViewer, GrantedBy: actor.ID}
+	if err := repo.Grant(ctx, spec, nextNow()); err != nil {
+		t.Fatalf("Grant: %v", err)
+	}
+	grants, err := repo.ListGrants(ctx, target.ID)
+	if err != nil {
+		t.Fatalf("ListGrants: %v", err)
+	}
+	if err := repo.RevokeGrant(ctx, grants[0].ID, actor.ID, nextNow()); err != nil {
+		t.Fatalf("RevokeGrant: %v", err)
+	}
+	if err := repo.DisableUser(ctx, target.ID, actor.ID, nextNow()); err != nil {
+		t.Fatalf("DisableUser: %v", err)
+	}
+	if err := repo.EnableUser(ctx, target.ID, actor.ID, nextNow()); err != nil {
+		t.Fatalf("EnableUser: %v", err)
+	}
+	if _, err := repo.ResetPassword(ctx, target.ID, actor.ID, nextNow()); err != nil {
+		t.Fatalf("ResetPassword: %v", err)
+	}
+	if err := repo.RevokeAllSessions(ctx, target.ID, actor.ID, nextNow()); err != nil {
+		t.Fatalf("RevokeAllSessions: %v", err)
+	}
+
+	entries, err := repo.ListAudit(ctx, target.ID)
+	if err != nil {
+		t.Fatalf("ListAudit: %v", err)
+	}
+	wantActions := []string{
+		coreuser.AuditActionForceLogout, coreuser.AuditActionResetPassword, coreuser.AuditActionEnableUser,
+		coreuser.AuditActionDisableUser, coreuser.AuditActionRevokeRole, coreuser.AuditActionGrantRole,
+	}
+	if len(entries) != len(wantActions) {
+		t.Fatalf("entries = %d, want %d: %+v", len(entries), len(wantActions), entries)
+	}
+	for i, want := range wantActions {
+		if entries[i].Action != want {
+			t.Errorf("entries[%d].Action = %q, want %q (newest first)", i, entries[i].Action, want)
+		}
+		if entries[i].ActorUsername != actor.Username {
+			t.Errorf("entries[%d].ActorUsername = %q, want %q", i, entries[i].ActorUsername, actor.Username)
+		}
+	}
+}
+
+// Re-granting an identical, already-active grant must not write a second
+// audit entry — Grant's ON CONFLICT DO NOTHING means no row was actually
+// inserted, so the RETURNING-gated audit insert must also produce nothing.
+func TestGrantWritesNoAuditEntryWhenAlreadyActive(t *testing.T) {
+	repo := newRepository(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	u := createTestUser(t, repo, "zack-viewer")
+
+	spec := coreuser.GrantSpec{UserID: u.ID, NodeID: "node-1", Role: coreuser.RoleViewer, GrantedBy: "operator"}
+	if err := repo.Grant(ctx, spec, now); err != nil {
+		t.Fatalf("first Grant: %v", err)
+	}
+	if err := repo.Grant(ctx, spec, now); err != nil {
+		t.Fatalf("second Grant: %v", err)
+	}
+
+	entries, err := repo.ListAudit(ctx, u.ID)
+	if err != nil {
+		t.Fatalf("ListAudit: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Errorf("audit entries = %d, want 1 (the repeated grant must not duplicate it)", len(entries))
+	}
+}
+
+func TestListUsersWithGrantsReturnsOnlyActiveGrants(t *testing.T) {
+	repo := newRepository(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	u := createTestUser(t, repo, "amy-viewer")
+
+	active := coreuser.GrantSpec{UserID: u.ID, NodeID: "node-1", Role: coreuser.RoleViewer, GrantedBy: "operator"}
+	revoked := coreuser.GrantSpec{UserID: u.ID, NodeID: "node-2", Role: coreuser.RoleOperator, GrantedBy: "operator"}
+	if err := repo.Grant(ctx, active, now); err != nil {
+		t.Fatalf("Grant(active): %v", err)
+	}
+	if err := repo.Grant(ctx, revoked, now); err != nil {
+		t.Fatalf("Grant(revoked): %v", err)
+	}
+	grants, err := repo.ListGrants(ctx, u.ID)
+	if err != nil {
+		t.Fatalf("ListGrants: %v", err)
+	}
+	for _, g := range grants {
+		if g.Role == coreuser.RoleOperator {
+			if err := repo.RevokeGrant(ctx, g.ID, "operator", now); err != nil {
+				t.Fatalf("RevokeGrant: %v", err)
+			}
+		}
+	}
+
+	users, err := repo.ListUsersWithGrants(ctx)
+	if err != nil {
+		t.Fatalf("ListUsersWithGrants: %v", err)
+	}
+	var found *coreuser.UserWithGrants
+	for i := range users {
+		if users[i].User.ID == u.ID {
+			found = &users[i]
+		}
+	}
+	if found == nil {
+		t.Fatalf("user %s not present in ListUsersWithGrants", u.ID)
+	}
+	if len(found.Grants) != 1 || found.Grants[0].Role != coreuser.RoleViewer {
+		t.Errorf("grants = %+v, want exactly the one active viewer grant", found.Grants)
+	}
+}

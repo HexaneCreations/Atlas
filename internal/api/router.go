@@ -60,9 +60,10 @@ type Deps struct {
 	// same convention as Activity, EventStore and the other stores above —
 	// which is what lets [router_test.go]'s minimal Deps keep working
 	// unchanged.
-	Users    v1.UserStore
-	Sessions v1.SessionStore
-	Authz    v1.Authorizer
+	Users     v1.UserStore
+	Sessions  v1.SessionStore
+	Authz     v1.Authorizer
+	UserAdmin v1.UserAdmin
 	// LoginLimiter bounds POST /auth/login attempts. Nil disables
 	// throttling rather than crashing it, the same convention as the
 	// stores above.
@@ -105,6 +106,7 @@ func New(deps Deps) http.Handler {
 		Users:             deps.Users,
 		Sessions:          deps.Sessions,
 		Authz:             deps.Authz,
+		UserAdmin:         deps.UserAdmin,
 		LoginLimiter:      deps.LoginLimiter,
 		SessionSecure:     deps.Config.Environment.IsProduction(),
 	}).Mount(mux)

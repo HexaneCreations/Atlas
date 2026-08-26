@@ -127,6 +127,11 @@ type Deps struct {
 	Users    UserStore
 	Sessions SessionStore
 	Authz    Authorizer
+	// UserAdmin backs the admin Users page: creating accounts, granting or
+	// revoking roles, disabling/enabling accounts, resetting passwords, and
+	// the per-user audit trail. Nil disables those endpoints rather than
+	// crashing them, the same convention as the other stores above.
+	UserAdmin UserAdmin
 	// SessionSecure sets the session cookie's Secure attribute. Must be true
 	// whenever Atlas is reachable over anything but plain-HTTP loopback.
 	SessionSecure bool
@@ -263,6 +268,16 @@ func (h *Handler) Mount(mux *http.ServeMux) {
 	mux.Handle("POST "+Prefix+"/auth/login", httpx.Handler(h.Login))
 	mux.Handle("POST "+Prefix+"/auth/logout", httpx.Handler(h.Logout))
 	mux.Handle("GET "+Prefix+"/auth/me", httpx.Handler(h.CurrentUser))
+
+	mux.Handle("GET "+Prefix+"/users", httpx.Handler(h.ListUsers))
+	mux.Handle("POST "+Prefix+"/users", httpx.Handler(h.CreateUser))
+	mux.Handle("POST "+Prefix+"/users/{userID}/grants", httpx.Handler(h.GrantRole))
+	mux.Handle("DELETE "+Prefix+"/users/{userID}/grants/{grantID}", httpx.Handler(h.RevokeRole))
+	mux.Handle("POST "+Prefix+"/users/{userID}/disable", httpx.Handler(h.DisableUser))
+	mux.Handle("POST "+Prefix+"/users/{userID}/enable", httpx.Handler(h.EnableUser))
+	mux.Handle("POST "+Prefix+"/users/{userID}/reset-password", httpx.Handler(h.ResetPassword))
+	mux.Handle("POST "+Prefix+"/users/{userID}/force-logout", httpx.Handler(h.ForceLogout))
+	mux.Handle("GET "+Prefix+"/users/{userID}/audit", httpx.Handler(h.ListUserAudit))
 
 	mux.Handle("GET "+Prefix+"/nodes", httpx.Handler(h.ListNodes))
 	mux.Handle("GET "+Prefix+"/nodes/{nodeID}", httpx.Handler(h.GetNode))

@@ -1,4 +1,15 @@
-import type { ApiErrorBody, ApiErrorResponse, CurrentUser, ErrorCode } from "./types";
+import type {
+  ApiErrorBody,
+  ApiErrorResponse,
+  CreateUserRequest,
+  CreateUserResponse,
+  CurrentUser,
+  ErrorCode,
+  GrantRoleRequest,
+  ListUserAuditResponse,
+  ListUsersResponse,
+  ResetPasswordResponse,
+} from "./types";
 
 /**
  * The single HTTP client for the Atlas API.
@@ -11,9 +22,10 @@ import type { ApiErrorBody, ApiErrorResponse, CurrentUser, ErrorCode } from "./t
  *
  * apiGet remains the only verb for monitored-infrastructure data — Atlas is
  * read-only toward what it observes, and this client makes that guarantee
- * visible by offering no write verb for it. The three /auth endpoints below
- * are the one exception, and a deliberate one: they write to Atlas's own
- * control-plane session state, never to a monitored host.
+ * visible by offering no write verb for it. The /auth and /users functions
+ * below are the deliberate exception: they write to Atlas's own control-plane
+ * state — sessions, and the human-user accounts and roles that govern access
+ * to Atlas itself — never to a monitored host.
  */
 
 /** Base path for version 1. Requests are same-origin; see vite.config.ts. */
@@ -178,6 +190,87 @@ export async function logout(): Promise<void> {
  */
 export async function fetchCurrentUser(signal?: AbortSignal): Promise<CurrentUser> {
   return apiGet<CurrentUser>("/auth/me", signal ? { signal } : {});
+}
+
+/**
+ * Performs a write against the Atlas API and returns the raw response —
+ * shared plumbing for the named functions below, each of which stays the
+ * exported, self-describing unit a caller reaches for (createUser,
+ * disableUser, …) rather than a generic verb a caller could point at
+ * anything.
+ */
+async function request(path: string, init: RequestInit): Promise<Response> {
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE}${path}`, { credentials: "same-origin", ...init });
+  } catch (cause) {
+    if (cause instanceof DOMException && cause.name === "AbortError") {
+      throw cause;
+    }
+    throw new NetworkError(cause);
+  }
+  if (!response.ok) {
+    throw await toApiError(response);
+  }
+  return response;
+}
+
+const JSON_HEADERS = { "Content-Type": "application/json", Accept: "application/json" };
+
+/** Every user Atlas knows about, with their current active role grants. */
+export async function fetchUsers(signal?: AbortSignal): Promise<ListUsersResponse> {
+  return apiGet<ListUsersResponse>("/users", signal ? { signal } : {});
+}
+
+/** Creates a user. The server always generates the password — there is no
+ *  field for the caller to supply one — and returns it exactly once. */
+export async function createUser(body: CreateUserRequest): Promise<CreateUserResponse> {
+  const response = await request("/users", { method: "POST", headers: JSON_HEADERS, body: JSON.stringify(body) });
+  return (await response.json()) as CreateUserResponse;
+}
+
+/** Grants a role to a user, scoped to one node or fleet-wide. */
+export async function grantRole(userID: string, body: GrantRoleRequest): Promise<void> {
+  await request(`/users/${encodeURIComponent(userID)}/grants`, {
+    method: "POST",
+    headers: JSON_HEADERS,
+    body: JSON.stringify(body),
+  });
+}
+
+/** Revokes one specific grant, by its own id — a user may hold several. */
+export async function revokeRole(userID: string, grantID: string): Promise<void> {
+  await request(`/users/${encodeURIComponent(userID)}/grants/${encodeURIComponent(grantID)}`, {
+    method: "DELETE",
+  });
+}
+
+/** Prevents a user from authenticating and ends their active sessions. */
+export async function disableUser(userID: string): Promise<void> {
+  await request(`/users/${encodeURIComponent(userID)}/disable`, { method: "POST" });
+}
+
+/** Reverses [disableUser]. */
+export async function enableUser(userID: string): Promise<void> {
+  await request(`/users/${encodeURIComponent(userID)}/enable`, { method: "POST" });
+}
+
+/** Invalidates a user's current password and issues a new, generated one. */
+export async function resetPassword(userID: string): Promise<ResetPasswordResponse> {
+  const response = await request(`/users/${encodeURIComponent(userID)}/reset-password`, { method: "POST" });
+  return (await response.json()) as ResetPasswordResponse;
+}
+
+/** Terminates every session a user currently holds, without disabling the
+ *  account — they can log back in immediately. */
+export async function forceLogout(userID: string): Promise<void> {
+  await request(`/users/${encodeURIComponent(userID)}/force-logout`, { method: "POST" });
+}
+
+/** One user's recorded activity: every grant, revoke, disable, enable,
+ *  reset-password and force-logout taken against their account. */
+export async function fetchUserAudit(userID: string, signal?: AbortSignal): Promise<ListUserAuditResponse> {
+  return apiGet<ListUserAuditResponse>(`/users/${encodeURIComponent(userID)}/audit`, signal ? { signal } : {});
 }
 
 /**

@@ -98,6 +98,18 @@ func (m *memSessionStore) RevokeSession(_ context.Context, tokenHash string, now
 	return nil
 }
 
+func (m *memSessionStore) RevokeAllSessions(_ context.Context, userID, _ string, now time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for hash, s := range m.byHash {
+		if s.UserID == userID {
+			s.RevokedAt = &now
+			m.byHash[hash] = s
+		}
+	}
+	return nil
+}
+
 // fakeAuthorizer grants, denies, or fails uniformly, recording the last
 // permission and node it was asked about so a test can assert the endpoint
 // under test actually asked the right question.
@@ -311,6 +323,44 @@ func TestCurrentUserAfterLoginReportsThePrincipal(t *testing.T) {
 	}
 	if got.Username != "erin" {
 		t.Errorf("username = %q, want erin", got.Username)
+	}
+}
+
+// can_manage_users is a display hint for the frontend's admin Users page nav
+// entry — it must track the real PermissionUserManage decision, not be
+// hardcoded true or false regardless of the authorizer.
+func TestCurrentUserReportsCanManageUsersFromTheRealAuthzDecision(t *testing.T) {
+	t.Parallel()
+
+	for _, allow := range []bool{true, false} {
+		t.Run(fmt.Sprintf("allow=%t", allow), func(t *testing.T) {
+			t.Parallel()
+
+			u := testUser(t, fmt.Sprintf("can-manage-%t", allow), "correct horse battery staple")
+			authz := &fakeAuthorizer{allow: allow}
+			srv := newAuthTestServerWithAuthorizer(t, u, authz)
+			client := mustClientWithCookies(t)
+			login(t, client, srv.URL, u.Username, "correct horse battery staple").Body.Close()
+
+			resp, err := client.Get(srv.URL + "/api/v1/auth/me")
+			if err != nil {
+				t.Fatalf("get /auth/me: %v", err)
+			}
+			defer resp.Body.Close()
+
+			var got struct {
+				CanManageUsers bool `json:"can_manage_users"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if got.CanManageUsers != allow {
+				t.Errorf("can_manage_users = %t, want %t", got.CanManageUsers, allow)
+			}
+			if authz.gotPermission != user.PermissionUserManage {
+				t.Errorf("permission checked = %q, want user.manage", authz.gotPermission)
+			}
+		})
 	}
 }
 

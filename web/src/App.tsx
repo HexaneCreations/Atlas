@@ -32,6 +32,9 @@ const PortsPage = lazy(() =>
 const DisksPage = lazy(() =>
   import("./pages/DisksPage").then((m) => ({ default: m.DisksPage })),
 );
+const UsersPage = lazy(() =>
+  import("./pages/UsersPage").then((m) => ({ default: m.UsersPage })),
+);
 import { NotFoundPage } from "./pages/ErrorPages";
 import { PageSkeleton } from "./components/Skeleton";
 import { ErrorBoundary } from "./components/ErrorBoundary";
@@ -114,6 +117,7 @@ function AuthenticatedApp({ pathname }: { pathname: string }) {
                     <Route path="/cron" element={<CronPage />} />
                     <Route path="/ports" element={<PortsPage />} />
                     <Route path="/disks" element={<DisksPage />} />
+                    <Route path="/users" element={<UsersPage />} />
                     <Route path="*" element={<NotFoundPage />} />
                   </Routes>
                 </motion.div>

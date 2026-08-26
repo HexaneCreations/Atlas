@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/base64"
 	"flag"
 	"fmt"
 	"os"
@@ -25,7 +23,7 @@ import (
 // `atlas-server grant` (agent_operation_grants).
 func userCommand(configPath string, args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: atlas-server user <create|list|grant|revoke-grant|grants> [flags]")
+		return fmt.Errorf("usage: atlas-server user <create|list|grant|revoke-grant|grants|disable|enable|reset-password|force-logout> [flags]")
 	}
 	switch args[0] {
 	case "create":
@@ -38,9 +36,95 @@ func userCommand(configPath string, args []string) error {
 		return userRevokeGrant(configPath, args[1:])
 	case "grants":
 		return userGrants(configPath, args[1:])
+	case "disable":
+		return userDisable(configPath, args[1:])
+	case "enable":
+		return userEnable(configPath, args[1:])
+	case "reset-password":
+		return userResetPassword(configPath, args[1:])
+	case "force-logout":
+		return userForceLogout(configPath, args[1:])
 	default:
-		return fmt.Errorf("unknown user command %q; want create, list, grant, revoke-grant or grants", args[0])
+		return fmt.Errorf("unknown user command %q; want create, list, grant, revoke-grant, grants, disable, enable, reset-password or force-logout", args[0])
 	}
+}
+
+// cliActor is recorded as the actor in user_audit_log for every CLI-invoked
+// user-management action — a plain label, not a real user id, the same
+// convention `user grant`'s --granted-by default already uses.
+const cliActor = "operator"
+
+func userDisable(configPath string, args []string) error {
+	flags := flag.NewFlagSet("atlas-server user disable", flag.ContinueOnError)
+	userID := flags.String("user-id", "", "the user id to disable (required; see `user list`)")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if *userID == "" {
+		return fmt.Errorf("--user-id is required")
+	}
+	return withUserRepository(configPath, func(ctx context.Context, repo *storageuser.Repository) error {
+		if err := repo.DisableUser(ctx, *userID, cliActor, time.Now()); err != nil {
+			return err
+		}
+		fmt.Printf("disabled user %s\n", *userID)
+		return nil
+	})
+}
+
+func userEnable(configPath string, args []string) error {
+	flags := flag.NewFlagSet("atlas-server user enable", flag.ContinueOnError)
+	userID := flags.String("user-id", "", "the user id to enable (required; see `user list`)")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if *userID == "" {
+		return fmt.Errorf("--user-id is required")
+	}
+	return withUserRepository(configPath, func(ctx context.Context, repo *storageuser.Repository) error {
+		if err := repo.EnableUser(ctx, *userID, cliActor, time.Now()); err != nil {
+			return err
+		}
+		fmt.Printf("enabled user %s\n", *userID)
+		return nil
+	})
+}
+
+func userResetPassword(configPath string, args []string) error {
+	flags := flag.NewFlagSet("atlas-server user reset-password", flag.ContinueOnError)
+	userID := flags.String("user-id", "", "the user id to reset the password for (required; see `user list`)")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if *userID == "" {
+		return fmt.Errorf("--user-id is required")
+	}
+	return withUserRepository(configPath, func(ctx context.Context, repo *storageuser.Repository) error {
+		plaintext, err := repo.ResetPassword(ctx, *userID, cliActor, time.Now())
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "Generated password: %s\nIt will not be shown again.\n", plaintext)
+		return nil
+	})
+}
+
+func userForceLogout(configPath string, args []string) error {
+	flags := flag.NewFlagSet("atlas-server user force-logout", flag.ContinueOnError)
+	userID := flags.String("user-id", "", "the user id to log out everywhere (required; see `user list`)")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if *userID == "" {
+		return fmt.Errorf("--user-id is required")
+	}
+	return withUserRepository(configPath, func(ctx context.Context, repo *storageuser.Repository) error {
+		if err := repo.RevokeAllSessions(ctx, *userID, cliActor, time.Now()); err != nil {
+			return err
+		}
+		fmt.Printf("terminated all sessions for user %s\n", *userID)
+		return nil
+	})
 }
 
 // withUserRepository opens the same database the server itself uses and
@@ -64,17 +148,6 @@ func withUserRepository(configPath string, fn func(context.Context, *storageuser
 	return fn(ctx, storageuser.NewRepository(pool.DB()))
 }
 
-// generatePassword returns a random password for an operator who does not
-// supply one explicitly. It is shown exactly once, the same "no reveal API"
-// rule [fleet.GeneratedToken] documents for enrollment tokens.
-func generatePassword() (string, error) {
-	buf := make([]byte, 15) // 20 base64 characters, well over minPasswordLength
-	if _, err := rand.Read(buf); err != nil {
-		return "", fmt.Errorf("generate password: %w", err)
-	}
-	return base64.RawURLEncoding.EncodeToString(buf), nil
-}
-
 func userCreate(configPath string, args []string) error {
 	flags := flag.NewFlagSet("atlas-server user create", flag.ContinueOnError)
 	username := flags.String("username", "", "login name for the new user (required)")
@@ -88,7 +161,7 @@ func userCreate(configPath string, args []string) error {
 	generated := false
 	if pass == "" {
 		var err error
-		pass, err = generatePassword()
+		pass, err = coreuser.GenerateOneTimePassword()
 		if err != nil {
 			return err
 		}

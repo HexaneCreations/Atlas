@@ -90,4 +90,41 @@ type Store interface {
 	CreateUser(ctx context.Context, u User) error
 	// ListUsers returns every user, for operator tooling.
 	ListUsers(ctx context.Context) ([]User, error)
+	// GetUser looks up a user by id. Returns [errs.CodeNotFound] when none
+	// exists.
+	GetUser(ctx context.Context, id string) (User, error)
+}
+
+// Audit action labels recorded in user_audit_log.detail — see [AuditEntry].
+const (
+	AuditActionCreateUser    = "create_user"
+	AuditActionGrantRole     = "grant_role"
+	AuditActionRevokeRole    = "revoke_role"
+	AuditActionDisableUser   = "disable_user"
+	AuditActionEnableUser    = "enable_user"
+	AuditActionResetPassword = "reset_password"
+	AuditActionForceLogout   = "force_logout"
+)
+
+// UserWithGrants is a user alongside their current active role grants, for
+// the admin Users page's list view.
+type UserWithGrants struct {
+	User   User
+	Grants []NodeRole
+}
+
+// AuditEntry is one recorded user-management action, for the admin Users
+// page's per-user activity view.
+//
+// Detail deliberately never carries a password or session token — only
+// facts safe to display to an operator, such as which role and scope a
+// grant/revoke named. See migrations/0014_user_management.sql.
+type AuditEntry struct {
+	ID            string
+	ActorUserID   string
+	ActorUsername string
+	TargetUserID  string
+	Action        string
+	Detail        map[string]any
+	CreatedAt     time.Time
 }

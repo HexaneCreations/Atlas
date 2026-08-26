@@ -1,11 +1,25 @@
-import { keepPreviousData, useQueries, useQuery } from "@tanstack/react-query";
-import { ApiError, apiGet } from "./client";
+import { keepPreviousData, useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  ApiError,
+  apiGet,
+  createUser,
+  disableUser,
+  enableUser,
+  forceLogout,
+  fetchUserAudit,
+  fetchUsers,
+  grantRole,
+  resetPassword,
+  revokeRole,
+} from "./client";
 import { emptyArray } from "./empty";
 import { useSelectedNodeID } from "../lib/selectedNode";
 import type {
   CollectorsResponse,
   ContainerDetail,
   ContainerLogsResponse,
+  CreateUserRequest,
+  GrantRoleRequest,
   ListContainersResponse,
   ListCronJobsResponse,
   ListActivityResponse,
@@ -13,6 +27,7 @@ import type {
   ListPortsResponse,
   ListProcessesResponse,
   ListServicesResponse,
+  ListUserAuditResponse,
   ServiceDetail,
   ServiceGraph,
   LatestResponse,
@@ -428,5 +443,96 @@ export function useContainerLogs(containerID: string | null, nodeID: string | un
     // cache entry — without this, data would go briefly undefined while it
     // loads, collapsing the log viewer's height mid-read.
     placeholderData: keepPreviousData,
+  });
+}
+
+// ------------------------------------------------------- Admin: Users ----
+//
+// The one page in this application with real write actions — see
+// api/client.ts's doc on the /users exception to "Atlas is read-only".
+// Every mutation below invalidates userKeys.all on success rather than
+// optimistically patching the cache: a grant can trip the last-admin guard,
+// so the list the operator sees next must be what the server actually did,
+// not what the UI assumed it would do.
+
+export const userKeys = {
+  all: ["users"] as const,
+  audit: (userID: string) => ["users", userID, "audit"] as const,
+} as const;
+
+/** Every user Atlas knows about, with their current active role grants. */
+export function useUsers() {
+  return useQuery({
+    queryKey: userKeys.all,
+    queryFn: ({ signal }) => fetchUsers(signal),
+  });
+}
+
+/** One user's activity history — who granted, revoked, disabled, enabled,
+ *  reset, or force-logged-out them, and when. */
+export function useUserAudit(userID: string | null) {
+  return useQuery({
+    queryKey: userKeys.audit(userID ?? ""),
+    queryFn: ({ signal }): Promise<ListUserAuditResponse> => fetchUserAudit(userID ?? "", signal),
+    enabled: Boolean(userID),
+  });
+}
+
+function useInvalidateUsers() {
+  const queryClient = useQueryClient();
+  return () => {
+    void queryClient.invalidateQueries({ queryKey: userKeys.all });
+  };
+}
+
+export function useCreateUser() {
+  const invalidate = useInvalidateUsers();
+  return useMutation({
+    mutationFn: (body: CreateUserRequest) => createUser(body),
+    onSuccess: invalidate,
+  });
+}
+
+export function useGrantRole() {
+  const invalidate = useInvalidateUsers();
+  return useMutation({
+    mutationFn: ({ userID, body }: { userID: string; body: GrantRoleRequest }) => grantRole(userID, body),
+    onSuccess: invalidate,
+  });
+}
+
+export function useRevokeRole() {
+  const invalidate = useInvalidateUsers();
+  return useMutation({
+    mutationFn: ({ userID, grantID }: { userID: string; grantID: string }) => revokeRole(userID, grantID),
+    onSuccess: invalidate,
+  });
+}
+
+export function useDisableUser() {
+  const invalidate = useInvalidateUsers();
+  return useMutation({
+    mutationFn: (userID: string) => disableUser(userID),
+    onSuccess: invalidate,
+  });
+}
+
+export function useEnableUser() {
+  const invalidate = useInvalidateUsers();
+  return useMutation({
+    mutationFn: (userID: string) => enableUser(userID),
+    onSuccess: invalidate,
+  });
+}
+
+export function useResetPassword() {
+  return useMutation({
+    mutationFn: (userID: string) => resetPassword(userID),
+  });
+}
+
+export function useForceLogout() {
+  return useMutation({
+    mutationFn: (userID: string) => forceLogout(userID),
   });
 }

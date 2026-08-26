@@ -30,6 +30,38 @@ func (l lazyUserStore) Resolve(ctx context.Context, tokenHash string, now time.T
 func (l lazyUserStore) RevokeSession(ctx context.Context, tokenHash string, now time.Time) error {
 	return l.repo().RevokeSession(ctx, tokenHash, now)
 }
+func (l lazyUserStore) RevokeAllSessions(ctx context.Context, userID, actorUserID string, now time.Time) error {
+	return l.repo().RevokeAllSessions(ctx, userID, actorUserID, now)
+}
+
+// The admin Users page's surface — see [v1.UserAdmin].
+func (l lazyUserStore) ListUsersWithGrants(ctx context.Context) ([]coreuser.UserWithGrants, error) {
+	return l.repo().ListUsersWithGrants(ctx)
+}
+func (l lazyUserStore) GetUser(ctx context.Context, id string) (coreuser.User, error) {
+	return l.repo().GetUser(ctx, id)
+}
+func (l lazyUserStore) AdminCreateUser(ctx context.Context, username, email, actorUserID string, now time.Time) (coreuser.User, string, error) {
+	return l.repo().AdminCreateUser(ctx, username, email, actorUserID, now)
+}
+func (l lazyUserStore) DisableUser(ctx context.Context, userID, actorUserID string, now time.Time) error {
+	return l.repo().DisableUser(ctx, userID, actorUserID, now)
+}
+func (l lazyUserStore) EnableUser(ctx context.Context, userID, actorUserID string, now time.Time) error {
+	return l.repo().EnableUser(ctx, userID, actorUserID, now)
+}
+func (l lazyUserStore) ResetPassword(ctx context.Context, userID, actorUserID string, now time.Time) (string, error) {
+	return l.repo().ResetPassword(ctx, userID, actorUserID, now)
+}
+func (l lazyUserStore) ListAudit(ctx context.Context, targetUserID string) ([]coreuser.AuditEntry, error) {
+	return l.repo().ListAudit(ctx, targetUserID)
+}
+func (l lazyUserStore) Grant(ctx context.Context, spec coreuser.GrantSpec, now time.Time) error {
+	return l.repo().Grant(ctx, spec, now)
+}
+func (l lazyUserStore) RevokeGrant(ctx context.Context, grantID, revokedBy string, now time.Time) error {
+	return l.repo().RevokeGrant(ctx, grantID, revokedBy, now)
+}
 
 // lazyAuthorizer wraps [lazyUserStore] in [coreuser.Authorizer], the
 // handler-facing policy layer — see internal/api/v1's requireScope.

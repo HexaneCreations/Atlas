@@ -85,4 +85,9 @@ type SessionStore interface {
 	Resolve(ctx context.Context, tokenHash string, now time.Time) (Principal, error)
 	// RevokeSession invalidates a session, for logout.
 	RevokeSession(ctx context.Context, tokenHash string, now time.Time) error
+	// RevokeAllSessions invalidates every live session belonging to userID,
+	// for an operator forcing a logout or disabling an account. actorUserID
+	// is recorded in the audit trail, not used to authorize the call — the
+	// caller has already checked PermissionUserManage.
+	RevokeAllSessions(ctx context.Context, userID, actorUserID string, now time.Time) error
 }

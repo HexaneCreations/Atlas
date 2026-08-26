@@ -94,6 +94,15 @@ export const PAGE_CHROME: Record<string, PageChrome> = {
     pattern: patterns.topography,
     accent: gradients.radialGlow,
   },
+  "/users": {
+    identity: "Users & Access",
+    premise: "Accounts, roles, and who can do what.",
+    hero: heroes.glass,
+    // blueprint is the library's assignment for settings and architecture —
+    // this is Atlas's own access control, not the fleet it observes.
+    pattern: patterns.blueprint,
+    accent: gradients.meshViolet,
+  },
 };
 
 /** The chrome for a path. Unknown routes fall back to Mission Control's, so

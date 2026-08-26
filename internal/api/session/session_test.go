@@ -22,6 +22,9 @@ func (f *fakeSessionStore) CreateSession(context.Context, user.Session) error { 
 func (f *fakeSessionStore) RevokeSession(context.Context, string, time.Time) error {
 	return nil
 }
+func (f *fakeSessionStore) RevokeAllSessions(context.Context, string, string, time.Time) error {
+	return nil
+}
 func (f *fakeSessionStore) Resolve(_ context.Context, tokenHash string, _ time.Time) (user.Principal, error) {
 	f.gotHash = tokenHash
 	return f.principal, f.err

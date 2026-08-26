@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router";
 import { Search } from "lucide-react";
 import { NAV_PAGES } from "./pages";
+import { useAuth } from "../auth/AuthContext";
 import { EmptyState, EmptyAction } from "../components/EmptyState";
 import { emptyArt } from "../lib/assets";
 
@@ -23,6 +24,15 @@ export function CommandPalette() {
   const [highlighted, setHighlighted] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const navigate = useNavigate();
+  const { user } = useAuth();
+
+  // Same gate as the sidebar's Admin section — a page reachable only by
+  // permission should not be one keystroke away for a viewer who cannot use
+  // it, even though the backend would refuse the actual request either way.
+  const pages = useMemo(
+    () => (user?.can_manage_users ? NAV_PAGES : NAV_PAGES.filter((p) => p.section !== "Admin")),
+    [user?.can_manage_users],
+  );
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -48,9 +58,9 @@ export function CommandPalette() {
 
   const matches = useMemo(() => {
     const q = query.trim().toLowerCase();
-    if (!q) return NAV_PAGES;
-    return NAV_PAGES.filter((p) => p.label.toLowerCase().includes(q));
-  }, [query]);
+    if (!q) return pages;
+    return pages.filter((p) => p.label.toLowerCase().includes(q));
+  }, [pages, query]);
 
   // The filtered list shrinks as the operator types; clamp rather than reset
   // so backspacing doesn't jump the selection back to the top every time.

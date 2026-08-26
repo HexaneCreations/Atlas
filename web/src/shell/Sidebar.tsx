@@ -4,6 +4,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { BrandHeader } from "./BrandHeader";
 import { Moon, Sun, X, type LucideIcon } from "lucide-react";
 import { useSystemInfo } from "../api/queries";
+import { useAuth } from "../auth/AuthContext";
 import { useTheme } from "./useTheme";
 import { NAV_PAGES } from "./pages";
 
@@ -18,6 +19,7 @@ import { NAV_PAGES } from "./pages";
  */
 const MONITOR_ITEMS = NAV_PAGES.filter((p) => p.section === "Monitor");
 const INFRASTRUCTURE_ITEMS = NAV_PAGES.filter((p) => p.section === "Infrastructure");
+const ADMIN_ITEMS = NAV_PAGES.filter((p) => p.section === "Admin");
 
 /**
  * The sidebar.
@@ -81,6 +83,7 @@ export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void 
 function SidebarBody() {
   const info = useSystemInfo();
   const { theme, toggle } = useTheme();
+  const { user } = useAuth();
 
   return (
     <>
@@ -89,6 +92,10 @@ function SidebarBody() {
       <nav className="scroll-thin flex-1 overflow-y-auto px-3 pt-4">
         <NavSection label="Monitor" items={MONITOR_ITEMS} />
         <NavSection label="Infrastructure" items={INFRASTRUCTURE_ITEMS} />
+        {/* Only a caller Atlas itself has told us can manage users sees this
+            — see CurrentUser.can_manage_users. The backend enforces the real
+            boundary independently on every /users request either way. */}
+        {user?.can_manage_users ? <NavSection label="Admin" items={ADMIN_ITEMS} /> : null}
       </nav>
 
       <div className="border-t border-border px-4 py-3">

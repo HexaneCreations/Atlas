@@ -47,6 +47,11 @@ const (
 	// it; a node-scoped grant never does, since HasPermission's node_id = $2
 	// branch cannot match an empty string against a real node id.
 	PermissionFleetWrite Permission = "fleet.write"
+	// PermissionUserManage covers the admin Users page: creating accounts,
+	// granting or revoking roles, disabling/enabling accounts, resetting
+	// passwords, and forcing logout. Checked the same fleet-wide-only way as
+	// PermissionFleetWrite — user management is not a per-node concept.
+	PermissionUserManage Permission = "user.manage"
 )
 
 // FleetWide is the sentinel passed to [GrantSpec.NodeID] to mean "every
@@ -129,6 +134,16 @@ type AuthzStore interface {
 // missing is permission, and an operator reading a 403 here should go look
 // for a missing grant, not a broken login.
 var ErrPermissionDenied = errs.New(errs.CodePermissionDenied, "you do not have permission to perform this action")
+
+// ErrLastAdminGrant is returned when revoking a role grant or disabling a
+// user would leave no enabled user holding an active fleet-wide admin
+// grant. The admin role is what makes PermissionUserManage reachable at
+// all, so removing the last one would permanently lock every operator out
+// of user management — there being no self-registration or superuser
+// escape hatch to recover from that, unlike [ErrPermissionDenied] this
+// refuses even an otherwise-valid, otherwise-authorized request.
+var ErrLastAdminGrant = errs.New(errs.CodeFailedPrecondition,
+	"this is the last user with fleet-wide admin access; grant it to someone else first")
 
 // Authorizer is the authorization policy layer: it answers whether an
 // authenticated principal may perform a permission-gated action against a
