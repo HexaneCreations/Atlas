@@ -3,6 +3,7 @@ package v1
 import (
 	"context"
 	"encoding/json"
+	"github.com/hexane/atlas/internal/core/pageauthz"
 	"net/http"
 	"strings"
 	"time"
@@ -96,7 +97,7 @@ func (h *Handler) actor(r *http.Request, op string) (string, error) {
 // ListUsers returns every user and their current active role grants.
 func (h *Handler) ListUsers(w http.ResponseWriter, r *http.Request) error {
 	const op = "v1.Handler.ListUsers"
-	if err := h.requirePermission(r, user.PermissionUserManage); err != nil {
+	if err := h.requirePermission(r, user.PermissionUserManage, pageauthz.PageUsers); err != nil {
 		return err
 	}
 	store, err := h.userAdmin(op)
@@ -139,7 +140,7 @@ type CreateUserResponse struct {
 // CreateUser creates a new user with a generated one-time password.
 func (h *Handler) CreateUser(w http.ResponseWriter, r *http.Request) error {
 	const op = "v1.Handler.CreateUser"
-	if err := h.requirePermission(r, user.PermissionUserManage); err != nil {
+	if err := h.requirePermission(r, user.PermissionUserManage, pageauthz.PageUsers); err != nil {
 		return err
 	}
 	store, err := h.userAdmin(op)
@@ -183,7 +184,7 @@ type GrantRoleRequest struct {
 // GrantRole grants a role to a user, scoped to one node or fleet-wide.
 func (h *Handler) GrantRole(w http.ResponseWriter, r *http.Request) error {
 	const op = "v1.Handler.GrantRole"
-	if err := h.requirePermission(r, user.PermissionUserManage); err != nil {
+	if err := h.requirePermission(r, user.PermissionUserManage, pageauthz.PageUsers); err != nil {
 		return err
 	}
 	store, err := h.userAdmin(op)
@@ -219,7 +220,7 @@ func (h *Handler) GrantRole(w http.ResponseWriter, r *http.Request) error {
 // remove.
 func (h *Handler) RevokeRole(w http.ResponseWriter, r *http.Request) error {
 	const op = "v1.Handler.RevokeRole"
-	if err := h.requirePermission(r, user.PermissionUserManage); err != nil {
+	if err := h.requirePermission(r, user.PermissionUserManage, pageauthz.PageUsers); err != nil {
 		return err
 	}
 	store, err := h.userAdmin(op)
@@ -245,7 +246,7 @@ func (h *Handler) RevokeRole(w http.ResponseWriter, r *http.Request) error {
 // it separately when it would leave no enabled fleet-wide admin.
 func (h *Handler) DisableUser(w http.ResponseWriter, r *http.Request) error {
 	const op = "v1.Handler.DisableUser"
-	if err := h.requirePermission(r, user.PermissionUserManage); err != nil {
+	if err := h.requirePermission(r, user.PermissionUserManage, pageauthz.PageUsers); err != nil {
 		return err
 	}
 	store, err := h.userAdmin(op)
@@ -271,7 +272,7 @@ func (h *Handler) DisableUser(w http.ResponseWriter, r *http.Request) error {
 // EnableUser reverses [Handler.DisableUser].
 func (h *Handler) EnableUser(w http.ResponseWriter, r *http.Request) error {
 	const op = "v1.Handler.EnableUser"
-	if err := h.requirePermission(r, user.PermissionUserManage); err != nil {
+	if err := h.requirePermission(r, user.PermissionUserManage, pageauthz.PageUsers); err != nil {
 		return err
 	}
 	store, err := h.userAdmin(op)
@@ -299,7 +300,7 @@ type ResetPasswordResponse struct {
 // generated one.
 func (h *Handler) ResetPassword(w http.ResponseWriter, r *http.Request) error {
 	const op = "v1.Handler.ResetPassword"
-	if err := h.requirePermission(r, user.PermissionUserManage); err != nil {
+	if err := h.requirePermission(r, user.PermissionUserManage, pageauthz.PageUsers); err != nil {
 		return err
 	}
 	store, err := h.userAdmin(op)
@@ -327,7 +328,7 @@ func (h *Handler) ResetPassword(w http.ResponseWriter, r *http.Request) error {
 // accidentally log themselves out.
 func (h *Handler) ForceLogout(w http.ResponseWriter, r *http.Request) error {
 	const op = "v1.Handler.ForceLogout"
-	if err := h.requirePermission(r, user.PermissionUserManage); err != nil {
+	if err := h.requirePermission(r, user.PermissionUserManage, pageauthz.PageUsers); err != nil {
 		return err
 	}
 	if h.deps.Sessions == nil {
@@ -371,7 +372,7 @@ type ListUserAuditResponse struct {
 // force-logout — for the admin Users page's per-user activity view.
 func (h *Handler) ListUserAudit(w http.ResponseWriter, r *http.Request) error {
 	const op = "v1.Handler.ListUserAudit"
-	if err := h.requirePermission(r, user.PermissionUserManage); err != nil {
+	if err := h.requirePermission(r, user.PermissionUserManage, pageauthz.PageUsers); err != nil {
 		return err
 	}
 	store, err := h.userAdmin(op)

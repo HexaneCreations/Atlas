@@ -2,6 +2,7 @@ package v1
 
 import (
 	"encoding/json"
+	"github.com/hexane/atlas/internal/core/pageauthz"
 	"net/http"
 	"strconv"
 	"time"
@@ -110,7 +111,7 @@ func (h *Handler) GetNotificationChannel(w http.ResponseWriter, r *http.Request)
 // CreateNotificationChannel defines a new channel.
 func (h *Handler) CreateNotificationChannel(w http.ResponseWriter, r *http.Request) error {
 	const op = "v1.Handler.CreateNotificationChannel"
-	if err := h.requirePermission(r, user.PermissionFleetWrite); err != nil {
+	if err := h.requirePermission(r, user.PermissionFleetWrite, pageauthz.PageNone); err != nil {
 		return err
 	}
 	store, err := h.notifications(op)
@@ -138,7 +139,7 @@ func (h *Handler) CreateNotificationChannel(w http.ResponseWriter, r *http.Reque
 // UpdateNotificationChannel replaces an existing channel's definition.
 func (h *Handler) UpdateNotificationChannel(w http.ResponseWriter, r *http.Request) error {
 	const op = "v1.Handler.UpdateNotificationChannel"
-	if err := h.requirePermission(r, user.PermissionFleetWrite); err != nil {
+	if err := h.requirePermission(r, user.PermissionFleetWrite, pageauthz.PageNone); err != nil {
 		return err
 	}
 	store, err := h.notifications(op)
@@ -167,7 +168,7 @@ func (h *Handler) UpdateNotificationChannel(w http.ResponseWriter, r *http.Reque
 // removed with it — see the migration's ON DELETE CASCADE.
 func (h *Handler) DeleteNotificationChannel(w http.ResponseWriter, r *http.Request) error {
 	const op = "v1.Handler.DeleteNotificationChannel"
-	if err := h.requirePermission(r, user.PermissionFleetWrite); err != nil {
+	if err := h.requirePermission(r, user.PermissionFleetWrite, pageauthz.PageNone); err != nil {
 		return err
 	}
 	store, err := h.notifications(op)

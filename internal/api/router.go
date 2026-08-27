@@ -64,6 +64,12 @@ type Deps struct {
 	Sessions  v1.SessionStore
 	Authz     v1.Authorizer
 	UserAdmin v1.UserAdmin
+	// PageAuthz and PageAdmin back the page-visibility layer — a second,
+	// independent access-control axis from Authz above (see
+	// internal/core/pageauthz). Nil disables it entirely, the same
+	// convention as Authz.
+	PageAuthz v1.PageAuthorizer
+	PageAdmin v1.PageAdmin
 	// LoginLimiter bounds POST /auth/login attempts. Nil disables
 	// throttling rather than crashing it, the same convention as the
 	// stores above.
@@ -107,6 +113,8 @@ func New(deps Deps) http.Handler {
 		Sessions:          deps.Sessions,
 		Authz:             deps.Authz,
 		UserAdmin:         deps.UserAdmin,
+		PageAuthz:         deps.PageAuthz,
+		PageAdmin:         deps.PageAdmin,
 		LoginLimiter:      deps.LoginLimiter,
 		SessionSecure:     deps.Config.Environment.IsProduction(),
 	}).Mount(mux)

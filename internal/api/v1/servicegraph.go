@@ -2,6 +2,7 @@ package v1
 
 import (
 	"context"
+	"github.com/hexane/atlas/internal/core/pageauthz"
 	"net/http"
 	"strconv"
 	"strings"
@@ -110,7 +111,7 @@ type ServiceGraphResponse struct {
 func (h *Handler) ServiceGraph(w http.ResponseWriter, r *http.Request) error {
 	const op = "v1.Handler.ServiceGraph"
 
-	scope, err := h.requireScope(r, user.PermissionNodeRead)
+	scope, err := h.requireScope(r, user.PermissionNodeRead, pageauthz.PageServices)
 	if err != nil {
 		return err
 	}
@@ -226,7 +227,7 @@ type ServiceImpactResponse struct {
 func (h *Handler) ServiceDetail(w http.ResponseWriter, r *http.Request) error {
 	const op = "v1.Handler.ServiceDetail"
 
-	scope, err := h.requireScope(r, user.PermissionNodeRead)
+	scope, err := h.requireScope(r, user.PermissionNodeRead, pageauthz.PageServices)
 	if err != nil {
 		return err
 	}
@@ -267,7 +268,7 @@ func (h *Handler) ServiceDetail(w http.ResponseWriter, r *http.Request) error {
 func (h *Handler) ServiceImpact(w http.ResponseWriter, r *http.Request) error {
 	const op = "v1.Handler.ServiceImpact"
 
-	scope, err := h.requireScope(r, user.PermissionNodeRead)
+	scope, err := h.requireScope(r, user.PermissionNodeRead, pageauthz.PageServices)
 	if err != nil {
 		return err
 	}

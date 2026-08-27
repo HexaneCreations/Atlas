@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/hexane/atlas/internal/core/inventory"
+	"github.com/hexane/atlas/internal/core/pageauthz"
 	"github.com/hexane/atlas/internal/platform/errs"
 	"github.com/hexane/atlas/internal/platform/httpx"
 	"github.com/hexane/atlas/internal/plugin/cron"
@@ -57,7 +58,7 @@ type ListProcessesResponse struct {
 
 // ListProcesses returns the heaviest processes on this host.
 func (h *Handler) ListProcesses(w http.ResponseWriter, r *http.Request) error {
-	procs, meta, err := resolveInventory(h, r, "process", inventory.SubjectProcesses, h.deps.Collection.Processes)
+	procs, meta, err := resolveInventory(h, r, "process", inventory.SubjectProcesses, pageauthz.PageProcesses, h.deps.Collection.Processes)
 	if err != nil {
 		return err
 	}
@@ -109,7 +110,7 @@ type ListServicesResponse struct {
 
 // ListServices returns every systemd unit, failed ones first.
 func (h *Handler) ListServices(w http.ResponseWriter, r *http.Request) error {
-	units, meta, err := resolveInventory(h, r, "service", inventory.SubjectServices, h.deps.Collection.Services)
+	units, meta, err := resolveInventory(h, r, "service", inventory.SubjectServices, pageauthz.PageServices, h.deps.Collection.Services)
 	if err != nil {
 		return err
 	}
@@ -161,7 +162,7 @@ type ListCronJobsResponse struct {
 
 // ListCronJobs returns every readable scheduled job.
 func (h *Handler) ListCronJobs(w http.ResponseWriter, r *http.Request) error {
-	jobs, meta, err := resolveInventory(h, r, "cron", inventory.SubjectCronJobs, h.deps.Collection.CronJobs)
+	jobs, meta, err := resolveInventory(h, r, "cron", inventory.SubjectCronJobs, pageauthz.PageCron, h.deps.Collection.CronJobs)
 	if err != nil {
 		return err
 	}
@@ -229,7 +230,7 @@ type ListPortsResponse struct {
 // ListPorts returns every listening port on this host, with certificate
 // detail for the ones found speaking TLS.
 func (h *Handler) ListPorts(w http.ResponseWriter, r *http.Request) error {
-	listeners, meta, err := resolveInventory(h, r, "ports", inventory.SubjectPorts, h.deps.Collection.Ports)
+	listeners, meta, err := resolveInventory(h, r, "ports", inventory.SubjectPorts, pageauthz.PagePorts, h.deps.Collection.Ports)
 	if err != nil {
 		return err
 	}
@@ -283,7 +284,7 @@ type ListMountsResponse struct {
 
 // ListMounts returns every mounted filesystem worth reporting on this host.
 func (h *Handler) ListMounts(w http.ResponseWriter, r *http.Request) error {
-	mounts, meta, err := resolveInventory(h, r, "system", inventory.SubjectMounts, h.deps.Collection.Mounts)
+	mounts, meta, err := resolveInventory(h, r, "system", inventory.SubjectMounts, pageauthz.PageDisks, h.deps.Collection.Mounts)
 	if err != nil {
 		return err
 	}

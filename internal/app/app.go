@@ -145,6 +145,8 @@ func New(cfg *config.Config, logger *slog.Logger) (*App, error) {
 		Sessions:          lazyUserStore{pool: pool},
 		Authz:             lazyAuthorizer{pool: pool},
 		UserAdmin:         lazyUserStore{pool: pool},
+		PageAuthz:         lazyPageAuthorizer{pool: pool},
+		PageAdmin:         lazyPageAdmin{pool: pool},
 		LoginLimiter:      coreuser.NewLoginLimiter(),
 		Logger:            logger,
 	})

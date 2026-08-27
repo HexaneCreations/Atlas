@@ -19,16 +19,26 @@ import (
 	"testing"
 	"time"
 
+	corepageauthz "github.com/hexane/atlas/internal/core/pageauthz"
 	coreuser "github.com/hexane/atlas/internal/core/user"
 	"github.com/hexane/atlas/internal/platform/id"
+	storagepageauthz "github.com/hexane/atlas/internal/storage/pageauthz"
 	storageuser "github.com/hexane/atlas/internal/storage/user"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // scopedTestClient is [authenticatedTestClient] with control over the
-// grant's scope — fleet-wide, one specific node, or (grantRole == "") no
-// grant at all — which the fleet-wide-only helper in app_integration_test.go
-// cannot express.
+// node.read grant's scope — fleet-wide, one specific node, or
+// (grantRole == "") no grant at all — which the fleet-wide-only helper in
+// app_integration_test.go cannot express.
+//
+// Every caller here is testing ListNodes/GetNode's node.read-based
+// filtering specifically, not the separate page-visibility layer (see
+// internal/core/pageauthz) — so this always grants fleet-wide access to the
+// Nodes page itself, including for the deliberately-no-node.read-grant
+// case, so a 403 in these tests always means what it's meant to mean:
+// node.read's own filtering, not an unrelated page-access denial masking
+// it.
 func scopedTestClient(t *testing.T, base, grantRole, nodeID string, fleetWide bool) *http.Client {
 	t.Helper()
 
@@ -66,6 +76,12 @@ func scopedTestClient(t *testing.T, base, grantRole, nodeID string, fleetWide bo
 		if err := repo.Grant(context.Background(), grant, time.Now()); err != nil {
 			t.Fatalf("Grant: %v", err)
 		}
+	}
+
+	pageRepo := storagepageauthz.NewRepository(pool)
+	pageSpec := corepageauthz.PageGrantSpec{UserID: u.ID, Page: corepageauthz.PageNodes, FleetWide: true, GrantedBy: "integration-test"}
+	if err := pageRepo.GrantPageAccess(context.Background(), pageSpec, time.Now()); err != nil {
+		t.Fatalf("GrantPageAccess(nodes): %v", err)
 	}
 
 	jar, err := cookiejar.New(nil)

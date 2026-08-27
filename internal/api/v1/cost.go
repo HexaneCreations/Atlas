@@ -1,6 +1,7 @@
 package v1
 
 import (
+	"github.com/hexane/atlas/internal/core/pageauthz"
 	"net/http"
 	"time"
 
@@ -74,7 +75,7 @@ func (h *Handler) CostEstimate(w http.ResponseWriter, r *http.Request) error {
 		return errs.New(errs.CodeUnavailable, "cost analysis is not configured").WithOp("v1.Handler.CostEstimate")
 	}
 
-	nodeID, err := h.requireNode(r, user.PermissionNodeRead)
+	nodeID, err := h.requireNode(r, user.PermissionNodeRead, pageauthz.PageNone)
 	if err != nil {
 		return err
 	}

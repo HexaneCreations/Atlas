@@ -9,6 +9,7 @@ import (
 
 	"github.com/hexane/atlas/internal/api/session"
 	"github.com/hexane/atlas/internal/core/inventory"
+	"github.com/hexane/atlas/internal/core/pageauthz"
 	"github.com/hexane/atlas/internal/core/user"
 	"github.com/hexane/atlas/internal/platform/errs"
 	"github.com/hexane/atlas/internal/platform/httpx"
@@ -47,6 +48,15 @@ type Authorizer interface {
 	// see [Handler.ListNodes], which filters a result set rather than
 	// gating one pass/fail check.
 	AuthorizedNodes(ctx context.Context, principal user.Principal, permission user.Permission) (fleetWide bool, nodeIDs map[string]bool, err error)
+}
+
+// PageAuthorizer is the page-visibility policy layer — a second,
+// independent axis from Authorizer above (node.read/node.logs.read/
+// fleet.write/user.manage). Checked alongside, never instead of, the
+// existing per-operation Authorizer check: see internal/core/pageauthz's
+// doc. Satisfied by [pageauthz.Authorizer].
+type PageAuthorizer interface {
+	Require(ctx context.Context, userID string, page pageauthz.Page, nodeID string) error
 }
 
 // LoginLimiter bounds POST /auth/login attempts. Satisfied by
@@ -186,7 +196,13 @@ func (h *Handler) CurrentUser(w http.ResponseWriter, r *http.Request) error {
 // than each handler implementing its own authentication and authorization
 // check. See docs/adr/0011-deferred-rbac.md sec 2 and 4: authorization is a
 // policy layer called from handlers, and permissions bind per node.
-func (h *Handler) requireScope(r *http.Request, permission user.Permission) (inventory.Scope, error) {
+// page names which frontend page r's route belongs to, for the second,
+// independent page-visibility check layered on top of the operation-level
+// one — see [pageauthz]. Pass [pageauthz.PageNone] for a route that maps to
+// no dedicated page yet (capacity/summary, cost/estimate, signals,
+// health/score): it skips the page-access check entirely, the same way a
+// nil h.deps.PageAuthz does, rather than a page a caller forgot to name.
+func (h *Handler) requireScope(r *http.Request, permission user.Permission, page pageauthz.Page) (inventory.Scope, error) {
 	const op = "v1.Handler.requireScope"
 
 	scope := h.scopeFrom(r)
@@ -203,16 +219,22 @@ func (h *Handler) requireScope(r *http.Request, permission user.Permission) (inv
 	if !ok {
 		return inventory.Scope{}, errs.New(errs.CodeUnauthenticated, "authentication required").WithOp(op)
 	}
-	if err := h.deps.Authz.Require(r.Context(), principal, permission, h.resolvedNode(scope)); err != nil {
+	nodeID := h.resolvedNode(scope)
+	if err := h.deps.Authz.Require(r.Context(), principal, permission, nodeID); err != nil {
 		return inventory.Scope{}, err
+	}
+	if page != pageauthz.PageNone && h.deps.PageAuthz != nil {
+		if err := h.deps.PageAuthz.Require(r.Context(), principal.UserID, page, nodeID); err != nil {
+			return inventory.Scope{}, err
+		}
 	}
 	return scope, nil
 }
 
 // requireNode is [Handler.requireScope] for the handlers that only need the
 // resolved node id, not the full scope.
-func (h *Handler) requireNode(r *http.Request, permission user.Permission) (string, error) {
-	scope, err := h.requireScope(r, permission)
+func (h *Handler) requireNode(r *http.Request, permission user.Permission, page pageauthz.Page) (string, error) {
+	scope, err := h.requireScope(r, permission, page)
 	if err != nil {
 		return "", err
 	}
@@ -221,10 +243,10 @@ func (h *Handler) requireNode(r *http.Request, permission user.Permission) (stri
 
 // requirePermission is [Handler.requireScope] for the handlers that gate a
 // privileged write with no node dimension at all — alert rules, SLO
-// definitions, notification channels. See [user.PermissionFleetWrite]: an
-// empty node id means only a fleet-wide grant can satisfy the check, never
-// a grant scoped to one node.
-func (h *Handler) requirePermission(r *http.Request, permission user.Permission) error {
+// definitions, notification channels, user management. See
+// [user.PermissionFleetWrite]: an empty node id means only a fleet-wide
+// grant can satisfy the check, never a grant scoped to one node.
+func (h *Handler) requirePermission(r *http.Request, permission user.Permission, page pageauthz.Page) error {
 	const op = "v1.Handler.requirePermission"
 
 	if h.deps.Authz == nil {
@@ -237,5 +259,13 @@ func (h *Handler) requirePermission(r *http.Request, permission user.Permission)
 	if !ok {
 		return errs.New(errs.CodeUnauthenticated, "authentication required").WithOp(op)
 	}
-	return h.deps.Authz.Require(r.Context(), principal, permission, "")
+	if err := h.deps.Authz.Require(r.Context(), principal, permission, ""); err != nil {
+		return err
+	}
+	if page != pageauthz.PageNone && h.deps.PageAuthz != nil {
+		if err := h.deps.PageAuthz.Require(r.Context(), principal.UserID, page, ""); err != nil {
+			return err
+		}
+	}
+	return nil
 }

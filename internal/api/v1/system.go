@@ -132,6 +132,15 @@ type Deps struct {
 	// the per-user audit trail. Nil disables those endpoints rather than
 	// crashing them, the same convention as the other stores above.
 	UserAdmin UserAdmin
+	// PageAuthz backs the page-visibility layer — see internal/core/pageauthz
+	// and [Handler.requireScope]'s page parameter. Nil disables it entirely,
+	// leaving every route exactly as permissive as before this layer
+	// existed, the same convention as Authz above.
+	PageAuthz PageAuthorizer
+	// PageAdmin backs the admin Users page's RoleAccess/UserAccess
+	// management surface. Nil disables those endpoints rather than crashing
+	// them, the same convention as UserAdmin.
+	PageAdmin PageAdmin
 	// SessionSecure sets the session cookie's Secure attribute. Must be true
 	// whenever Atlas is reachable over anything but plain-HTTP loopback.
 	SessionSecure bool
@@ -278,6 +287,13 @@ func (h *Handler) Mount(mux *http.ServeMux) {
 	mux.Handle("POST "+Prefix+"/users/{userID}/reset-password", httpx.Handler(h.ResetPassword))
 	mux.Handle("POST "+Prefix+"/users/{userID}/force-logout", httpx.Handler(h.ForceLogout))
 	mux.Handle("GET "+Prefix+"/users/{userID}/audit", httpx.Handler(h.ListUserAudit))
+
+	mux.Handle("GET "+Prefix+"/role-access", httpx.Handler(h.ListRoleAccessDefinitions))
+	mux.Handle("GET "+Prefix+"/users/{userID}/page-access", httpx.Handler(h.ListUserPageAccess))
+	mux.Handle("POST "+Prefix+"/users/{userID}/role-access", httpx.Handler(h.AssignRoleAccess))
+	mux.Handle("DELETE "+Prefix+"/users/{userID}/role-access/{assignmentID}", httpx.Handler(h.RevokeRoleAccessAssignment))
+	mux.Handle("POST "+Prefix+"/users/{userID}/page-access", httpx.Handler(h.GrantPageAccess))
+	mux.Handle("DELETE "+Prefix+"/users/{userID}/page-access/{grantID}", httpx.Handler(h.RevokePageAccess))
 
 	mux.Handle("GET "+Prefix+"/nodes", httpx.Handler(h.ListNodes))
 	mux.Handle("GET "+Prefix+"/nodes/{nodeID}", httpx.Handler(h.GetNode))

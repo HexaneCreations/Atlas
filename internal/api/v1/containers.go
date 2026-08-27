@@ -2,6 +2,7 @@ package v1
 
 import (
 	"context"
+	"github.com/hexane/atlas/internal/core/pageauthz"
 	"net/http"
 	"net/url"
 	"slices"
@@ -179,7 +180,7 @@ type ListContainersResponse struct {
 // so a remote container list gets the same freshness disclosure and the same
 // three-way not_found/unavailable/not_implemented distinction as the rest.
 func (h *Handler) ListContainers(w http.ResponseWriter, r *http.Request) error {
-	scope, err := h.requireScope(r, user.PermissionNodeRead)
+	scope, err := h.requireScope(r, user.PermissionNodeRead, pageauthz.PageContainers)
 	if err != nil {
 		return err
 	}
@@ -228,7 +229,7 @@ func (h *Handler) ListContainers(w http.ResponseWriter, r *http.Request) error {
 func (h *Handler) GetContainer(w http.ResponseWriter, r *http.Request) error {
 	const op = "v1.Handler.GetContainer"
 
-	scope, err := h.requireScope(r, user.PermissionNodeRead)
+	scope, err := h.requireScope(r, user.PermissionNodeRead, pageauthz.PageContainers)
 	if err != nil {
 		return err
 	}
@@ -358,7 +359,7 @@ func (h *Handler) ContainerLogs(w http.ResponseWriter, r *http.Request) error {
 	// container log content as uniquely sensitive — the single most
 	// sensitive thing the API serves — so it is gated separately from the
 	// rest of a node's inventory.
-	scope, err := h.requireScope(r, user.PermissionNodeLogsRead)
+	scope, err := h.requireScope(r, user.PermissionNodeLogsRead, pageauthz.PageContainers)
 	if err != nil {
 		return err
 	}
@@ -467,7 +468,7 @@ func (h *Handler) ContainerLogsFollow(w http.ResponseWriter, r *http.Request) er
 	// Authorization header for a fallback check to use — the session cookie
 	// [session.AuthMiddleware] resolves ahead of this handler is the only
 	// mechanism available to it.
-	scope, err := h.requireScope(r, user.PermissionNodeLogsRead)
+	scope, err := h.requireScope(r, user.PermissionNodeLogsRead, pageauthz.PageContainers)
 	if err != nil {
 		return err
 	}

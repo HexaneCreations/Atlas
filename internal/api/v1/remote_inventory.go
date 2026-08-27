@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/hexane/atlas/internal/core/inventory"
+	"github.com/hexane/atlas/internal/core/pageauthz"
 	"github.com/hexane/atlas/internal/core/user"
 	"github.com/hexane/atlas/internal/platform/errs"
 )
@@ -25,9 +26,12 @@ import (
 // (ListProcesses, ListServices, ListCronJobs, ListPorts, ListMounts): all
 // five call through here, so gating node.read once here covers all five
 // rather than five separate checks — the same reasoning that put the scope
-// seam itself in one place.
+// seam itself in one place. page names which of those five pages this
+// particular call is for, so the second, page-visibility check (see
+// [Handler.requireScope]) narrows correctly per caller rather than treating
+// all five as one.
 func resolveInventory[T any](
-	h *Handler, r *http.Request, pluginID string, subject inventory.Subject,
+	h *Handler, r *http.Request, pluginID string, subject inventory.Subject, page pageauthz.Page,
 	local func(ctx context.Context, scope inventory.Scope) (T, error),
 ) (T, inventory.Meta, error) {
 	const op = "v1.resolveInventory"
@@ -37,7 +41,7 @@ func resolveInventory[T any](
 		return zero, inventory.Meta{}, errs.New(errs.CodeUnavailable, "collection is not configured").WithOp(op)
 	}
 
-	scope, err := h.requireScope(r, user.PermissionNodeRead)
+	scope, err := h.requireScope(r, user.PermissionNodeRead, page)
 	if err != nil {
 		return zero, inventory.Meta{}, err
 	}

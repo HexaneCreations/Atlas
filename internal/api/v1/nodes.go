@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/hexane/atlas/internal/api/session"
+	"github.com/hexane/atlas/internal/core/pageauthz"
 	"github.com/hexane/atlas/internal/core/user"
 	"github.com/hexane/atlas/internal/platform/errs"
 	"github.com/hexane/atlas/internal/platform/httpx"
@@ -73,6 +74,17 @@ func (h *Handler) ListNodes(w http.ResponseWriter, r *http.Request) error {
 		if !ok {
 			return errs.New(errs.CodeUnauthenticated, "authentication required").WithOp(op)
 		}
+		// Nodes is a fleet-only page (see pageauthz.FleetOnlyPages): there is
+		// no per-node grant to filter by, so this is one pass/fail check —
+		// can this caller reach the Nodes page at all — before the existing
+		// node.read filtering below narrows which nodes they see within it.
+		// A denial here is a 403, not an empty list: an empty list would be
+		// indistinguishable from "no node.read grants", a different fact.
+		if h.deps.PageAuthz != nil {
+			if err := h.deps.PageAuthz.Require(r.Context(), principal.UserID, pageauthz.PageNodes, ""); err != nil {
+				return err
+			}
+		}
 		fleetWide, allowed, err := h.deps.Authz.AuthorizedNodes(r.Context(), principal, user.PermissionNodeRead)
 		if err != nil {
 			return err
@@ -123,6 +135,11 @@ func (h *Handler) GetNode(w http.ResponseWriter, r *http.Request) error {
 		}
 		if err := h.deps.Authz.Require(r.Context(), principal, user.PermissionNodeRead, nodeID); err != nil {
 			return err
+		}
+		if h.deps.PageAuthz != nil {
+			if err := h.deps.PageAuthz.Require(r.Context(), principal.UserID, pageauthz.PageNodes, ""); err != nil {
+				return err
+			}
 		}
 	}
 

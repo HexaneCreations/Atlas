@@ -78,6 +78,10 @@ func run() error {
 		return grantCommand(configPath, flags.Args()[1:])
 	case "user":
 		return userCommand(configPath, flags.Args()[1:])
+	case "page-access":
+		return pageAccessCommand(configPath, flags.Args()[1:])
+	case "role-access":
+		return roleAccessCommand(configPath, flags.Args()[1:])
 	case "version":
 		fmt.Println(build.Current())
 		return nil

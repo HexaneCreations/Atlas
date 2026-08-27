@@ -22,10 +22,12 @@ import (
 	"time"
 
 	"github.com/hexane/atlas/internal/app"
+	corepageauthz "github.com/hexane/atlas/internal/core/pageauthz"
 	coreuser "github.com/hexane/atlas/internal/core/user"
 	"github.com/hexane/atlas/internal/platform/config"
 	"github.com/hexane/atlas/internal/platform/id"
 	"github.com/hexane/atlas/internal/platform/log"
+	storagepageauthz "github.com/hexane/atlas/internal/storage/pageauthz"
 	storageuser "github.com/hexane/atlas/internal/storage/user"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -120,10 +122,11 @@ func waitUntilReady(t *testing.T, base string) {
 }
 
 // authenticatedTestClient creates a human user with a fleet-wide grant of
-// role, logs in over the real HTTP auth endpoints, and returns an
-// *http.Client whose cookie jar carries the resulting session — the same
-// path a browser follows, exercised for real rather than by injecting a
-// principal directly.
+// role, ALSO grants fleet-wide UserAccess to every known page (see below),
+// logs in over the real HTTP auth endpoints, and returns an *http.Client
+// whose cookie jar carries the resulting session — the same path a browser
+// follows, exercised for real rather than by injecting a principal
+// directly.
 //
 // Node-scoped endpoints (health/score, cost/estimate, capacity/summary,
 // signals, containers, and the rest reachable through
@@ -132,6 +135,15 @@ func waitUntilReady(t *testing.T, base string) {
 // http.Get/http.DefaultClient the pre-authentication tests used. See
 // docs/adr/0011-deferred-rbac.md and internal/core/user — this is a
 // completely separate identity domain from an Agent's own libp2p Peer ID.
+//
+// The blanket page-access grant exists so this general-purpose "fully
+// authorized" fixture keeps meaning that on both axes now that
+// internal/core/pageauthz's page-visibility layer is wired live into the
+// composition root this package's tests boot against — this client
+// represents an operator provisioned for everything, the same way its
+// fleet-wide role grant already does for the operation-level axis. A test
+// that specifically means to prove page-level restriction builds its own
+// narrower client instead — see internal/app/pageauthz_integration_test.go.
 func authenticatedTestClient(t *testing.T, base, role string) *http.Client {
 	t.Helper()
 
@@ -167,6 +179,14 @@ func authenticatedTestClient(t *testing.T, base, role string) *http.Client {
 	grant := coreuser.GrantSpec{UserID: u.ID, FleetWide: true, Role: role, GrantedBy: "integration-test"}
 	if err := repo.Grant(context.Background(), grant, time.Now()); err != nil {
 		t.Fatalf("Grant: %v", err)
+	}
+
+	pageRepo := storagepageauthz.NewRepository(pool)
+	for page := range corepageauthz.KnownPages {
+		spec := corepageauthz.PageGrantSpec{UserID: u.ID, Page: page, FleetWide: true, GrantedBy: "integration-test"}
+		if err := pageRepo.GrantPageAccess(context.Background(), spec, time.Now()); err != nil {
+			t.Fatalf("GrantPageAccess(%s): %v", page, err)
+		}
 	}
 
 	jar, err := cookiejar.New(nil)

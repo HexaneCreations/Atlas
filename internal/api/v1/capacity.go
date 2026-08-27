@@ -1,6 +1,7 @@
 package v1
 
 import (
+	"github.com/hexane/atlas/internal/core/pageauthz"
 	"net/http"
 	"time"
 
@@ -50,7 +51,7 @@ func (h *Handler) CapacitySummary(w http.ResponseWriter, r *http.Request) error 
 		return errs.New(errs.CodeUnavailable, "capacity planning is not configured").WithOp("v1.Handler.CapacitySummary")
 	}
 
-	nodeID, err := h.requireNode(r, user.PermissionNodeRead)
+	nodeID, err := h.requireNode(r, user.PermissionNodeRead, pageauthz.PageNone)
 	if err != nil {
 		return err
 	}
