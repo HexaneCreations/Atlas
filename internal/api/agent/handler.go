@@ -52,6 +52,12 @@ type ClockSkewRecorder interface {
 	UpdateClockSkew(ctx context.Context, nodeID string, skewSeconds float64) error
 }
 
+// PublicIPRecorder records the source address a node's connection was
+// observed arriving from. Satisfied by [*metric.Repository].
+type PublicIPRecorder interface {
+	UpdatePublicIP(ctx context.Context, nodeID, ip string) error
+}
+
 // Deps are the collaborators the agent handlers need.
 type Deps struct {
 	CA           *pki.CA
@@ -59,6 +65,7 @@ type Deps struct {
 	Denylist     fleet.DenylistStore
 	Router       *transport.Router
 	ClockSkew    ClockSkewRecorder
+	PublicIP     PublicIPRecorder
 	Logger       *slog.Logger
 	MaxClockSkew time.Duration
 }
@@ -128,6 +135,21 @@ func (h *Handler) Enroll(w http.ResponseWriter, r *http.Request) error {
 	}
 
 	h.deps.Logger.InfoContext(r.Context(), "node enrolled", slog.String("node_id", req.NodeID))
+
+	// Capture the enrolling agent's source address. This is a no-op until the
+	// node's first telemetry batch has created its row, and it is not
+	// refreshed again on this path until the next (re-)enrollment — an
+	// accepted limitation of the HTTPS path, unlike the libp2p listener's
+	// per-connection capture.
+	if h.deps.PublicIP != nil {
+		if ip := sourceIP(r); ip != nil {
+			if err := h.deps.PublicIP.UpdatePublicIP(r.Context(), req.NodeID, ip.String()); err != nil {
+				h.deps.Logger.WarnContext(r.Context(), "could not record enrollment source ip",
+					slog.String("node_id", req.NodeID), slog.String("error", err.Error()))
+			}
+		}
+	}
+
 	httpx.JSON(w, r, http.StatusOK, CertResponse{
 		Certificate:     base64.StdEncoding.EncodeToString(leaf.Raw),
 		CACertificate:   base64.StdEncoding.EncodeToString(h.deps.CA.Cert().Raw),

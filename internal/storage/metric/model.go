@@ -39,6 +39,22 @@ type Node struct {
 	// ClockSkewSeconds is agent send time minus control-plane receive time
 	// from the most recent push. Nil until an agent has pushed at least once.
 	ClockSkewSeconds *float64 `json:"clock_skew_seconds,omitempty"`
+
+	// PublicIP is the source address the control plane observed this node's
+	// most recent connection arriving from — server-observed, not
+	// agent-reported. Empty until an agent has connected over a path that
+	// captures it (libp2p, or HTTPS enrollment once the node row exists).
+	PublicIP string `json:"public_ip,omitempty"`
+}
+
+// NodeAddress is one address bound to one of a node's network interfaces, as
+// the host reports it for itself. Promoted out of the "network" inventory
+// snapshot so it is queryable without decoding JSON.
+type NodeAddress struct {
+	Interface string `json:"interface"`
+	// Address is CIDR form ("10.0.0.4/24"), as the agent reports it.
+	Address    string    `json:"address"`
+	ObservedAt time.Time `json:"observed_at"`
 }
 
 // UptimeSeconds returns how long the node has been up, or zero if boot time is

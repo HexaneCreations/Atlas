@@ -40,6 +40,15 @@ type NodeResponse struct {
 	SecondsSinceSeen float64 `json:"seconds_since_seen"`
 	// ClockSkewSeconds is absent until an agent has pushed at least once.
 	ClockSkewSeconds *float64 `json:"clock_skew_seconds,omitempty"`
+
+	// PublicIP is the source address the control plane observed this node's
+	// most recent connection from — server-observed, not agent-reported.
+	// Empty until a connection over a path that captures it.
+	PublicIP string `json:"public_ip,omitempty"`
+	// Addresses is the node's own per-interface addressing, promoted from the
+	// "network" inventory snapshot. Populated only on the single-node
+	// endpoint, not the list.
+	Addresses []metric.NodeAddress `json:"addresses,omitempty"`
 }
 
 // ListNodesResponse is the node collection.
@@ -148,7 +157,14 @@ func (h *Handler) GetNode(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 
-	httpx.JSON(w, r, http.StatusOK, h.presentNode(node, time.Now()))
+	resp := h.presentNode(node, time.Now())
+	addrs, err := repo.ListNodeAddresses(r.Context(), nodeID)
+	if err != nil {
+		return err
+	}
+	resp.Addresses = addrs
+
+	httpx.JSON(w, r, http.StatusOK, resp)
 	return nil
 }
 
@@ -170,6 +186,7 @@ func (h *Handler) presentNode(n metric.Node, now time.Time) NodeResponse {
 		LastSeenAt:       n.LastSeenAt,
 		SecondsSinceSeen: now.Sub(n.LastSeenAt).Seconds(),
 		ClockSkewSeconds: n.ClockSkewSeconds,
+		PublicIP:         n.PublicIP,
 	}
 }
 

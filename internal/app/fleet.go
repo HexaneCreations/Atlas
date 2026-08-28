@@ -25,6 +25,7 @@ import (
 	storageinventory "github.com/hexane/atlas/internal/storage/inventory"
 	"github.com/hexane/atlas/internal/storage/metric"
 	"github.com/libp2p/go-libp2p/core/host"
+	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 )
 
@@ -62,8 +63,13 @@ type fleetPipeline struct {
 	// grants is the CP-side AgentOps authorization check — see ContainerLogs.
 	// Set once at Start.
 	grants corefleet.GrantStore
-	stopCh chan struct{}
-	wg     sync.WaitGroup
+	// fleetRepo and metricRepo are held for the libp2p Connected notifiee
+	// (observePeerPublicIP), which runs outside a request and so has no
+	// handler to carry them. Set once at Start.
+	fleetRepo  *storagefleet.Repository
+	metricRepo *metric.Repository
+	stopCh     chan struct{}
+	wg         sync.WaitGroup
 }
 
 func newFleetPipeline(cfg *config.Config, logger *slog.Logger, pool *postgres.Pool, collection *collectionPipeline,
@@ -101,7 +107,7 @@ func (f *fleetPipeline) Start(ctx context.Context) error {
 	if err := router.Register(metric.NewSink(metricRepo, f.logger)); err != nil {
 		return err
 	}
-	if err := router.Register(storageinventory.NewReceiver(invRepo)); err != nil {
+	if err := router.Register(storageinventory.NewReceiver(invRepo, snapshotPromoter{repo: metricRepo})); err != nil {
 		return err
 	}
 	if err := router.Register(storageeventstore.NewReceiver(eventStore)); err != nil {
@@ -110,7 +116,7 @@ func (f *fleetPipeline) Start(ctx context.Context) error {
 
 	handler := agentapi.NewHandler(agentapi.Deps{
 		CA: ca, Enroller: enroller, Denylist: fleetRepo, Router: router,
-		ClockSkew: metricRepo, Logger: f.logger,
+		ClockSkew: metricRepo, PublicIP: metricRepo, Logger: f.logger,
 	})
 	mux := http.NewServeMux()
 	handler.Mount(mux)
@@ -128,6 +134,8 @@ func (f *fleetPipeline) Start(ctx context.Context) error {
 	f.stopCh = make(chan struct{})
 	f.peerByNode = make(map[string]peer.ID)
 	f.grants = fleetRepo
+	f.fleetRepo = fleetRepo
+	f.metricRepo = metricRepo
 	f.mu.Unlock()
 
 	// libp2p is a second listener for the same mux — see
@@ -144,6 +152,18 @@ func (f *fleetPipeline) Start(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+
+		// Capture the server-observed source address of each agent
+		// connection into nodes.public_ip. c.RemoteMultiaddr() is the real
+		// address the Noise handshake authenticated, not anything the agent
+		// asserts; the write is dispatched off the notifiee goroutine so a
+		// slow database never stalls libp2p's event loop.
+		p2pHost.Network().Notify(&network.NotifyBundle{
+			ConnectedF: func(_ network.Network, c network.Conn) {
+				go f.observePeerPublicIP(c.RemotePeer(), c.RemoteMultiaddr())
+			},
+		})
+
 		listener, err := libp2ptransport.Listen(p2pHost)
 		if err != nil {
 			_ = p2pHost.Close()

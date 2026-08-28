@@ -35,7 +35,7 @@ const testDatabaseURLEnv = "ATLAS_TEST_DATABASE_URL"
 
 // newRepository gives each test its own database so they stay independent and
 // can run in parallel.
-func newRepository(t *testing.T) *metric.Repository {
+func newRepository(t *testing.T) (*metric.Repository, *pgxpool.Pool) {
 	t.Helper()
 
 	dsn := os.Getenv(testDatabaseURLEnv)
@@ -91,7 +91,7 @@ func newRepository(t *testing.T) *metric.Repository {
 		t.Fatalf("apply migrations: %v", err)
 	}
 
-	return metric.NewRepository(pool.DB())
+	return metric.NewRepository(pool.DB()), pool.DB()
 }
 
 // insertBatch unwraps a test envelope's metrics payload and writes it. These
@@ -125,7 +125,7 @@ func envelope(nodeID, collectorID, metricName string, at time.Time, values ...fl
 }
 
 func TestInsertBatchPersistsAndQueryReturnsSamples(t *testing.T) {
-	repo := newRepository(t)
+	repo, _ := newRepository(t)
 	ctx := context.Background()
 	now := time.Now().UTC().Truncate(time.Second)
 
@@ -160,7 +160,7 @@ func TestInsertBatchPersistsAndQueryReturnsSamples(t *testing.T) {
 // A node row is created on first sample, before the host collector has run.
 // Facts are therefore nullable and liveness is derived from last_seen_at.
 func TestInsertBatchRegistersNodeAndDerivesLiveness(t *testing.T) {
-	repo := newRepository(t)
+	repo, _ := newRepository(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
 
@@ -185,7 +185,7 @@ func TestInsertBatchRegistersNodeAndDerivesLiveness(t *testing.T) {
 }
 
 func TestQueryScopesToNodeAndMetric(t *testing.T) {
-	repo := newRepository(t)
+	repo, _ := newRepository(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
 
@@ -223,7 +223,7 @@ func TestQueryScopesToNodeAndMetric(t *testing.T) {
 // Labels distinguish series that share a metric name. Collapsing them would
 // merge every network interface into one line.
 func TestQuerySeparatesSeriesByLabels(t *testing.T) {
-	repo := newRepository(t)
+	repo, _ := newRepository(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
 
@@ -269,7 +269,7 @@ func TestQuerySeparatesSeriesByLabels(t *testing.T) {
 // every stat tile reads, and a value older than the window must not be
 // returned as current.
 func TestLatestRespectsWindow(t *testing.T) {
-	repo := newRepository(t)
+	repo, _ := newRepository(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
 
@@ -304,7 +304,7 @@ func TestLatestRespectsWindow(t *testing.T) {
 }
 
 func TestUpdateNodeFactsPopulatesInventory(t *testing.T) {
-	repo := newRepository(t)
+	repo, _ := newRepository(t)
 	ctx := context.Background()
 
 	if err := insertBatch(t, repo, ctx, envelope("node-e", "system.cpu", "system.cpu.usage", time.Now().UTC(), 1)); err != nil {
@@ -329,7 +329,7 @@ func TestUpdateNodeFactsPopulatesInventory(t *testing.T) {
 }
 
 func TestListMetricNamesReturnsWhatTheNodeReported(t *testing.T) {
-	repo := newRepository(t)
+	repo, _ := newRepository(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
 
@@ -351,7 +351,7 @@ func TestListMetricNamesReturnsWhatTheNodeReported(t *testing.T) {
 // An empty batch must not create a node row or fail. Collectors legitimately
 // produce nothing — a host with no Docker, a probe cycle that found no certs.
 func TestInsertBatchToleratesEmptySampleSet(t *testing.T) {
-	repo := newRepository(t)
+	repo, _ := newRepository(t)
 	ctx := context.Background()
 
 	env := transport.Envelope{
@@ -367,7 +367,7 @@ func TestInsertBatchToleratesEmptySampleSet(t *testing.T) {
 // this is the idempotency guarantee readiness review C2 requires for
 // at-least-once delivery over a network.
 func TestInsertBatchIsIdempotentOnEnvelopeID(t *testing.T) {
-	repo := newRepository(t)
+	repo, _ := newRepository(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
 
@@ -401,7 +401,7 @@ func TestInsertBatchIsIdempotentOnEnvelopeID(t *testing.T) {
 // A different envelope carrying the same collector must still write —
 // idempotency is keyed on envelope ID, not on collector or node.
 func TestInsertBatchWithDifferentEnvelopeIDsBothWrite(t *testing.T) {
-	repo := newRepository(t)
+	repo, _ := newRepository(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
 
@@ -432,7 +432,7 @@ func TestInsertBatchWithDifferentEnvelopeIDsBothWrite(t *testing.T) {
 }
 
 func TestUpdateClockSkewRoundTrips(t *testing.T) {
-	repo := newRepository(t)
+	repo, _ := newRepository(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
 
@@ -464,7 +464,7 @@ func TestUpdateClockSkewRoundTrips(t *testing.T) {
 // TestLatestForMetricSpansNodes is the read path the alert rule engine
 // depends on: one query, every node's latest value, no per-node round trip.
 func TestLatestForMetricSpansNodes(t *testing.T) {
-	repo := newRepository(t)
+	repo, _ := newRepository(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
 
@@ -492,5 +492,135 @@ func TestLatestForMetricSpansNodes(t *testing.T) {
 	}
 	if byNode["node-a"] != 42 || byNode["node-b"] != 95 {
 		t.Fatalf("unexpected values: %+v", byNode)
+	}
+}
+
+func TestUpdatePublicIPRoundTrips(t *testing.T) {
+	repo, _ := newRepository(t)
+	ctx := context.Background()
+
+	if err := insertBatch(t, repo, ctx, envelope("node-pip", "system.cpu", "system.cpu.usage", time.Now().UTC(), 1)); err != nil {
+		t.Fatalf("InsertBatch: %v", err)
+	}
+
+	node, err := repo.GetNode(ctx, "node-pip")
+	if err != nil {
+		t.Fatalf("GetNode: %v", err)
+	}
+	if node.PublicIP != "" {
+		t.Errorf("PublicIP = %q before any observation, want empty", node.PublicIP)
+	}
+
+	if err := repo.UpdatePublicIP(ctx, "node-pip", ""); err != nil {
+		t.Fatalf("UpdatePublicIP with blank ip: %v", err)
+	}
+
+	if err := repo.UpdatePublicIP(ctx, "node-pip", "203.0.113.7"); err != nil {
+		t.Fatalf("UpdatePublicIP: %v", err)
+	}
+	node, err = repo.GetNode(ctx, "node-pip")
+	if err != nil {
+		t.Fatalf("GetNode: %v", err)
+	}
+	if node.PublicIP != "203.0.113.7" {
+		t.Errorf("PublicIP = %q, want 203.0.113.7", node.PublicIP)
+	}
+
+	// Overwritten, not accumulated — same convention as last_seen_at.
+	if err := repo.UpdatePublicIP(ctx, "node-pip", "198.51.100.42"); err != nil {
+		t.Fatalf("UpdatePublicIP second: %v", err)
+	}
+	node, _ = repo.GetNode(ctx, "node-pip")
+	if node.PublicIP != "198.51.100.42" {
+		t.Errorf("PublicIP = %q after second observation, want 198.51.100.42", node.PublicIP)
+	}
+}
+
+func TestReplaceNodeAddressesReplacesWholesale(t *testing.T) {
+	repo, _ := newRepository(t)
+	ctx := context.Background()
+	observed := time.Now().UTC().Truncate(time.Second)
+
+	if err := insertBatch(t, repo, ctx, envelope("node-addr", "system.cpu", "system.cpu.usage", observed, 1)); err != nil {
+		t.Fatalf("InsertBatch: %v", err)
+	}
+
+	first := []metric.NodeAddress{
+		{Interface: "eth0", Address: "10.0.0.4/24"},
+		{Interface: "eth0", Address: "fe80::1/64"},
+		{Interface: "lo", Address: "127.0.0.1/8"},
+	}
+	if err := repo.ReplaceNodeAddresses(ctx, "node-addr", observed, first); err != nil {
+		t.Fatalf("ReplaceNodeAddresses: %v", err)
+	}
+
+	got, err := repo.ListNodeAddresses(ctx, "node-addr")
+	if err != nil {
+		t.Fatalf("ListNodeAddresses: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("got %d addresses, want 3: %+v", len(got), got)
+	}
+	if got[0].Interface != "eth0" || got[0].Address != "10.0.0.4/24" {
+		t.Errorf("first address = %+v, want eth0 10.0.0.4/24", got[0])
+	}
+	if !got[0].ObservedAt.Equal(observed) {
+		t.Errorf("ObservedAt = %v, want %v", got[0].ObservedAt, observed)
+	}
+
+	// eth0 has gone away; only wlan0 remains. No stale eth0 row may survive.
+	second := []metric.NodeAddress{{Interface: "wlan0", Address: "192.168.1.20/24"}}
+	if err := repo.ReplaceNodeAddresses(ctx, "node-addr", observed.Add(time.Minute), second); err != nil {
+		t.Fatalf("ReplaceNodeAddresses second: %v", err)
+	}
+	got, err = repo.ListNodeAddresses(ctx, "node-addr")
+	if err != nil {
+		t.Fatalf("ListNodeAddresses second: %v", err)
+	}
+	if len(got) != 1 || got[0].Interface != "wlan0" {
+		t.Fatalf("after replace, got %+v, want only wlan0", got)
+	}
+}
+
+func TestReplaceNodeAddressesCascadesOnNodeDelete(t *testing.T) {
+	repo, pool := newRepository(t)
+	ctx := context.Background()
+
+	if err := insertBatch(t, repo, ctx, envelope("node-cascade", "system.cpu", "system.cpu.usage", time.Now().UTC(), 1)); err != nil {
+		t.Fatalf("InsertBatch: %v", err)
+	}
+	if err := repo.ReplaceNodeAddresses(ctx, "node-cascade", time.Now().UTC(),
+		[]metric.NodeAddress{{Interface: "eth0", Address: "10.1.1.1/24"}}); err != nil {
+		t.Fatalf("ReplaceNodeAddresses: %v", err)
+	}
+
+	if _, err := pool.Exec(ctx, `DELETE FROM nodes WHERE node_id = $1`, "node-cascade"); err != nil {
+		t.Fatalf("delete node: %v", err)
+	}
+
+	got, err := repo.ListNodeAddresses(ctx, "node-cascade")
+	if err != nil {
+		t.Fatalf("ListNodeAddresses: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("node_addresses rows survived node deletion: %+v", got)
+	}
+}
+
+func TestEnsureNodeCreatesRowBeforeFacts(t *testing.T) {
+	repo, _ := newRepository(t)
+	ctx := context.Background()
+
+	env := transport.Envelope{Origin: transport.Origin{NodeID: "node-ensure", Hostname: "ensure-host"}}
+	if err := repo.EnsureNode(ctx, env); err != nil {
+		t.Fatalf("EnsureNode: %v", err)
+	}
+
+	node, err := repo.GetNode(ctx, "node-ensure")
+	if err != nil {
+		t.Fatalf("GetNode after EnsureNode: %v", err)
+	}
+	if node.Hostname != "ensure-host" {
+		t.Errorf("hostname = %q, want ensure-host", node.Hostname)
 	}
 }

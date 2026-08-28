@@ -102,7 +102,7 @@ func (c *hostCollector) Collect(ctx context.Context) ([]collect.Sample, error) {
 	if c.recorder != nil {
 		facts := NodeFacts{
 			OS:           info.OS,
-			Platform:     platformLabel(info),
+			Platform:     PlatformLabel(info),
 			Kernel:       info.KernelVersion,
 			Architecture: info.KernelArch,
 			CPUCores:     info.LogicalCores,
@@ -164,8 +164,11 @@ func (c *hostCollector) detectChanges(ctx context.Context, info HostInfo, now ti
 	}
 }
 
-// platformLabel renders the distribution and version as one display string.
-func platformLabel(info HostInfo) string {
+// PlatformLabel renders the distribution and version as one display string
+// ("ubuntu 24.04"). It is the single definition of how nodes.platform is
+// composed, so both the local host collector and the remote-inventory
+// promotion path store the same value.
+func PlatformLabel(info HostInfo) string {
 	if info.Platform == "" {
 		return ""
 	}
