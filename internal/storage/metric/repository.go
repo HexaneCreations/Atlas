@@ -156,6 +156,10 @@ type NodeFacts struct {
 	Architecture string
 	CPUCores     int
 	BootTime     time.Time
+	// HardwareUUID is the machine's raw hardware identifier (SMBIOS/DMI
+	// product UUID on Linux, IOPlatformUUID on macOS). Empty when the host
+	// cannot supply one; never erases a known value.
+	HardwareUUID string
 }
 
 // UpdateNodeFacts records the descriptive properties of a node.
@@ -168,12 +172,13 @@ func (r *Repository) UpdateNodeFacts(ctx context.Context, nodeID string, facts N
 
 	const q = `
 		UPDATE nodes SET
-			os           = COALESCE(NULLIF($2, ''), os),
-			platform     = COALESCE(NULLIF($3, ''), platform),
-			kernel       = COALESCE(NULLIF($4, ''), kernel),
-			architecture = COALESCE(NULLIF($5, ''), architecture),
-			cpu_cores    = COALESCE(NULLIF($6, 0), cpu_cores),
-			boot_time    = COALESCE($7, boot_time)
+			os            = COALESCE(NULLIF($2, ''), os),
+			platform      = COALESCE(NULLIF($3, ''), platform),
+			kernel        = COALESCE(NULLIF($4, ''), kernel),
+			architecture  = COALESCE(NULLIF($5, ''), architecture),
+			cpu_cores     = COALESCE(NULLIF($6, 0), cpu_cores),
+			boot_time     = COALESCE($7, boot_time),
+			hardware_uuid = COALESCE(NULLIF($8, ''), hardware_uuid)
 		WHERE node_id = $1`
 
 	var bootTime *time.Time
@@ -182,7 +187,8 @@ func (r *Repository) UpdateNodeFacts(ctx context.Context, nodeID string, facts N
 	}
 
 	_, err := r.pool.Exec(ctx, q, nodeID,
-		facts.OS, facts.Platform, facts.Kernel, facts.Architecture, facts.CPUCores, bootTime)
+		facts.OS, facts.Platform, facts.Kernel, facts.Architecture, facts.CPUCores, bootTime,
+		facts.HardwareUUID)
 	if err != nil {
 		return errs.Wrap(err, errs.CodeUnavailable, "could not update node facts").
 			WithOp(op).WithDetail("node_id", nodeID)
@@ -303,7 +309,7 @@ func (r *Repository) ListNodes(ctx context.Context) ([]Node, error) {
 		       COALESCE(os, ''), COALESCE(platform, ''), COALESCE(kernel, ''),
 		       COALESCE(architecture, ''), COALESCE(cpu_cores, 0),
 		       COALESCE(agent_version, ''), COALESCE(environment, ''), boot_time, first_seen_at, last_seen_at,
-		       clock_skew_seconds, COALESCE(host(public_ip), '')
+		       clock_skew_seconds, COALESCE(host(public_ip), ''), COALESCE(hardware_uuid, '')
 		FROM nodes
 		ORDER BY last_seen_at DESC, node_id`
 
@@ -336,7 +342,7 @@ func (r *Repository) GetNode(ctx context.Context, nodeID string) (Node, error) {
 		       COALESCE(os, ''), COALESCE(platform, ''), COALESCE(kernel, ''),
 		       COALESCE(architecture, ''), COALESCE(cpu_cores, 0),
 		       COALESCE(agent_version, ''), COALESCE(environment, ''), boot_time, first_seen_at, last_seen_at,
-		       clock_skew_seconds, COALESCE(host(public_ip), '')
+		       clock_skew_seconds, COALESCE(host(public_ip), ''), COALESCE(hardware_uuid, '')
 		FROM nodes WHERE node_id = $1`
 
 	rows, err := r.pool.Query(ctx, q, nodeID)
@@ -366,7 +372,7 @@ func scanNode(rows pgx.Rows) (Node, error) {
 
 	err := rows.Scan(&n.NodeID, &n.Hostname, &n.OS, &n.Platform, &n.Kernel,
 		&n.Architecture, &n.CPUCores, &n.AgentVersion, &n.Environment,
-		&bootTime, &n.FirstSeenAt, &n.LastSeenAt, &n.ClockSkewSeconds, &n.PublicIP)
+		&bootTime, &n.FirstSeenAt, &n.LastSeenAt, &n.ClockSkewSeconds, &n.PublicIP, &n.HardwareUUID)
 	if err != nil {
 		return Node{}, err
 	}

@@ -45,6 +45,9 @@ type NodeResponse struct {
 	// most recent connection from — server-observed, not agent-reported.
 	// Empty until a connection over a path that captures it.
 	PublicIP string `json:"public_ip,omitempty"`
+	// HardwareUUID is the machine's raw hardware identifier, agent-read.
+	// Empty when the host cannot supply one.
+	HardwareUUID string `json:"hardware_uuid,omitempty"`
 	// Addresses is the node's own per-interface addressing, promoted from the
 	// "network" inventory snapshot. Populated only on the single-node
 	// endpoint, not the list.
@@ -187,6 +190,7 @@ func (h *Handler) presentNode(n metric.Node, now time.Time) NodeResponse {
 		SecondsSinceSeen: now.Sub(n.LastSeenAt).Seconds(),
 		ClockSkewSeconds: n.ClockSkewSeconds,
 		PublicIP:         n.PublicIP,
+		HardwareUUID:     n.HardwareUUID,
 	}
 }
 

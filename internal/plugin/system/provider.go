@@ -149,6 +149,11 @@ type HostInfo struct {
 	Virtualization string `json:"virtualization,omitempty"`
 	// VirtualizationRole is "guest" or "host", empty when unknown.
 	VirtualizationRole string `json:"virtualization_role,omitempty"`
+	// HardwareUUID is the machine's raw hardware identifier: the SMBIOS/DMI
+	// product UUID on Linux, the IOPlatformUUID on macOS. Empty when the host
+	// cannot supply one (unprivileged agent, container, non-x86) — never
+	// substituted from the machine id, which node_id already derives from.
+	HardwareUUID string `json:"hardware_uuid,omitempty"`
 }
 
 // Uptime returns how long the machine has been running.

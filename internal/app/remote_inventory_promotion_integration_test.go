@@ -8,8 +8,9 @@
 //
 // A real internal/agent.Agent pushes over a real libp2p stream into a real
 // control plane; this asserts the promoted columns are populated afterwards,
-// and that nodes.public_ip carries the server-observed connection address
-// captured by the fleet host's Connected notifiee.
+// that nodes.public_ip carries the server-observed connection address
+// captured by the fleet host's Connected notifiee, and that
+// nodes.hardware_uuid is promoted from the same host snapshot.
 package app_test
 
 import (
@@ -23,12 +24,22 @@ import (
 	"github.com/hexane/atlas/internal/agent"
 	"github.com/hexane/atlas/internal/platform/id"
 	"github.com/hexane/atlas/internal/platform/log"
+	"github.com/hexane/atlas/internal/plugin/system"
 )
 
 func TestRemoteInventoryPromotedIntoNodesTable(t *testing.T) {
 	dsn := os.Getenv(testDatabaseURLEnv)
 	if dsn == "" {
 		t.Skipf("%s is not set; run `make db-up` first", testDatabaseURLEnv)
+	}
+
+	// The in-process agent reads this machine's real hardware UUID. On a host
+	// that cannot supply one (unprivileged Linux, container) it is honestly
+	// empty and there is nothing to assert; when non-empty, the promoted
+	// value must match it exactly.
+	hwUUID := ""
+	if info, err := system.NewProvider().Host(context.Background()); err == nil {
+		hwUUID = info.HardwareUUID
 	}
 
 	instance, peerAddr := bootLibP2PFleetServer(t, "")
@@ -69,12 +80,13 @@ func TestRemoteInventoryPromotedIntoNodesTable(t *testing.T) {
 	client := authenticatedTestClient(t, base, "viewer")
 
 	type nodeResp struct {
-		OS       string `json:"os"`
-		Platform string `json:"platform"`
-		Kernel   string `json:"kernel"`
-		PublicIP string `json:"public_ip"`
-		BootTime string `json:"boot_time"`
-		Address  []struct {
+		OS           string `json:"os"`
+		Platform     string `json:"platform"`
+		Kernel       string `json:"kernel"`
+		PublicIP     string `json:"public_ip"`
+		HardwareUUID string `json:"hardware_uuid"`
+		BootTime     string `json:"boot_time"`
+		Address      []struct {
 			Interface string `json:"interface"`
 			Address   string `json:"address"`
 		} `json:"addresses"`
@@ -91,7 +103,8 @@ func TestRemoteInventoryPromotedIntoNodesTable(t *testing.T) {
 			got = body
 			// Host promotion: os + platform. Network promotion: at least one
 			// address. Notifiee: a server-observed public ip (loopback here).
-			if body.OS != "" && body.Platform != "" && len(body.Address) > 0 && body.PublicIP != "" {
+			hwReady := hwUUID == "" || body.HardwareUUID != ""
+			if body.OS != "" && body.Platform != "" && len(body.Address) > 0 && body.PublicIP != "" && hwReady {
 				break
 			}
 		} else if err == nil {
@@ -114,5 +127,10 @@ func TestRemoteInventoryPromotedIntoNodesTable(t *testing.T) {
 	}
 	if got.PublicIP == "" {
 		t.Error("nodes.public_ip was not captured by the fleet host Connected notifiee")
+	}
+	if hwUUID == "" {
+		t.Logf("this host supplies no hardware UUID; nodes.hardware_uuid promotion not asserted")
+	} else if got.HardwareUUID != hwUUID {
+		t.Errorf("hardware_uuid = %q, want the host's real value %q promoted from the host snapshot", got.HardwareUUID, hwUUID)
 	}
 }

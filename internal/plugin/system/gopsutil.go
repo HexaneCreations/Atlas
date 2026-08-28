@@ -51,6 +51,7 @@ func (gopsutilProvider) Host(ctx context.Context) (HostInfo, error) {
 		VirtualizationRole: info.VirtualizationRole,
 		Timezone:           localTimezone(),
 		FQDN:               resolveFQDN(ctx, info.Hostname),
+		HardwareUUID:       readHardwareUUID(ctx),
 	}
 
 	// Core counts are reported separately from host info and may be

@@ -314,6 +314,7 @@ func TestUpdateNodeFactsPopulatesInventory(t *testing.T) {
 	facts := metric.NodeFacts{
 		OS: "linux", Platform: "debian 12", Kernel: "6.1.0",
 		Architecture: "arm64", CPUCores: 8, BootTime: time.Now().Add(-time.Hour),
+		HardwareUUID: "4c4c4544-0034-3910-8053-b4c04f303232",
 	}
 	if err := repo.UpdateNodeFacts(ctx, "node-e", facts); err != nil {
 		t.Fatalf("UpdateNodeFacts: %v", err)
@@ -325,6 +326,20 @@ func TestUpdateNodeFactsPopulatesInventory(t *testing.T) {
 	}
 	if node.Platform != "debian 12" || node.CPUCores != 8 {
 		t.Errorf("facts not persisted: %+v", node)
+	}
+	if node.HardwareUUID != "4c4c4544-0034-3910-8053-b4c04f303232" {
+		t.Errorf("hardware_uuid not persisted: %q", node.HardwareUUID)
+	}
+
+	// A later refresh from a collector that could not read the UUID (empty)
+	// must not erase it — the same never-erase-with-empty convention every
+	// other field in the UPDATE uses.
+	if err := repo.UpdateNodeFacts(ctx, "node-e", metric.NodeFacts{OS: "linux", Kernel: "6.1.0"}); err != nil {
+		t.Fatalf("UpdateNodeFacts second: %v", err)
+	}
+	node, _ = repo.GetNode(ctx, "node-e")
+	if node.HardwareUUID != "4c4c4544-0034-3910-8053-b4c04f303232" {
+		t.Errorf("empty hardware_uuid erased a known value: %q", node.HardwareUUID)
 	}
 }
 

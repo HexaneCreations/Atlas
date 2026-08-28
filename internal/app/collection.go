@@ -452,5 +452,6 @@ func (r factsRecorder) UpdateNodeFacts(ctx context.Context, nodeID string, facts
 		Architecture: facts.Architecture,
 		CPUCores:     facts.CPUCores,
 		BootTime:     facts.BootTime,
+		HardwareUUID: facts.HardwareUUID,
 	})
 }

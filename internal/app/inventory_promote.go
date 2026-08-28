@@ -41,6 +41,7 @@ func (p snapshotPromoter) PromoteHost(ctx context.Context, env transport.Envelop
 		Architecture: info.KernelArch,
 		CPUCores:     info.LogicalCores,
 		BootTime:     info.BootTime,
+		HardwareUUID: info.HardwareUUID,
 	})
 }
 

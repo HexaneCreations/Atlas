@@ -46,6 +46,7 @@ func newFakeProvider() *fakeProvider {
 			Hostname: "web-01", OS: "linux", Platform: "ubuntu",
 			PlatformVersion: "24.04", KernelVersion: "6.8.0", KernelArch: "x86_64",
 			BootTime: time.Now().Add(-72 * time.Hour), LogicalCores: 8, PhysicalCores: 4,
+			HardwareUUID: "4c4c4544-0034-3910-8053-b4c04f303232",
 		},
 		cpuPct:   []float64{10, 20, 30, 40, 50, 60, 70, 80},
 		cpuTimes: CPUTimes{User: 1000, System: 500, Idle: 8000, IOWait: 100},

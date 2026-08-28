@@ -480,6 +480,9 @@ func TestHostCollectorRecordsFactsAndUptime(t *testing.T) {
 	if rec.facts.CPUCores != 8 {
 		t.Errorf("cores = %d, want 8", rec.facts.CPUCores)
 	}
+	if rec.facts.HardwareUUID != "4c4c4544-0034-3910-8053-b4c04f303232" {
+		t.Errorf("hardware uuid = %q, want it carried from HostInfo into NodeFacts", rec.facts.HardwareUUID)
+	}
 	if hasMetric(samples, "system.kernel") {
 		t.Error("a descriptive fact was emitted as a time series")
 	}

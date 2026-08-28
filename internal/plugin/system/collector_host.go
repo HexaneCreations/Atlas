@@ -27,6 +27,7 @@ type NodeFacts struct {
 	Architecture string
 	CPUCores     int
 	BootTime     time.Time
+	HardwareUUID string
 }
 
 // Event topics published when the machine's identity changes underneath Atlas.
@@ -107,6 +108,7 @@ func (c *hostCollector) Collect(ctx context.Context) ([]collect.Sample, error) {
 			Architecture: info.KernelArch,
 			CPUCores:     info.LogicalCores,
 			BootTime:     info.BootTime,
+			HardwareUUID: info.HardwareUUID,
 		}
 		if err := c.recorder.UpdateNodeFacts(ctx, c.nodeID, facts); err != nil {
 			// Uptime is still worth reporting even if the facts could not be

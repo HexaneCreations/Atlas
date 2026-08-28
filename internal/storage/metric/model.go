@@ -45,6 +45,11 @@ type Node struct {
 	// agent-reported. Empty until an agent has connected over a path that
 	// captures it (libp2p, or HTTPS enrollment once the node row exists).
 	PublicIP string `json:"public_ip,omitempty"`
+
+	// HardwareUUID is the machine's raw hardware identifier (SMBIOS/DMI
+	// product UUID on Linux, IOPlatformUUID on macOS), agent-read and never
+	// derived from the machine id. Empty when the host cannot supply one.
+	HardwareUUID string `json:"hardware_uuid,omitempty"`
 }
 
 // NodeAddress is one address bound to one of a node's network interfaces, as
