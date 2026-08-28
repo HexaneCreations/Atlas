@@ -325,6 +325,7 @@ jobs:
             ATLAS_FLEET_LIBP2P_LISTEN_ADDRS=${{ vars.ATLAS_FLEET_LIBP2P_LISTEN_ADDRS }}
             ATLAS_FLEET_LIBP2P_RELAY_ADDR=${{ vars.ATLAS_FLEET_LIBP2P_RELAY_ADDR }}
             ATLAS_PUBLIC_HOSTNAME=${{ vars.ATLAS_PUBLIC_HOSTNAME }}
+            ATLAS_NODE_ID=${{ vars.ATLAS_NODE_ID }}
             ENVEOF
 
             # The one credential this workflow writes to disk; .env.prod's
