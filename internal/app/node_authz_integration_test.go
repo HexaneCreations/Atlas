@@ -261,3 +261,179 @@ func TestGetNodeIsGatedByTheSpecificNodeGrant(t *testing.T) {
 		t.Errorf("status for the ungranted node = %d, want 403", resp.StatusCode)
 	}
 }
+
+// pageAccessOnlyClient logs in a user provisioned entirely through the
+// page-access axis: one node-scoped direct page grant for page, for nodeID,
+// and nothing else — no user_node_roles grant, no fleet-wide page grant.
+// This is the production shape (abhishek-atlas: a single Containers grant
+// for one node) that scopedTestClient cannot express, since it always adds
+// a fleet-wide Nodes-page grant and drives node.read scoping.
+func pageAccessOnlyClient(t *testing.T, base string, page corepageauthz.Page, nodeID string) *http.Client {
+	t.Helper()
+
+	dsn := os.Getenv(testDatabaseURLEnv)
+	if dsn == "" {
+		t.Skipf("%s is not set; run `make db-up` first", testDatabaseURLEnv)
+	}
+	pool, err := pgxpool.New(context.Background(), dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer pool.Close()
+
+	username := "it-pageonly-" + strings.ToLower(string(page)) + "-" + id.New()
+	const password = "integration-test-password"
+
+	hash, err := coreuser.HashPassword(password)
+	if err != nil {
+		t.Fatalf("HashPassword: %v", err)
+	}
+	repo := storageuser.NewRepository(pool)
+	if err := repo.CreateUser(context.Background(), coreuser.User{Username: username, PasswordHash: hash}); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	u, err := repo.ByUsername(context.Background(), username)
+	if err != nil {
+		t.Fatalf("ByUsername: %v", err)
+	}
+
+	pageRepo := storagepageauthz.NewRepository(pool)
+	spec := corepageauthz.PageGrantSpec{UserID: u.ID, Page: page, NodeID: nodeID, GrantedBy: "integration-test"}
+	if err := pageRepo.GrantPageAccess(context.Background(), spec, time.Now()); err != nil {
+		t.Fatalf("GrantPageAccess(%s, %s): %v", page, nodeID, err)
+	}
+
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatalf("cookiejar.New: %v", err)
+	}
+	client := &http.Client{Jar: jar}
+	body, err := json.Marshal(map[string]string{"username": username, "password": password})
+	if err != nil {
+		t.Fatalf("marshal login body: %v", err)
+	}
+	resp, err := client.Post(base+"/api/v1/auth/login", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("login status = %d, want 200", resp.StatusCode)
+	}
+	return client
+}
+
+// Investigation 2's fix: a user whose only grant is a node-scoped page
+// grant (Containers for one node) must now see that node on GET /nodes, so
+// usePrimaryNodeID can resolve a node id and the page stops hanging. The
+// node they hold no grant of any kind for must still not leak.
+func TestListNodesSurfacesANodeAUserOnlyHasPageAccessFor(t *testing.T) {
+	dsn := os.Getenv(testDatabaseURLEnv)
+	if dsn == "" {
+		t.Skipf("%s is not set; run `make db-up` first", testDatabaseURLEnv)
+	}
+	base := bootServer(t)
+
+	granted := fmt.Sprintf("pageonly-nodes-granted-%d", time.Now().UnixNano())
+	other := fmt.Sprintf("pageonly-nodes-other-%d", time.Now().UnixNano())
+	seedNode(t, dsn, granted)
+	seedNode(t, dsn, other)
+
+	client := pageAccessOnlyClient(t, base, corepageauthz.PageContainers, granted)
+	ids := listNodeIDs(t, client, base)
+
+	if !contains(ids, granted) {
+		t.Errorf("nodes = %v, want the node this user holds a Containers page grant for (%s)", ids, granted)
+	}
+	if contains(ids, other) {
+		t.Errorf("nodes = %v, leaked a node this user has no grant of any kind for (%s)", ids, other)
+	}
+}
+
+// Priority 3: GET /auth/me carries the caller's effective page access so
+// the frontend can hide nav items and redirect direct-URL visits. A
+// page-only user must see exactly their granted page, scoped to their node,
+// and nothing else.
+func TestAuthMeReportsEffectivePageAccess(t *testing.T) {
+	dsn := os.Getenv(testDatabaseURLEnv)
+	if dsn == "" {
+		t.Skipf("%s is not set; run `make db-up` first", testDatabaseURLEnv)
+	}
+	base := bootServer(t)
+
+	granted := fmt.Sprintf("authme-pageaccess-%d", time.Now().UnixNano())
+	seedNode(t, dsn, granted)
+
+	client := pageAccessOnlyClient(t, base, corepageauthz.PageContainers, granted)
+
+	resp, err := client.Get(base + "/api/v1/auth/me")
+	if err != nil {
+		t.Fatalf("GET /auth/me: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var body struct {
+		PageAccess []struct {
+			Page      string   `json:"page"`
+			FleetWide bool     `json:"fleet_wide"`
+			NodeIDs   []string `json:"node_ids"`
+		} `json:"page_access"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if len(body.PageAccess) != 1 {
+		t.Fatalf("page_access = %+v, want exactly one entry (containers)", body.PageAccess)
+	}
+	got := body.PageAccess[0]
+	if got.Page != "containers" || got.FleetWide || len(got.NodeIDs) != 1 || got.NodeIDs[0] != granted {
+		t.Errorf("page_access[0] = %+v, want {containers, fleet_wide=false, node_ids=[%s]}", got, granted)
+	}
+}
+
+// Priority 1: the three metrics endpoints did no authorization at all — any
+// authenticated caller could read any node's series, latest values and
+// metric names by id. They are now gated on node.read for the named node.
+func TestMetricsEndpointsAreGatedByNodeReadForTheNamedNode(t *testing.T) {
+	dsn := os.Getenv(testDatabaseURLEnv)
+	if dsn == "" {
+		t.Skipf("%s is not set; run `make db-up` first", testDatabaseURLEnv)
+	}
+	base := bootServer(t)
+
+	granted := fmt.Sprintf("metricsauthz-granted-%d", time.Now().UnixNano())
+	other := fmt.Sprintf("metricsauthz-other-%d", time.Now().UnixNano())
+	seedNode(t, dsn, granted)
+	seedNode(t, dsn, other)
+
+	// node.read viewer scoped to `granted` only.
+	client := scopedTestClient(t, base, "viewer", granted, false)
+
+	endpoints := []string{
+		"/api/v1/metrics/latest?node=",
+		"/api/v1/metrics/names?node=",
+		"/api/v1/metrics?range=1h&metric=system.cpu.usage&node=",
+	}
+	for _, e := range endpoints {
+		resp, err := client.Get(base + e + other)
+		if err != nil {
+			t.Fatalf("GET %s%s: %v", e, other, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden {
+			t.Errorf("GET %s%s = %d, want 403 for a node this viewer lacks node.read on", e, other, resp.StatusCode)
+		}
+
+		resp, err = client.Get(base + e + granted)
+		if err != nil {
+			t.Fatalf("GET %s%s: %v", e, granted, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusForbidden {
+			t.Errorf("GET %s%s = 403, want it allowed for the node this viewer holds node.read on", e, granted)
+		}
+	}
+}

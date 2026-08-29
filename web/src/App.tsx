@@ -1,10 +1,12 @@
-import { Suspense, lazy, useCallback, useState } from "react";
+import { Suspense, lazy, useCallback, useState, type ReactNode } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { Navigate, Route, Routes, useLocation } from "react-router";
 import { Sidebar } from "./shell/Sidebar";
 import { Topbar } from "./shell/Topbar";
 import { LoginPage } from "./pages/LoginPage";
 import { useAuth } from "./auth/AuthContext";
+import { canReachPage } from "./shell/pageAccess";
+import type { Page } from "./api/types";
 const OverviewPage = lazy(() =>
   import("./pages/OverviewPage").then((m) => ({ default: m.OverviewPage })),
 );
@@ -75,7 +77,20 @@ export function App() {
   return <AuthenticatedApp pathname={pathname} />;
 }
 
+/**
+ * Redirects to Overview when the signed-in user cannot reach `page` — the
+ * nav link is hidden too (see shell/Sidebar), but a bookmark or a typed URL
+ * bypasses the nav, so the route itself has to refuse. Overview is always
+ * reachable, so it is the safe redirect target (see shell/pageAccess).
+ */
+function RequirePage({ page, children }: { page: Page; children: ReactNode }) {
+  const { user } = useAuth();
+  if (!canReachPage(user, page)) return <Navigate to="/" replace />;
+  return <>{children}</>;
+}
+
 function AuthenticatedApp({ pathname }: { pathname: string }) {
+  const { user } = useAuth();
   const chrome = chromeFor(pathname);
   const [navOpen, setNavOpen] = useState(false);
   const closeNav = useCallback(() => {
@@ -109,15 +124,24 @@ function AuthenticatedApp({ pathname }: { pathname: string }) {
                 >
                   <Routes>
                     <Route path="/" element={<OverviewPage />} />
-                    <Route path="/nodes" element={<NodesPage />} />
-                    <Route path="/containers" element={<ContainersPage />} />
-                    <Route path="/containers/:containerID/logs" element={<ContainerLogsPage />} />
-                    <Route path="/processes" element={<ProcessesPage />} />
-                    <Route path="/services" element={<ServicesPage />} />
-                    <Route path="/cron" element={<CronPage />} />
-                    <Route path="/ports" element={<PortsPage />} />
-                    <Route path="/disks" element={<DisksPage />} />
-                    <Route path="/users" element={<UsersPage />} />
+                    <Route path="/nodes" element={<RequirePage page="nodes"><NodesPage /></RequirePage>} />
+                    <Route path="/containers" element={<RequirePage page="containers"><ContainersPage /></RequirePage>} />
+                    <Route
+                      path="/containers/:containerID/logs"
+                      element={<RequirePage page="containers"><ContainerLogsPage /></RequirePage>}
+                    />
+                    <Route path="/processes" element={<RequirePage page="processes"><ProcessesPage /></RequirePage>} />
+                    <Route path="/services" element={<RequirePage page="services"><ServicesPage /></RequirePage>} />
+                    <Route path="/cron" element={<RequirePage page="cron"><CronPage /></RequirePage>} />
+                    <Route path="/ports" element={<RequirePage page="ports"><PortsPage /></RequirePage>} />
+                    <Route path="/disks" element={<RequirePage page="disks"><DisksPage /></RequirePage>} />
+                    {/* Users stays gated on can_manage_users, not page_access —
+                        a freshly created admin holds user.manage before any
+                        page grant (see shell/Sidebar). */}
+                    <Route
+                      path="/users"
+                      element={user?.can_manage_users ? <UsersPage /> : <Navigate to="/" replace />}
+                    />
                     <Route path="*" element={<NotFoundPage />} />
                   </Routes>
                 </motion.div>

@@ -72,6 +72,20 @@ export interface CurrentUser {
   /** Display hint for the admin Users page's nav entry — never the
    *  enforcement point; every /users endpoint checks this independently. */
   can_manage_users: boolean;
+  /** Every page this caller can reach, with the scope it applies at. Drives
+   *  which nav items show and which routes redirect — a navigation hint
+   *  only; every page's data endpoints enforce access independently, and
+   *  Overview stays reachable regardless of what this contains (see
+   *  shell/pageAccess). Always present; may be empty. */
+  page_access: PageAccessEntry[];
+}
+
+/** One reachable page in [CurrentUser.page_access]. `fleet_wide` true means
+ *  every node; otherwise `node_ids` names the nodes it applies to. */
+export interface PageAccessEntry {
+  page: Page;
+  fleet_wide: boolean;
+  node_ids?: string[];
 }
 
 // ------------------------------------------------------- Admin: Users ----

@@ -86,22 +86,31 @@ func (h *Handler) ListNodes(w http.ResponseWriter, r *http.Request) error {
 		if !ok {
 			return errs.New(errs.CodeUnauthenticated, "authentication required").WithOp(op)
 		}
-		// Nodes is a fleet-only page (see pageauthz.FleetOnlyPages): there is
-		// no per-node grant to filter by, so this is one pass/fail check —
-		// can this caller reach the Nodes page at all — before the existing
-		// node.read filtering below narrows which nodes they see within it.
-		// A denial here is a 403, not an empty list: an empty list would be
-		// indistinguishable from "no node.read grants", a different fact.
-		if h.deps.PageAuthz != nil {
-			if err := h.deps.PageAuthz.Require(r.Context(), principal.UserID, pageauthz.PageNodes, ""); err != nil {
-				return err
-			}
-		}
+		// "Which nodes can you see" is a filtered list, never a pass/fail
+		// gate: a caller authorized for no node gets an empty list, not a
+		// 403. The visible set is the union of two independent axes — the
+		// operation-level node.read grants (AuthorizedNodes), and the nodes
+		// the caller holds a node-scoped page-access grant for. The second
+		// axis matters because a user can be provisioned entirely through
+		// page access (e.g. Containers for one node, no role grant at all);
+		// without it the node switcher — whose only source is this endpoint —
+		// can never resolve a node id for them, and every downstream page
+		// hangs. A fleet-wide node.read grant short-circuits to everything;
+		// a fleet-wide *page* grant names no node and does not widen the set.
 		fleetWide, allowed, err := h.deps.Authz.AuthorizedNodes(r.Context(), principal, user.PermissionNodeRead)
 		if err != nil {
 			return err
 		}
 		if !fleetWide {
+			if h.deps.PageAuthz != nil {
+				pageNodes, err := h.deps.PageAuthz.AccessibleNodeIDs(r.Context(), principal.UserID)
+				if err != nil {
+					return err
+				}
+				for _, id := range pageNodes {
+					allowed[id] = true
+				}
+			}
 			filtered := make([]metric.Node, 0, len(nodes))
 			for _, n := range nodes {
 				if allowed[n.NodeID] {

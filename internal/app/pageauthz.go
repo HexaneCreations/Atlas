@@ -19,6 +19,14 @@ func (l lazyPageAuthorizer) Require(ctx context.Context, userID string, page cor
 	return corepageauthz.NewAuthorizer(storagepageauthz.NewRepository(l.pool.DB())).Require(ctx, userID, page, nodeID)
 }
 
+func (l lazyPageAuthorizer) AccessibleNodeIDs(ctx context.Context, userID string) ([]string, error) {
+	return corepageauthz.NewAuthorizer(storagepageauthz.NewRepository(l.pool.DB())).AccessibleNodeIDs(ctx, userID)
+}
+
+func (l lazyPageAuthorizer) EffectiveAccessByPage(ctx context.Context, userID string) (map[corepageauthz.Page]corepageauthz.PageReach, error) {
+	return corepageauthz.NewAuthorizer(storagepageauthz.NewRepository(l.pool.DB())).EffectiveAccessByPage(ctx, userID)
+}
+
 // lazyPageAdmin exposes the full page-access management surface — bundle
 // definitions, assignments, and direct grants — for the admin Users page,
 // the same "one repository, several narrow interfaces" shape

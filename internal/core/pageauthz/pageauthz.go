@@ -307,6 +307,25 @@ type Store interface {
 	// a non-fleet-only page, which nodes — the union of every active
 	// RoleAccess bundle covering page and every active direct grant for it.
 	EffectiveAccess(ctx context.Context, userID string, page Page) (fleetWide bool, nodeIDs []string, err error)
+
+	// AccessibleNodeIDs returns the distinct nodes userID holds any active
+	// node-scoped page-access grant or bundle assignment for, across every
+	// page. Fleet-wide rows (which name no node) are excluded. Backs
+	// [Handler.ListNodes]'s node-visibility union — see [Authorizer.AccessibleNodeIDs].
+	AccessibleNodeIDs(ctx context.Context, userID string) ([]string, error)
+
+	// EffectiveAccessByPage reports every page userID can reach and its
+	// scope — the union of active bundle coverage and active direct grants,
+	// computed for all pages in one shot. Backs GET /auth/me's nav/route
+	// hints. A page the user cannot reach at all has no entry.
+	EffectiveAccessByPage(ctx context.Context, userID string) (map[Page]PageReach, error)
+}
+
+// PageReach is one page's effective access: fleet-wide, or a set of nodes.
+// FleetWide true means every node (and NodeIDs is not consulted).
+type PageReach struct {
+	FleetWide bool
+	NodeIDs   []string
 }
 
 // ErrPageAccessDenied is returned by [Authorizer.Require] when the
@@ -354,4 +373,27 @@ func (a Authorizer) Require(ctx context.Context, userID string, page Page, nodeI
 		}
 	}
 	return ErrPageAccessDenied
+}
+
+// AccessibleNodeIDs returns every node userID holds a node-scoped
+// page-access grant or bundle assignment for — the node-scoped rows only; a
+// fleet-wide page grant names no node and contributes nothing.
+//
+// [Handler.ListNodes] unions this with the operation-level node.read filter
+// so a user provisioned only through the page-access axis (e.g. a Containers
+// grant for one node, no role grant at all) still resolves that node in the
+// node switcher, which has no other source for it. This never widens
+// node.read: a fleet-wide page grant does not become a fleet-wide node
+// override, and GetNode stays gated per node.
+func (a Authorizer) AccessibleNodeIDs(ctx context.Context, userID string) ([]string, error) {
+	return a.store.AccessibleNodeIDs(ctx, userID)
+}
+
+// EffectiveAccessByPage reports every page userID can reach and its scope,
+// for GET /auth/me's nav-hide and route-guard hints. This is a display
+// convenience only: every page's own data endpoints enforce the same access
+// independently, and the frontend keeps Overview reachable regardless (its
+// data comes from already-gated per-page calls) whatever this reports.
+func (a Authorizer) EffectiveAccessByPage(ctx context.Context, userID string) (map[Page]PageReach, error) {
+	return a.store.EffectiveAccessByPage(ctx, userID)
 }

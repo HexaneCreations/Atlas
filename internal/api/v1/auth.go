@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -57,6 +58,14 @@ type Authorizer interface {
 // doc. Satisfied by [pageauthz.Authorizer].
 type PageAuthorizer interface {
 	Require(ctx context.Context, userID string, page pageauthz.Page, nodeID string) error
+	// AccessibleNodeIDs reports every node this user holds a node-scoped
+	// page-access grant or bundle assignment for — unioned into
+	// [Handler.ListNodes]'s node.read filter so a user provisioned only
+	// through the page-access axis still sees the node(s) their grant implies.
+	AccessibleNodeIDs(ctx context.Context, userID string) ([]string, error)
+	// EffectiveAccessByPage reports every page this user can reach and its
+	// scope — for GET /auth/me's nav-hide and route-guard hints.
+	EffectiveAccessByPage(ctx context.Context, userID string) (map[pageauthz.Page]pageauthz.PageReach, error)
 }
 
 // LoginLimiter bounds POST /auth/login attempts. Satisfied by
@@ -81,16 +90,58 @@ type CurrentUserResponse struct {
 	// every /users endpoint independently checks PermissionUserManage
 	// itself regardless of what this says.
 	CanManageUsers bool `json:"can_manage_users"`
+	// PageAccess is every page this caller can reach, with the scope it
+	// applies at — the frontend hides nav items and redirects direct-URL
+	// visits to unreachable routes with it. A navigation hint only: every
+	// page's own data endpoints enforce the same access independently, and
+	// the frontend keeps Overview reachable regardless of what this reports
+	// (its data comes from already-gated per-page calls). Always present,
+	// possibly empty; never null.
+	PageAccess []PageAccessEntry `json:"page_access"`
+}
+
+// PageAccessEntry is one reachable page and its scope in
+// [CurrentUserResponse]. FleetWide true means every node; otherwise NodeIDs
+// names the nodes the caller may reach the page for.
+type PageAccessEntry struct {
+	Page      string   `json:"page"`
+	FleetWide bool     `json:"fleet_wide"`
+	NodeIDs   []string `json:"node_ids,omitempty"`
 }
 
 // currentUserResponse builds [CurrentUserResponse] for principal, checking
-// PermissionUserManage the same way [Handler.requirePermission] does.
-func (h *Handler) currentUserResponse(ctx context.Context, principal user.Principal) CurrentUserResponse {
-	resp := CurrentUserResponse{UserID: principal.UserID, Username: principal.Username}
+// PermissionUserManage the same way [Handler.requirePermission] does and
+// resolving the caller's effective page access for the frontend's nav and
+// route hints.
+//
+// A failure to resolve page access is returned, not swallowed: an empty
+// PageAccess is a meaningful (and wrong) answer that would strand the user
+// on a UI with every page hidden, so a transient store error must surface
+// as a failed /auth/me the frontend retries rather than as "no access".
+func (h *Handler) currentUserResponse(ctx context.Context, principal user.Principal) (CurrentUserResponse, error) {
+	resp := CurrentUserResponse{
+		UserID:     principal.UserID,
+		Username:   principal.Username,
+		PageAccess: []PageAccessEntry{},
+	}
 	if h.deps.Authz != nil {
 		resp.CanManageUsers = h.deps.Authz.Require(ctx, principal, user.PermissionUserManage, "") == nil
 	}
-	return resp
+	if h.deps.PageAuthz != nil {
+		reach, err := h.deps.PageAuthz.EffectiveAccessByPage(ctx, principal.UserID)
+		if err != nil {
+			return CurrentUserResponse{}, err
+		}
+		for page, r := range reach {
+			resp.PageAccess = append(resp.PageAccess, PageAccessEntry{
+				Page:      string(page),
+				FleetWide: r.FleetWide,
+				NodeIDs:   r.NodeIDs,
+			})
+		}
+		sort.Slice(resp.PageAccess, func(i, j int) bool { return resp.PageAccess[i].Page < resp.PageAccess[j].Page })
+	}
+	return resp, nil
 }
 
 // Login authenticates a username and password and, on success, issues a
@@ -154,7 +205,11 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) error {
 
 	session.SetCookie(w, generated.Plaintext, sess.ExpiresAt, h.deps.SessionSecure)
 	principal := user.Principal{UserID: u.ID, Username: u.Username}
-	httpx.JSON(w, r, http.StatusOK, h.currentUserResponse(r.Context(), principal))
+	me, err := h.currentUserResponse(r.Context(), principal)
+	if err != nil {
+		return err
+	}
+	httpx.JSON(w, r, http.StatusOK, me)
 	return nil
 }
 
@@ -184,7 +239,11 @@ func (h *Handler) CurrentUser(w http.ResponseWriter, r *http.Request) error {
 	if !ok {
 		return errs.New(errs.CodeUnauthenticated, "not logged in").WithOp(op)
 	}
-	httpx.JSON(w, r, http.StatusOK, h.currentUserResponse(r.Context(), principal))
+	me, err := h.currentUserResponse(r.Context(), principal)
+	if err != nil {
+		return err
+	}
+	httpx.JSON(w, r, http.StatusOK, me)
 	return nil
 }
 

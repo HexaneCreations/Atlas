@@ -7,6 +7,7 @@ import { useSystemInfo } from "../api/queries";
 import { useAuth } from "../auth/AuthContext";
 import { useTheme } from "./useTheme";
 import { NAV_PAGES } from "./pages";
+import { canReachPage } from "./pageAccess";
 
 /**
  * The primary navigation.
@@ -85,13 +86,21 @@ function SidebarBody() {
   const { theme, toggle } = useTheme();
   const { user } = useAuth();
 
+  // Monitor and Infrastructure items are shown only for pages this caller
+  // can actually reach (CurrentUser.page_access from GET /auth/me) — the
+  // same idea as the Admin section's can_manage_users gate below, one axis
+  // over. Overview is always kept (see shell/pageAccess). The Admin section
+  // stays on can_manage_users alone, unchanged.
+  const monitor = MONITOR_ITEMS.filter((p) => canReachPage(user, p.page));
+  const infrastructure = INFRASTRUCTURE_ITEMS.filter((p) => canReachPage(user, p.page));
+
   return (
     <>
       <BrandHeader />
 
       <nav className="scroll-thin flex-1 overflow-y-auto px-3 pt-4">
-        <NavSection label="Monitor" items={MONITOR_ITEMS} />
-        <NavSection label="Infrastructure" items={INFRASTRUCTURE_ITEMS} />
+        <NavSection label="Monitor" items={monitor} />
+        <NavSection label="Infrastructure" items={infrastructure} />
         {/* Only a caller Atlas itself has told us can manage users sees this
             — see CurrentUser.can_manage_users. The backend enforces the real
             boundary independently on every /users request either way. */}
@@ -129,6 +138,9 @@ function NavSection({
   label: string;
   items: { to: string; label: string; icon: LucideIcon; end?: boolean }[];
 }) {
+  // A section whose every item was filtered out (no reachable pages in it)
+  // renders nothing rather than a bare heading.
+  if (items.length === 0) return null;
   return (
     <div className="mb-5">
       <p className="mb-1.5 px-2 text-[11px] font-semibold uppercase tracking-wider text-text-muted">

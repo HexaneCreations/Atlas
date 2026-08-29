@@ -254,6 +254,12 @@ func (s effectiveAccessStore) ListPageAccessGrants(context.Context, string) ([]p
 func (s effectiveAccessStore) RoleAccessScopesForPage(context.Context, string, pageauthz.Page) ([]pageauthz.Scope, error) {
 	return nil, nil
 }
+func (s effectiveAccessStore) AccessibleNodeIDs(context.Context, string) ([]string, error) {
+	return nil, nil
+}
+func (s effectiveAccessStore) EffectiveAccessByPage(context.Context, string) (map[pageauthz.Page]pageauthz.PageReach, error) {
+	return nil, nil
+}
 
 var _ pageauthz.Store = effectiveAccessStore{}
 

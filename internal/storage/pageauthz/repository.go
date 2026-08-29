@@ -452,6 +452,90 @@ func (r *Repository) EffectiveAccess(ctx context.Context, userID string, page pa
 	return false, nodeIDs, nil
 }
 
+// AccessibleNodeIDs implements [pageauthz.Store] — the distinct nodes this
+// user holds any active node-scoped direct page grant or bundle assignment
+// for, across every page. Fleet-wide rows (node_id NULL) are excluded: they
+// name no node, and [Handler.ListNodes] must not treat page access as a
+// fleet-wide node override. UNION (not UNION ALL) dedupes across the two
+// tables.
+func (r *Repository) AccessibleNodeIDs(ctx context.Context, userID string) ([]string, error) {
+	const op = "pageauthz.Repository.AccessibleNodeIDs"
+
+	const q = `
+		SELECT node_id FROM user_page_access
+		WHERE user_id = $1 AND revoked_at IS NULL AND node_id IS NOT NULL
+		UNION
+		SELECT node_id FROM user_role_access
+		WHERE user_id = $1 AND revoked_at IS NULL AND node_id IS NOT NULL`
+
+	rows, err := r.pool.Query(ctx, q, userID)
+	if err != nil {
+		return nil, errs.Wrap(err, errs.CodeUnavailable, "could not resolve page-accessible nodes").WithOp(op)
+	}
+	defer rows.Close()
+
+	var nodeIDs []string
+	for rows.Next() {
+		var nodeID string
+		if err := rows.Scan(&nodeID); err != nil {
+			return nil, errs.Wrap(err, errs.CodeUnavailable, "could not read a page access row").WithOp(op)
+		}
+		nodeIDs = append(nodeIDs, nodeID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, errs.Wrap(err, errs.CodeUnavailable, "could not resolve page-accessible nodes").WithOp(op)
+	}
+	return nodeIDs, nil
+}
+
+// EffectiveAccessByPage implements [pageauthz.Store] — every page this user
+// can reach and its scope, in one round trip: the union of every active
+// RoleAccess bundle's pages and every active direct page grant. A NULL
+// node_id from either source makes that page fleet-wide. Pages with no
+// grant at all are absent from the map.
+func (r *Repository) EffectiveAccessByPage(ctx context.Context, userID string) (map[pageauthz.Page]pageauthz.PageReach, error) {
+	const op = "pageauthz.Repository.EffectiveAccessByPage"
+
+	const q = `
+		SELECT rap.page_key, ura.node_id
+		FROM user_role_access ura
+		JOIN role_access_pages rap ON rap.role_access_name = ura.role_access_name
+		WHERE ura.user_id = $1 AND ura.revoked_at IS NULL
+		UNION
+		SELECT upa.page_key, upa.node_id
+		FROM user_page_access upa
+		WHERE upa.user_id = $1 AND upa.revoked_at IS NULL`
+
+	rows, err := r.pool.Query(ctx, q, userID)
+	if err != nil {
+		return nil, errs.Wrap(err, errs.CodeUnavailable, "could not resolve page access").WithOp(op)
+	}
+	defer rows.Close()
+
+	out := make(map[pageauthz.Page]pageauthz.PageReach)
+	for rows.Next() {
+		var (
+			pageKey string
+			nodeID  *string
+		)
+		if err := rows.Scan(&pageKey, &nodeID); err != nil {
+			return nil, errs.Wrap(err, errs.CodeUnavailable, "could not read a page access row").WithOp(op)
+		}
+		page := pageauthz.Page(pageKey)
+		reach := out[page]
+		if nodeID == nil {
+			reach.FleetWide = true
+		} else {
+			reach.NodeIDs = append(reach.NodeIDs, *nodeID)
+		}
+		out[page] = reach
+	}
+	if err := rows.Err(); err != nil {
+		return nil, errs.Wrap(err, errs.CodeUnavailable, "could not resolve page access").WithOp(op)
+	}
+	return out, nil
+}
+
 // isUniqueViolation reports whether err is a Postgres unique_violation
 // (SQLSTATE 23505).
 func isUniqueViolation(err error) bool {

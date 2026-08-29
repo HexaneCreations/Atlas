@@ -6,6 +6,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hexane/atlas/internal/core/pageauthz"
+	"github.com/hexane/atlas/internal/core/user"
 	"github.com/hexane/atlas/internal/platform/errs"
 	"github.com/hexane/atlas/internal/platform/httpx"
 	"github.com/hexane/atlas/internal/storage/metric"
@@ -17,6 +19,24 @@ import (
 // caller wants an export, not a chart. The cap exists so one request cannot
 // consume the database for minutes.
 const maxQuerySpan = 2 * 365 * 24 * time.Hour
+
+// requireMetricAccess gates the three metrics endpoints (series, latest,
+// names) on node.read for the node named by ?node=, resolved the same way
+// every other node-scoped handler resolves it (see [Handler.requireScope]).
+//
+// No page is attached: these endpoints are cross-page supporting data, not a
+// page of their own. `?node=<id>&metric=…` backs the Overview and Nodes
+// pages (fleet-only), the Disks/Processes/Containers history and resource
+// tiles (node-scoped), and any future consumer — no single pageauthz.Page
+// owns them, and gating on one would break the others. node.read for the
+// specific node is the real boundary here; the page-visibility axis is
+// enforced at each consuming page's own endpoints. This mirrors
+// goldensignals.go's per-node handler, which passes pageauthz.PageNone for
+// the same reason.
+func (h *Handler) requireMetricAccess(r *http.Request) error {
+	_, err := h.requireNode(r, user.PermissionNodeRead, pageauthz.PageNone)
+	return err
+}
 
 // QueryMetrics returns time series for a node.
 //
@@ -41,6 +61,13 @@ func (h *Handler) QueryMetrics(w http.ResponseWriter, r *http.Request) error {
 	if query.NodeID == "" {
 		return errs.New(errs.CodeInvalidArgument, "the node parameter is required").
 			WithOp(op).WithDetail("field", "node")
+	}
+
+	// node.read for the named node — see [requireMetricAccess]. Until this
+	// milestone the three metrics endpoints did no authorization at all: any
+	// authenticated caller could read any node's series by id.
+	if err := h.requireMetricAccess(r); err != nil {
+		return err
 	}
 
 	if raw := q.Get("metric"); raw != "" {
@@ -152,6 +179,10 @@ func (h *Handler) LatestMetrics(w http.ResponseWriter, r *http.Request) error {
 			WithOp(op).WithDetail("field", "node")
 	}
 
+	if err := h.requireMetricAccess(r); err != nil {
+		return err
+	}
+
 	within := 5 * time.Minute
 	if raw := r.URL.Query().Get("within"); raw != "" {
 		d, err := time.ParseDuration(raw)
@@ -198,6 +229,10 @@ func (h *Handler) ListMetricNames(w http.ResponseWriter, r *http.Request) error 
 	if nodeID == "" {
 		return errs.New(errs.CodeInvalidArgument, "the node parameter is required").
 			WithOp(op).WithDetail("field", "node")
+	}
+
+	if err := h.requireMetricAccess(r); err != nil {
+		return err
 	}
 
 	names, err := repo.ListMetricNames(r.Context(), nodeID, 24*time.Hour)
