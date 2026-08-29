@@ -237,6 +237,175 @@ jobs:
           push: ${{ steps.tags.outputs.push == 'true' }}
           tags: ${{ steps.tags.outputs.ui_tags }}
 
+  # ---------------------------------------------------------------- agent ----
+  #
+  # atlas-agent is a bare systemd binary, not a container, so it does not ride
+  # the `image` job above — it gets its own build here, versioned identically
+  # (same git-describe VERSION, same $GITHUB_SHA COMMIT, same LDFLAGS as
+  # `make build-agent`). It runs on every push so the cross-compile cannot rot
+  # silently, and publishes GitHub Release assets only for a clean, exact
+  # vX.Y.Z tag — the specific gap that let an unstamped `dev` / `-dirty` agent
+  # binary reach a production host with no record of the commit it came from.
+
+  # Compute (and, on a release tag, gate) the build stamp once, so both
+  # architectures below get byte-identical VERSION / COMMIT / BUILDTIME and
+  # the tag check fails fast before either build starts.
+  agent-meta:
+    name: Agent build metadata
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      commit: ${{ steps.meta.outputs.commit }}
+      buildtime: ${{ steps.meta.outputs.buildtime }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history + tags so `git describe --tags` resolves the same
+          # value the Makefile computes locally.
+          fetch-depth: 0
+
+      - name: Compute build metadata
+        id: meta
+        run: |
+          set -euo pipefail
+          version="$(git describe --tags --always --dirty)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "commit=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+          echo "buildtime=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+          # A release artifact must be an exact, clean tag — no exceptions.
+          # This is the check the field's v1.0.10-dirty binary would have
+          # failed: it was a bare `go build` on a tree with uncommitted
+          # changes, never tagged, never through CI.
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            if [[ "$version" == *-dirty ]]; then
+              echo "::error::refusing to build a release from a dirty tree ($version)"
+              exit 1
+            fi
+            if ! git describe --tags --exact-match >/dev/null 2>&1; then
+              echo "::error::HEAD is not an exact tag (git describe --tags --exact-match failed)"
+              exit 1
+            fi
+          fi
+
+  agent:
+    name: Agent binary (${{ matrix.goos }}/${{ matrix.goarch }})
+    runs-on: ubuntu-latest
+    needs: agent-meta
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: linux, goarch: amd64 }
+          - { goos: linux, goarch: arm64 }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      # binfmt handlers, so the arm64 binary's --version can run on this
+      # amd64 runner — same action family the image job already uses.
+      - uses: docker/setup-qemu-action@v3
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          set -euo pipefail
+          # Reuse the Makefile's LDFLAGS construction verbatim — only the
+          # three stamp values are overridden, never the flag string.
+          make build-agent \
+            VERSION='${{ needs.agent-meta.outputs.version }}' \
+            COMMIT='${{ needs.agent-meta.outputs.commit }}' \
+            BUILDTIME='${{ needs.agent-meta.outputs.buildtime }}'
+          out="atlas-agent-${GOOS}-${GOARCH}"
+          mv bin/atlas-agent "$out"
+          file "$out"
+
+      - name: Smoke-test --version
+        run: |
+          set -euo pipefail
+          bin="atlas-agent-${{ matrix.goos }}-${{ matrix.goarch }}"
+          chmod +x "$bin"
+          out="$(./"$bin" --version)"
+          echo "$out"
+          # Proves the link-time stamp took: a bare `go build` would print
+          # "atlas dev (...)" here, which is exactly what shipped to the field.
+          case "$out" in
+            *"atlas ${{ needs.agent-meta.outputs.version }} "*) : ;;
+            *) echo "::error::--version did not report the stamped version"; exit 1 ;;
+          esac
+          printf '%s\n' "$out" > "${bin}.version"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: |
+            atlas-agent-${{ matrix.goos }}-${{ matrix.goarch }}
+            atlas-agent-${{ matrix.goos }}-${{ matrix.goarch }}.version
+          if-no-files-found: error
+          retention-days: 7
+
+  # Clean vX.Y.Z tag only: gather both platform binaries, checksum them, and
+  # attach them plus SHA256SUMS to that tag's GitHub Release. `contents:
+  # write` is scoped to this job alone; every other job in the workflow stays
+  # read-only. A plain main push builds and smoke-tests above but never
+  # reaches here, so nothing is published outside a release.
+  agent-release:
+    name: Publish agent binaries
+    runs-on: ubuntu-latest
+    needs: [agent-meta, agent]
+    if: startsWith(github.ref, 'refs/tags/v') && github.event_name != 'pull_request'
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: agent-*
+          merge-multiple: true
+
+      - name: Checksums and release notes
+        id: notes
+        run: |
+          set -euo pipefail
+          cd dist
+          chmod +x atlas-agent-linux-amd64 atlas-agent-linux-arm64
+          sha256sum atlas-agent-linux-amd64 atlas-agent-linux-arm64 > SHA256SUMS
+          {
+            echo "notes<<NOTES_EOF"
+            echo "### atlas-agent — ${GITHUB_REF_NAME}"
+            echo
+            echo "Cross-compiled from \`${GITHUB_SHA}\` (tag \`${GITHUB_REF_NAME}\`)."
+            echo "Verify with \`sha256sum -c SHA256SUMS\`."
+            echo
+            echo '```'
+            cat atlas-agent-linux-amd64.version
+            cat atlas-agent-linux-arm64.version
+            echo '```'
+            echo
+            echo '```'
+            cat SHA256SUMS
+            echo '```'
+            echo "NOTES_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Attach to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/atlas-agent-linux-amd64
+            dist/atlas-agent-linux-arm64
+            dist/SHA256SUMS
+          body: ${{ steps.notes.outputs.notes }}
+          append_body: true
+          fail_on_unmatched_files: true
+
   # Only ever runs for a pushed vX.Y.Z tag (never for main/edge) — production
   # always deploys an explicit, immutable release tag, matching the "image"
   # job's own "production uses explicit release tags" convention above.
