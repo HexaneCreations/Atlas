@@ -9,6 +9,7 @@ import { PageHeader } from "../components/PageHeader";
 import { QueryState } from "../components/QueryState";
 import { EmptyAction } from "../components/EmptyState";
 import { emptyArt } from "../lib/assets";
+import { nodePrimaryLabel, nodeSecondaryLabel } from "../lib/nodeIdentity";
 import { SearchInput, FilterSelect, Toolbar } from "../components/Toolbar";
 import { formatAgo, formatDuration, formatValue } from "../format";
 import { FleetDistribution } from "./nodes/FleetDistribution";
@@ -330,12 +331,14 @@ function NodeRow({
       }`}
     >
       <td className="max-w-[14rem] px-3 py-2">
-        <span className="block truncate font-medium text-text" title={n.hostname}>
-          {n.hostname}
+        <span className="block truncate font-medium text-text" title={n.node_id}>
+          {nodePrimaryLabel(n)}
         </span>
-        <span className="block truncate font-mono text-[11px] text-text-subtle" title={n.node_id}>
-          {n.node_id.slice(0, 12)}
-        </span>
+        {nodeSecondaryLabel(n) ? (
+          <span className="block truncate text-[11px] text-text-subtle" title={nodeSecondaryLabel(n)}>
+            {nodeSecondaryLabel(n)}
+          </span>
+        ) : null}
       </td>
       <td className="px-3 py-2">
         <Badge tone={STATUS_TONE[n.status]} pulse={n.status === "down"}>

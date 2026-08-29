@@ -10,6 +10,7 @@ import type {
   SystemHealth,
   SystemRuntime,
 } from "../../api/types";
+import { nodePrimaryLabel } from "../../lib/nodeIdentity";
 
 /**
  * The findings engine: everything Atlas knows that an operator should act on.
@@ -106,7 +107,7 @@ export function computeFindings(input: Inputs): { findings: Finding[]; coverage:
       title: `${plural(down.length, "node")} not reporting`,
       detail:
         "No sweep has arrived within the liveness window. Everything shown for these hosts is the last known state, not the current one.",
-      evidence: down.map((n) => n.hostname).slice(0, EVIDENCE_CAP),
+      evidence: down.map((n) => nodePrimaryLabel(n)).slice(0, EVIDENCE_CAP),
       to: "/nodes",
       source: "Nodes",
     });
@@ -118,7 +119,7 @@ export function computeFindings(input: Inputs): { findings: Finding[]; coverage:
       title: `${plural(stale.length, "node")} gone quiet`,
       detail:
         "Reporting later than the expected interval. Usually a slow or saturated host rather than a dead one.",
-      evidence: stale.map((n) => n.hostname).slice(0, EVIDENCE_CAP),
+      evidence: stale.map((n) => nodePrimaryLabel(n)).slice(0, EVIDENCE_CAP),
       to: "/nodes",
       source: "Nodes",
     });

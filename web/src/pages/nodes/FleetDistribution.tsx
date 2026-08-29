@@ -3,6 +3,7 @@ import type { Node } from "../../api/types";
 import { Card, CardHeader } from "../../components/Card";
 import { TopList } from "../../components/TopList";
 import { formatDuration } from "../../format";
+import { nodePrimaryLabel, nodeSecondaryLabel } from "../../lib/nodeIdentity";
 import { UNTAGGED, untaggedLast } from "./useNodeTable";
 
 /**
@@ -77,7 +78,7 @@ function UptimeOverview({ nodes }: { nodes: Node[] }) {
   // ordering varied.
   const known = nodes
     .filter((n): n is Node & { uptime_seconds: number } => typeof n.uptime_seconds === "number")
-    .sort((a, b) => b.uptime_seconds - a.uptime_seconds || a.hostname.localeCompare(b.hostname));
+    .sort((a, b) => b.uptime_seconds - a.uptime_seconds || a.node_id.localeCompare(b.node_id));
 
   if (known.length === 0) {
     return (
@@ -113,8 +114,8 @@ function UptimeRow({ label, node }: { label: string; node: Node | undefined }) {
   return (
     <div className="flex items-baseline gap-2">
       <span className="eyebrow shrink-0">{label}</span>
-      <span className="min-w-0 flex-1 truncate text-xs text-text-muted" title={node.hostname}>
-        {node.hostname}
+      <span className="min-w-0 flex-1 truncate text-xs text-text-muted" title={nodeSecondaryLabel(node) ?? undefined}>
+        {nodePrimaryLabel(node)}
       </span>
       <span className="shrink-0 text-sm font-semibold tabular-nums text-text">
         {node.uptime_seconds ? formatDuration(node.uptime_seconds) : "—"}

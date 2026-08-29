@@ -147,7 +147,16 @@ export interface AuditEntry {
     | "disable_user"
     | "enable_user"
     | "reset_password"
-    | "force_logout";
+    | "force_logout"
+    // Page-access actions share the same user_audit_log — see
+    // internal/core/pageauthz's Audit* constants.
+    | "create_role_access"
+    | "add_page_to_role_access"
+    | "remove_page_from_role_access"
+    | "assign_role_access"
+    | "revoke_role_access"
+    | "grant_page_access"
+    | "revoke_page_access";
   detail?: Record<string, unknown>;
   created_at: string;
 }
@@ -155,6 +164,77 @@ export interface AuditEntry {
 export interface ListUserAuditResponse {
   entries: AuditEntry[];
   total: number;
+}
+
+// --------------------------------------------------- Admin: Page Access ----
+//
+// A second, independent access axis from role grants (see internal/core/
+// pageauthz): which pages a user may even reach, per scope. Mirrors
+// internal/api/v1's pageaccess.go response shapes.
+
+/** The fixed set of gateable pages — see internal/core/pageauthz.KnownPages
+ *  and web/src/shell/pages.ts, which it mirrors. */
+export type Page =
+  | "overview"
+  | "nodes"
+  | "containers"
+  | "processes"
+  | "services"
+  | "cron"
+  | "ports"
+  | "disks"
+  | "users";
+
+/**
+ * One page-access grant: a direct page grant (`page` set) or a RoleAccess
+ * bundle assignment (`role_access` set) — the backend presents both as this
+ * one shape (internal/api/v1.AssignmentResponse). Scoped to one node, or
+ * fleet-wide.
+ */
+export interface PageAccessAssignment {
+  id: string;
+  node_id?: string;
+  fleet_wide: boolean;
+  granted_at: string;
+  granted_by?: string;
+  revoked_at?: string;
+  revoked_by?: string;
+  /** Set for a bundle assignment; empty for a direct page grant. */
+  role_access?: string;
+  /** Set for a direct page grant; empty for a bundle assignment. */
+  page?: Page;
+}
+
+/** GET /api/v1/users/{id}/page-access — one user's full page-access picture. */
+export interface ListUserPageAccessResponse {
+  role_access: PageAccessAssignment[];
+  pages: PageAccessAssignment[];
+}
+
+/** One reusable page bundle — GET /api/v1/role-access, one entry. */
+export interface RoleAccessDefinition {
+  name: string;
+  pages: Page[];
+}
+
+export interface ListRoleAccessResponse {
+  role_access: RoleAccessDefinition[];
+  total: number;
+}
+
+/** POST /api/v1/users/{id}/page-access. Exactly one of `node_id` or
+ *  `fleet_wide: true`, same no-default rule as GrantRoleRequest. */
+export interface GrantPageAccessRequest {
+  page: Page;
+  node_id?: string;
+  fleet_wide?: boolean;
+}
+
+/** POST /api/v1/users/{id}/role-access. */
+export interface AssignRoleAccessRequest {
+  role_access_name: string;
+  node_id?: string;
+  fleet_wide?: boolean;
 }
 
 /** GET /api/v1/system/health */

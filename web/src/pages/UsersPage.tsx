@@ -4,47 +4,107 @@ import {
   Ban,
   Check,
   Copy,
+  FileKey,
   History,
   KeyRound,
   LogOut,
   MoreHorizontal,
   PlayCircle,
+  Plus,
   ShieldMinus,
   ShieldPlus,
   UserPlus,
+  X,
   type LucideIcon,
 } from "lucide-react";
 import { ApiError } from "../api/client";
 import { emptyArray } from "../api/empty";
 import {
+  useAssignRoleAccess,
   useCreateUser,
   useDisableUser,
   useEnableUser,
   useForceLogout,
+  useGrantPageAccess,
   useGrantRole,
   useNodes,
+  usePageAccessByUser,
   useResetPassword,
+  useRevokePageAccess,
   useRevokeRole,
+  useRevokeRoleAccess,
+  useRoleAccessDefinitions,
   useUserAudit,
+  useUserPageAccess,
   useUsers,
 } from "../api/queries";
-import type { AuditEntry, Grant, Role, UserAccount } from "../api/types";
+import type {
+  AuditEntry,
+  Grant,
+  ListUserPageAccessResponse,
+  Page,
+  PageAccessAssignment,
+  Role,
+  UserAccount,
+} from "../api/types";
 import { useAuth } from "../auth/AuthContext";
 import { Badge } from "../components/Badge";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
-import { Drawer, DrawerField } from "../components/Drawer";
 import { EmptyAction, EmptyState } from "../components/EmptyState";
 import { Modal, ModalActions } from "../components/Modal";
 import { PageHeader } from "../components/PageHeader";
 import { QueryState } from "../components/QueryState";
 import { useToast } from "../components/Toast";
 import { SearchInput, Toolbar } from "../components/Toolbar";
+import { NAV_PAGES } from "../shell/pages";
 import { emptyArt, errorArt } from "../lib/assets";
-import { formatTime } from "../format";
+import { formatDateTime } from "../format";
 
 /** Every role a grant may name — see internal/core/user.KnownRoles. */
 const ROLES: Role[] = ["viewer", "operator", "admin"];
+
+/** Every gateable page — see internal/core/pageauthz.KnownPages. */
+const PAGES: Page[] = [
+  "overview",
+  "nodes",
+  "containers",
+  "processes",
+  "services",
+  "cron",
+  "ports",
+  "disks",
+  "users",
+];
+
+/** Pages with no per-node concept: a grant naming one must be fleet-wide.
+ *  Mirrors internal/core/pageauthz.FleetOnlyPages. */
+const FLEET_ONLY_PAGES = new Set<Page>(["overview", "nodes", "users"]);
+
+/** The six pages "Grant all pages for a node" fires — every page that can be
+ *  node-scoped. */
+const NODE_SCOPED_PAGES: Page[] = PAGES.filter((p) => !FLEET_ONLY_PAGES.has(p));
+
+/** page key → route path, to borrow the label and icon NAV_PAGES already
+ *  defines (web/src/shell/pages.ts, the same source pageauthz.Page mirrors). */
+const PAGE_ROUTE: Record<Page, string> = {
+  overview: "/",
+  nodes: "/nodes",
+  containers: "/containers",
+  processes: "/processes",
+  services: "/services",
+  cron: "/cron",
+  ports: "/ports",
+  disks: "/disks",
+  users: "/users",
+};
+
+const PAGE_META: Record<Page, { label: string; icon: LucideIcon }> = Object.fromEntries(
+  PAGES.map((p) => {
+    const nav = NAV_PAGES.find((n) => n.to === PAGE_ROUTE[p]);
+    return [p, { label: nav?.label ?? p, icon: nav?.icon ?? FileKey }];
+  }),
+) as Record<Page, { label: string; icon: LucideIcon }>;
 
 const ACTION_LABEL: Record<AuditEntry["action"], string> = {
   create_user: "Account created",
@@ -54,6 +114,13 @@ const ACTION_LABEL: Record<AuditEntry["action"], string> = {
   enable_user: "Account enabled",
   reset_password: "Password reset",
   force_logout: "Forced logout",
+  create_role_access: "Bundle created",
+  add_page_to_role_access: "Page added to bundle",
+  remove_page_from_role_access: "Page removed from bundle",
+  assign_role_access: "Bundle assigned",
+  revoke_role_access: "Bundle revoked",
+  grant_page_access: "Page access granted",
+  revoke_page_access: "Page access revoked",
 };
 
 function messageFor(error: unknown): string {
@@ -65,33 +132,69 @@ function isFleetWideAdmin(g: Grant): boolean {
 }
 
 /**
- * The display scope for a grant — "fleet-wide", or the node's human-readable
- * hostname (the same one Nodes/NodeSwitcher show), never the raw node id.
- * Falls back to the id only when the node isn't in `nodeNames` — e.g. it no
- * longer exists — rather than showing nothing or erroring.
+ * The display scope for a grant or page-access assignment — "fleet-wide", or
+ * the node's stable id (the primary label Nodes/NodeSwitcher show) with the
+ * hostname in parentheses as secondary context when it is known and differs.
  */
-function scopeLabel(g: Grant, nodeNames: Map<string, string>): string {
-  if (g.fleet_wide) return "fleet-wide";
-  if (!g.node_id) return "unknown node";
-  return nodeNames.get(g.node_id) ?? g.node_id;
+function scopeLabel(a: { fleet_wide: boolean; node_id?: string }, nodeNames: Map<string, string>): string {
+  if (a.fleet_wide) return "fleet-wide";
+  if (!a.node_id) return "unknown node";
+  const hostname = nodeNames.get(a.node_id);
+  return hostname && hostname !== a.node_id ? `${a.node_id} (${hostname})` : a.node_id;
+}
+
+// ------------------------------------------------------------ Avatar ----
+
+const AVATAR_FALLBACK = "bg-primary/15 text-primary";
+const AVATAR_COLORS = [
+  AVATAR_FALLBACK,
+  "bg-info/15 text-info",
+  "bg-success/15 text-success",
+  "bg-warning/15 text-warning",
+  "bg-danger/15 text-danger",
+];
+
+function initials(name: string): string {
+  const parts = name.split(/[^a-zA-Z0-9]+/).filter(Boolean);
+  const [first, second] = parts;
+  if (first && second) return (first.charAt(0) + second.charAt(0)).toUpperCase();
+  return (first ?? name).slice(0, 2).toUpperCase();
+}
+
+function avatarColor(name: string): string {
+  let h = 0;
+  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) | 0;
+  return AVATAR_COLORS[Math.abs(h) % AVATAR_COLORS.length] ?? AVATAR_FALLBACK;
+}
+
+function Avatar({ name, size = "sm" }: { name: string; size?: "sm" | "md" }) {
+  const cls = size === "md" ? "h-10 w-10 text-sm" : "h-7 w-7 text-[11px]";
+  return (
+    <span
+      aria-hidden="true"
+      className={`inline-flex shrink-0 items-center justify-center rounded-full font-semibold ${cls} ${avatarColor(name)}`}
+    >
+      {initials(name)}
+    </span>
+  );
 }
 
 /**
- * Manage users and their access grants.
+ * Manage users, their role grants, and their page access.
  *
  * The one page in Atlas with real, mutating actions — see api/client.ts's
  * doc on the /users exception and Button's own "Atlas has no destructive
- * actions" comment, which this page is the first to need one for. Every
- * mutation here is gated server-side by user.manage regardless of what this
- * page shows; the `can_manage_users` check below is a display convenience,
- * not the boundary — see CurrentUser's own doc.
+ * actions" comment. Every mutation here is gated server-side by user.manage
+ * regardless of what this page shows; the `can_manage_users` check below is a
+ * display convenience, not the boundary.
  */
 export function UsersPage() {
   const { user: me } = useAuth();
   const usersQuery = useUsers();
   const [search, setSearch] = useState("");
   const [modal, setModal] = useState<ModalState | null>(null);
-  const [activityUserID, setActivityUserID] = useState<string | null>(null);
+  const [selectedUserID, setSelectedUserID] = useState<string | null>(null);
+  const [panelTab, setPanelTab] = useState<PanelTab>("overview");
 
   const createUser = useCreateUser();
   const grantRole = useGrantRole();
@@ -109,11 +212,10 @@ export function UsersPage() {
     return all.filter((u) => u.username.toLowerCase().includes(q));
   }, [all, search]);
 
-  // Grants only carry a node_id; every other page identifies a node by its
-  // hostname (see NodesPage, NodeSwitcher), so this page reuses the same
-  // /nodes data rather than showing the raw id or building a second lookup.
-  // Shares its cache with GrantRoleModal's own useNodes() call below — one
-  // request either way.
+  // Grants carry a node_id, which is the primary label everywhere now
+  // (see lib/nodeIdentity). This lookup adds the node's hostname as
+  // parenthetical context in scopeLabel; it shares its cache with the grant
+  // modals' own useNodes() calls.
   const nodesQuery = useNodes();
   const nodeNames = useMemo(() => {
     const map = new Map<string, string>();
@@ -121,15 +223,42 @@ export function UsersPage() {
     return map;
   }, [nodesQuery.data]);
 
+  // Per-user page access, for the list column's badge. Fanned out over every
+  // known user (not just the filtered view) so the count is stable across
+  // searches and the panel that opens next reads a warm cache.
+  const pageAccess = usePageAccessByUser(useMemo(() => all.map((u) => u.id), [all]));
+
+  // Whether the Role-Access Bundles section shows at all: only when at least
+  // one bundle is defined system-wide.
+  const bundleDefs = useRoleAccessDefinitions();
+  const hasBundles = (bundleDefs.data?.total ?? 0) > 0;
+
   // How many *other* enabled users hold a fleet-wide admin grant — the same
-  // condition the backend's last-admin guard checks (see
-  // internal/storage/user.otherEnabledFleetWideAdminExists), computed here
-  // only to disable the action ahead of a request that would fail anyway.
-  // The backend re-checks this itself regardless of what this says.
+  // condition the backend's last-admin guard checks, computed here only to
+  // disable the action ahead of a request that would fail anyway.
   const enabledFleetAdmins = useMemo(
     () => new Set(all.filter((u) => !u.disabled && u.grants?.some(isFleetWideAdmin)).map((u) => u.id)),
     [all],
   );
+  const isRevokeBlocked = (g: Grant) => isFleetWideAdmin(g) && enabledFleetAdmins.size <= 1;
+
+  const selectedUser = all.find((u) => u.id === selectedUserID) ?? null;
+  // A user removed from the list (never happens today — no delete) should not
+  // leave a panel open against nothing.
+  useEffect(() => {
+    if (selectedUserID && !selectedUser) setSelectedUserID(null);
+  }, [selectedUserID, selectedUser]);
+
+  // A row-body click toggles that user's panel; the "..." menu's "View
+  // activity" always opens it on the Activity Log tab.
+  function togglePanel(id: string) {
+    setPanelTab("overview");
+    setSelectedUserID((cur) => (cur === id ? null : id));
+  }
+  function openActivity(id: string) {
+    setPanelTab("activity");
+    setSelectedUserID(id);
+  }
 
   if (!me?.can_manage_users) {
     return (
@@ -151,6 +280,7 @@ export function UsersPage() {
   return (
     <>
       <PageHeader
+        subtitle="Manage users, roles, and page access across Atlas."
         action={
           <Button variant="primary" icon={UserPlus} onClick={() => { setModal({ kind: "create" }); }}>
             Create user
@@ -197,6 +327,7 @@ export function UsersPage() {
                 <tr>
                   <Th>Username</Th>
                   <Th>Roles</Th>
+                  <Th>Page Access</Th>
                   <Th>Status</Th>
                   <Th>Created</Th>
                   <Th align="right">Actions</Th>
@@ -208,8 +339,12 @@ export function UsersPage() {
                     key={u.id}
                     user={u}
                     isSelf={u.id === me.user_id}
+                    selected={u.id === selectedUserID}
                     nodeNames={nodeNames}
+                    pageAccess={pageAccess.byUser.get(u.id)}
+                    pageAccessLoading={pageAccess.isPending}
                     isOnlyFleetAdmin={enabledFleetAdmins.has(u.id) && enabledFleetAdmins.size <= 1}
+                    onSelect={() => { togglePanel(u.id); }}
                     onGrant={() => { setModal({ kind: "grant", target: u }); }}
                     onRevokePick={() => { setModal({ kind: "revokePick", target: u }); }}
                     onDisable={() => { setModal({ kind: "disable", target: u }); }}
@@ -221,7 +356,7 @@ export function UsersPage() {
                     }}
                     onResetPassword={() => { setModal({ kind: "resetConfirm", target: u }); }}
                     onForceLogout={() => { setModal({ kind: "forceLogout", target: u }); }}
-                    onViewActivity={() => { setActivityUserID(u.id); }}
+                    onViewActivity={() => { openActivity(u.id); }}
                   />
                 ))}
               </tbody>
@@ -229,6 +364,26 @@ export function UsersPage() {
           </div>
         ) : null}
       </Card>
+
+      {selectedUser ? (
+        <UserDetailPanel
+          user={selectedUser}
+          isSelf={selectedUser.id === me.user_id}
+          nodeNames={nodeNames}
+          showBundles={hasBundles}
+          tab={panelTab}
+          onTab={setPanelTab}
+          onClose={() => { setSelectedUserID(null); }}
+          isRevokeBlocked={isRevokeBlocked}
+          onGrantRole={() => { setModal({ kind: "grant", target: selectedUser }); }}
+          onRevokeRole={(grant) => { setModal({ kind: "revokeConfirm", target: selectedUser, grant }); }}
+          onGrantPage={() => { setModal({ kind: "grantPage", target: selectedUser }); }}
+          onGrantAllPages={() => { setModal({ kind: "grantAllPages", target: selectedUser }); }}
+          onRevokePage={(assignment) => { setModal({ kind: "revokePage", target: selectedUser, assignment }); }}
+          onAssignBundle={() => { setModal({ kind: "assignBundle", target: selectedUser }); }}
+          onRevokeBundle={(assignment) => { setModal({ kind: "revokeBundle", target: selectedUser, assignment }); }}
+        />
+      ) : null}
 
       {modal?.kind === "create" ? (
         <CreateUserModal
@@ -252,7 +407,7 @@ export function UsersPage() {
         <RevokePickModal
           target={modal.target}
           nodeNames={nodeNames}
-          isBlocked={(g) => isFleetWideAdmin(g) && enabledFleetAdmins.size <= 1}
+          isBlocked={isRevokeBlocked}
           onClose={() => { setModal(null); }}
           onPick={(grant) => { setModal({ kind: "revokeConfirm", target: modal.target, grant }); }}
         />
@@ -288,17 +443,40 @@ export function UsersPage() {
       {modal?.kind === "forceLogout" ? (
         <ForceLogoutConfirmModal target={modal.target} forceLogout={forceLogout} onClose={() => { setModal(null); }} />
       ) : null}
-
-      {activityUserID ? (
-        <UserActivityDrawer
-          userID={activityUserID}
-          username={all.find((u) => u.id === activityUserID)?.username ?? ""}
-          onClose={() => { setActivityUserID(null); }}
+      {modal?.kind === "grantPage" ? (
+        <GrantPageAccessModal target={modal.target} onClose={() => { setModal(null); }} />
+      ) : null}
+      {modal?.kind === "grantAllPages" ? (
+        <GrantAllPagesModal target={modal.target} nodeNames={nodeNames} onClose={() => { setModal(null); }} />
+      ) : null}
+      {modal?.kind === "assignBundle" ? (
+        <AssignBundleModal
+          target={modal.target}
+          definitions={bundleDefs.data?.role_access ?? emptyArray()}
+          onClose={() => { setModal(null); }}
+        />
+      ) : null}
+      {modal?.kind === "revokePage" ? (
+        <RevokePageAccessConfirmModal
+          target={modal.target}
+          assignment={modal.assignment}
+          nodeNames={nodeNames}
+          onClose={() => { setModal(null); }}
+        />
+      ) : null}
+      {modal?.kind === "revokeBundle" ? (
+        <RevokeBundleConfirmModal
+          target={modal.target}
+          assignment={modal.assignment}
+          nodeNames={nodeNames}
+          onClose={() => { setModal(null); }}
         />
       ) : null}
     </>
   );
 }
+
+type PanelTab = "overview" | "activity";
 
 type ModalState =
   | { kind: "create" }
@@ -309,7 +487,12 @@ type ModalState =
   | { kind: "disable"; target: UserAccount }
   | { kind: "resetConfirm"; target: UserAccount }
   | { kind: "resetReveal"; target: UserAccount; password: string }
-  | { kind: "forceLogout"; target: UserAccount };
+  | { kind: "forceLogout"; target: UserAccount }
+  | { kind: "grantPage"; target: UserAccount }
+  | { kind: "grantAllPages"; target: UserAccount }
+  | { kind: "assignBundle"; target: UserAccount }
+  | { kind: "revokePage"; target: UserAccount; assignment: PageAccessAssignment }
+  | { kind: "revokeBundle"; target: UserAccount; assignment: PageAccessAssignment };
 
 function Th({ children, align = "left" }: { children: React.ReactNode; align?: "left" | "right" }) {
   return (
@@ -323,11 +506,40 @@ function Th({ children, align = "left" }: { children: React.ReactNode; align?: "
   );
 }
 
+// -------------------------------------------------------- users table ----
+
+function PageAccessBadge({
+  pageAccess,
+  loading,
+}: {
+  pageAccess: ListUserPageAccessResponse | undefined;
+  loading: boolean;
+}) {
+  if (!pageAccess) {
+    return <span className="text-xs text-text-subtle">{loading ? "…" : "—"}</span>;
+  }
+  const count = pageAccess.pages.length;
+  // "No pages" is a warning, never a neutral empty cell: a user with zero
+  // page access is a state an admin must notice, not glance past.
+  if (count === 0) {
+    return <Badge tone="warning">No pages</Badge>;
+  }
+  return (
+    <span className="rounded bg-primary/10 px-1.5 py-0.5 text-[11px] font-medium text-primary">
+      {count} page{count === 1 ? "" : "s"}
+    </span>
+  );
+}
+
 function UserRow({
   user: u,
   isSelf,
+  selected,
   nodeNames,
+  pageAccess,
+  pageAccessLoading,
   isOnlyFleetAdmin,
+  onSelect,
   onGrant,
   onRevokePick,
   onDisable,
@@ -338,8 +550,12 @@ function UserRow({
 }: {
   user: UserAccount;
   isSelf: boolean;
+  selected: boolean;
   nodeNames: Map<string, string>;
+  pageAccess: ListUserPageAccessResponse | undefined;
+  pageAccessLoading: boolean;
   isOnlyFleetAdmin: boolean;
+  onSelect: () => void;
   onGrant: () => void;
   onRevokePick: () => void;
   onDisable: () => void;
@@ -386,13 +602,24 @@ function UserRow({
   ];
 
   return (
-    <tr className="border-b border-border/60 last:border-0 hover:bg-surface-hover">
-      <td className="px-3 py-2.5">
-        <span className="block font-medium text-text">
-          {u.username}
-          {isSelf ? <span className="ml-1.5 text-xs text-text-muted">(you)</span> : null}
-        </span>
-        {u.email ? <span className="block truncate text-xs text-text-subtle">{u.email}</span> : null}
+    <tr
+      onClick={onSelect}
+      aria-expanded={selected}
+      className={`cursor-pointer border-b border-border/60 last:border-0 ${
+        selected ? "bg-primary/5" : "hover:bg-surface-hover"
+      }`}
+    >
+      <td className={`px-3 py-2.5 ${selected ? "border-l-2 border-l-primary" : "border-l-2 border-l-transparent"}`}>
+        <div className="flex items-center gap-2.5">
+          <Avatar name={u.username} />
+          <span className="min-w-0">
+            <span className="block font-medium text-text">
+              {u.username}
+              {isSelf ? <span className="ml-1.5 text-xs text-text-muted">(you)</span> : null}
+            </span>
+            {u.email ? <span className="block truncate text-xs text-text-subtle">{u.email}</span> : null}
+          </span>
+        </div>
       </td>
       <td className="px-3 py-2.5">
         {grants.length === 0 ? (
@@ -403,7 +630,7 @@ function UserRow({
               <span
                 key={g.id}
                 className="rounded bg-primary/10 px-1.5 py-0.5 text-[11px] font-medium text-primary"
-                title={`Granted ${formatTime(g.granted_at)}${g.granted_by ? ` by ${g.granted_by}` : ""}`}
+                title={`Granted ${formatDateTime(g.granted_at)}${g.granted_by ? ` by ${g.granted_by}` : ""}`}
               >
                 {g.role} · {scopeLabel(g, nodeNames)}
               </span>
@@ -412,10 +639,13 @@ function UserRow({
         )}
       </td>
       <td className="px-3 py-2.5">
+        <PageAccessBadge pageAccess={pageAccess} loading={pageAccessLoading} />
+      </td>
+      <td className="px-3 py-2.5">
         <Badge tone={u.disabled ? "danger" : "success"}>{u.disabled ? "Disabled" : "Active"}</Badge>
       </td>
-      <td className="px-3 py-2.5 text-xs text-text-muted">{formatTime(u.created_at)}</td>
-      <td className="px-3 py-2.5 text-right">
+      <td className="px-3 py-2.5 text-xs text-text-muted">{formatDateTime(u.created_at)}</td>
+      <td className="px-3 py-2.5 text-right" onClick={(e) => { e.stopPropagation(); }}>
         <RowMenu items={items} />
       </td>
     </tr>
@@ -432,8 +662,7 @@ interface RowMenuItem {
 }
 
 /** Estimated menu geometry, for flipping above the trigger when there isn't
- *  room below — computed before paint since the menu doesn't exist yet to
- *  measure. w-56 below matches MENU_WIDTH_PX. */
+ *  room below. w-56 below matches MENU_WIDTH_PX. */
 const MENU_WIDTH_PX = 224;
 const MENU_ITEM_HEIGHT_PX = 36;
 
@@ -441,11 +670,8 @@ const MENU_ITEM_HEIGHT_PX = 36;
  * The row action menu. Rendered through a portal into document.body rather
  * than positioned relative to its trigger in place: the table's own
  * scroll-thin max-h-[34rem] overflow-auto container clips anything
- * absolutely positioned inside it, which cut this menu off for any row near
- * the container's bottom edge — worst for the last row, which has nowhere
- * left to clip *into*. Positioning is computed in viewport (fixed)
- * coordinates from the trigger's own bounding rect instead, which no
- * ancestor's overflow can clip.
+ * absolutely positioned inside it. Positioning is computed in viewport
+ * (fixed) coordinates from the trigger's own bounding rect instead.
  */
 function RowMenu({ items }: { items: RowMenuItem[] }) {
   const [open, setOpen] = useState(false);
@@ -475,10 +701,6 @@ function RowMenu({ items }: { items: RowMenuItem[] }) {
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") setOpen(false);
     };
-    // A scroll anywhere (the table's own overflow-auto included, via
-    // capture) or a resize would leave the portal's fixed coordinates
-    // stale relative to the trigger — closing is simpler and safer than
-    // tracking every scrollable ancestor to reposition live.
     const onScrollOrResize = () => { setOpen(false); };
     document.addEventListener("mousedown", onPointerDown);
     document.addEventListener("keydown", onKeyDown);
@@ -537,11 +759,473 @@ function RowMenu({ items }: { items: RowMenuItem[] }) {
   );
 }
 
+// ------------------------------------------------------ detail panel ----
+
+function UserDetailPanel({
+  user,
+  isSelf,
+  nodeNames,
+  showBundles,
+  tab,
+  onTab,
+  onClose,
+  isRevokeBlocked,
+  onGrantRole,
+  onRevokeRole,
+  onGrantPage,
+  onGrantAllPages,
+  onRevokePage,
+  onAssignBundle,
+  onRevokeBundle,
+}: {
+  user: UserAccount;
+  isSelf: boolean;
+  nodeNames: Map<string, string>;
+  showBundles: boolean;
+  tab: PanelTab;
+  onTab: (t: PanelTab) => void;
+  onClose: () => void;
+  isRevokeBlocked: (g: Grant) => boolean;
+  onGrantRole: () => void;
+  onRevokeRole: (g: Grant) => void;
+  onGrantPage: () => void;
+  onGrantAllPages: () => void;
+  onRevokePage: (a: PageAccessAssignment) => void;
+  onAssignBundle: () => void;
+  onRevokeBundle: (a: PageAccessAssignment) => void;
+}) {
+  const pageAccess = useUserPageAccess(user.id);
+  const audit = useUserAudit(user.id);
+  const grants = user.grants ?? [];
+  const entries = audit.data?.entries ?? emptyArray<AuditEntry>();
+  const roleAccess = pageAccess.data?.role_access ?? emptyArray<PageAccessAssignment>();
+  const directPages = pageAccess.data?.pages ?? emptyArray<PageAccessAssignment>();
+
+  return (
+    <Card level="floating" className="mt-4 p-0">
+      <header className="flex flex-wrap items-center gap-3 border-b border-border p-4">
+        <Avatar name={user.username} size="md" />
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <span className="font-semibold text-text">
+              {user.username}
+              {isSelf ? <span className="ml-1.5 text-xs font-normal text-text-muted">(you)</span> : null}
+            </span>
+            <Badge tone={user.disabled ? "danger" : "success"}>{user.disabled ? "Disabled" : "Active"}</Badge>
+          </div>
+          <p className="text-xs text-text-muted">
+            {user.email ? <span>{user.email} · </span> : null}
+            Created {formatDateTime(user.created_at)}
+          </p>
+        </div>
+        <Button variant="secondary" size="sm" icon={X} className="ml-auto" onClick={onClose}>
+          Close
+        </Button>
+      </header>
+
+      <div className="flex gap-1 border-b border-border px-4">
+        <TabButton active={tab === "overview"} onClick={() => { onTab("overview"); }}>
+          Overview
+        </TabButton>
+        <TabButton active={tab === "activity"} onClick={() => { onTab("activity"); }}>
+          Activity Log
+        </TabButton>
+      </div>
+
+      {tab === "overview" ? (
+        <div className="grid gap-4 p-4 lg:grid-cols-2">
+          {/* 1. Roles */}
+          <Section
+            n={1}
+            title="Roles"
+            hint="Roles define the level of access in Atlas."
+            actions={
+              <Button variant="primary" size="sm" icon={Plus} onClick={onGrantRole}>
+                Grant role
+              </Button>
+            }
+          >
+            {grants.length === 0 ? (
+              <EmptyRow>No roles granted to this user.</EmptyRow>
+            ) : (
+              <AccessTable head={["Role", "Granted by", "Granted at", ""]}>
+                {grants.map((g) => {
+                  const blocked = isRevokeBlocked(g);
+                  return (
+                    <tr key={g.id} className="border-t border-border/60">
+                      <td className="py-2 pr-3">
+                        <span className="font-medium text-text">{g.role}</span>
+                        <span className="text-text-muted"> · {scopeLabel(g, nodeNames)}</span>
+                      </td>
+                      <td className="py-2 pr-3 text-xs text-text-muted">{g.granted_by ?? "—"}</td>
+                      <td className="py-2 pr-3 text-xs text-text-muted">{formatDateTime(g.granted_at)}</td>
+                      <td className="py-2 text-right">
+                        <button
+                          type="button"
+                          disabled={blocked}
+                          title={blocked ? "Can't revoke — this is the last user with admin access" : "Revoke"}
+                          onClick={() => { onRevokeRole(g); }}
+                          className="rounded px-2 py-1 text-xs font-medium text-danger hover:bg-danger/10 disabled:cursor-not-allowed disabled:opacity-40"
+                        >
+                          Revoke
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </AccessTable>
+            )}
+          </Section>
+
+          {/* 2. Page Access */}
+          <Section
+            n={2}
+            title="Page Access"
+            hint="Pages this user can access, and for which scope."
+            actions={
+              <>
+                <Button variant="secondary" size="sm" onClick={onGrantAllPages}>
+                  Grant all pages for a node
+                </Button>
+                <Button variant="primary" size="sm" icon={Plus} onClick={onGrantPage}>
+                  Grant page access
+                </Button>
+              </>
+            }
+          >
+            <SectionState
+              isPending={pageAccess.isPending}
+              error={pageAccess.error}
+              onRetry={() => void pageAccess.refetch()}
+            />
+            {!pageAccess.isPending && !pageAccess.error ? (
+              directPages.length === 0 ? (
+                <EmptyRow>No direct page access granted.</EmptyRow>
+              ) : (
+                <AccessTable head={["Page", "Scope", "Granted by", "Granted at", ""]}>
+                  {directPages.map((a) => {
+                    const meta = a.page ? PAGE_META[a.page] : undefined;
+                    const Icon = meta?.icon ?? FileKey;
+                    return (
+                      <tr key={a.id} className="border-t border-border/60">
+                        <td className="py-2 pr-3">
+                          <span className="flex items-center gap-1.5 font-medium text-text">
+                            <Icon size={13} className="text-text-muted" />
+                            {meta?.label ?? a.page}
+                          </span>
+                        </td>
+                        <td className="py-2 pr-3 text-xs text-text-muted">{scopeLabel(a, nodeNames)}</td>
+                        <td className="py-2 pr-3 text-xs text-text-muted">{a.granted_by ?? "—"}</td>
+                        <td className="py-2 pr-3 text-xs text-text-muted">{formatDateTime(a.granted_at)}</td>
+                        <td className="py-2 text-right">
+                          <button
+                            type="button"
+                            aria-label={`Revoke ${meta?.label ?? a.page ?? "page"} access`}
+                            title="Revoke"
+                            onClick={() => { onRevokePage(a); }}
+                            className="rounded p-1 text-text-muted hover:bg-danger/10 hover:text-danger"
+                          >
+                            <X size={14} />
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </AccessTable>
+              )
+            ) : null}
+          </Section>
+
+          {/* 3. Role-Access Bundles — only when any bundle exists system-wide */}
+          {showBundles ? (
+            <Section
+              n={3}
+              title="Role-Access Bundles"
+              hint="Bundles are preset collections of page access grants."
+              actions={
+                <Button variant="primary" size="sm" icon={Plus} onClick={onAssignBundle}>
+                  Assign bundle
+                </Button>
+              }
+            >
+              {pageAccess.isPending ? (
+                <SectionState isPending error={null} onRetry={() => void pageAccess.refetch()} />
+              ) : roleAccess.length === 0 ? (
+                <EmptyRow>No bundles assigned to this user.</EmptyRow>
+              ) : (
+                <AccessTable head={["Bundle", "Scope", "Granted by", "Granted at", ""]}>
+                  {roleAccess.map((a) => (
+                    <tr key={a.id} className="border-t border-border/60">
+                      <td className="py-2 pr-3 font-medium text-text">{a.role_access}</td>
+                      <td className="py-2 pr-3 text-xs text-text-muted">{scopeLabel(a, nodeNames)}</td>
+                      <td className="py-2 pr-3 text-xs text-text-muted">{a.granted_by ?? "—"}</td>
+                      <td className="py-2 pr-3 text-xs text-text-muted">{formatDateTime(a.granted_at)}</td>
+                      <td className="py-2 text-right">
+                        <button
+                          type="button"
+                          onClick={() => { onRevokeBundle(a); }}
+                          className="rounded px-2 py-1 text-xs font-medium text-danger hover:bg-danger/10"
+                        >
+                          Revoke
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </AccessTable>
+              )}
+            </Section>
+          ) : null}
+
+          {/* 4. Activity */}
+          <Section
+            n={4}
+            title="Activity"
+            hint="Recent access changes for this user."
+            actions={
+              <Button variant="ghost" size="sm" onClick={() => { onTab("activity"); }}>
+                View full audit log
+              </Button>
+            }
+          >
+            {entries.length === 0 ? (
+              <EmptyRow>No recorded activity yet.</EmptyRow>
+            ) : (
+              <ul className="flex flex-col">
+                {entries.slice(0, 4).map((e) => (
+                  <li key={e.id} className="flex items-center justify-between gap-3 border-t border-border/60 py-2 text-sm first:border-0">
+                    <span className="text-text">{ACTION_LABEL[e.action]}</span>
+                    <span className="shrink-0 text-xs text-text-subtle">
+                      {e.actor_username ?? e.actor_user_id} · {formatDateTime(e.created_at)}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </Section>
+        </div>
+      ) : (
+        <ActivityLog userID={user.id} audit={audit} />
+      )}
+    </Card>
+  );
+}
+
+function TabButton({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`-mb-px border-b-2 px-3 py-2.5 text-sm font-medium transition-colors ${
+        active ? "border-primary text-text" : "border-transparent text-text-muted hover:text-text"
+      }`}
+    >
+      {children}
+    </button>
+  );
+}
+
+function Section({
+  n,
+  title,
+  hint,
+  actions,
+  children,
+}: {
+  n: number;
+  title: string;
+  hint?: string;
+  actions?: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  return (
+    <section className="self-start rounded-xl border border-border p-4">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div>
+          <h3 className="text-sm font-semibold text-text">
+            {n}. {title}
+          </h3>
+          {hint ? <p className="mt-0.5 text-xs text-text-muted">{hint}</p> : null}
+        </div>
+        {actions ? <div className="flex flex-wrap gap-2">{actions}</div> : null}
+      </div>
+      <div className="mt-3">{children}</div>
+    </section>
+  );
+}
+
+function AccessTable({ head, children }: { head: string[]; children: React.ReactNode }) {
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full border-collapse text-sm">
+        <thead>
+          <tr>
+            {head.map((h, i) => (
+              <th
+                key={h || i}
+                className={`pb-1 text-[11px] font-semibold tracking-wider text-text-subtle uppercase ${
+                  i === head.length - 1 ? "text-right" : "text-left"
+                }`}
+              >
+                {h}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>{children}</tbody>
+      </table>
+    </div>
+  );
+}
+
+function EmptyRow({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="rounded-lg border border-dashed border-border px-3 py-4 text-center text-xs text-text-muted">
+      {children}
+    </div>
+  );
+}
+
+/** Compact loading / error state for a panel section — a full [QueryState]
+ *  with its artwork is too heavy at this size. Returns null once there is
+ *  data to render. */
+function SectionState({
+  isPending,
+  error,
+  onRetry,
+}: {
+  isPending: boolean;
+  error: Error | null;
+  onRetry: () => void;
+}) {
+  if (isPending) {
+    return (
+      <div className="flex flex-col gap-2">
+        <div className="h-4 animate-pulse rounded bg-surface-hover" />
+        <div className="h-4 w-3/4 animate-pulse rounded bg-surface-hover" />
+      </div>
+    );
+  }
+  if (error) {
+    return (
+      <p className="text-xs text-danger">
+        Could not load.{" "}
+        <button type="button" onClick={onRetry} className="underline hover:no-underline">
+          Retry
+        </button>
+      </p>
+    );
+  }
+  return null;
+}
+
+function ActivityLog({
+  userID,
+  audit,
+}: {
+  userID: string;
+  audit: ReturnType<typeof useUserAudit>;
+}) {
+  const entries = audit.data?.entries ?? emptyArray<AuditEntry>();
+  return (
+    <div className="p-4">
+      <QueryState
+        isPending={audit.isPending}
+        error={audit.error}
+        isEmpty={entries.length === 0}
+        onRetry={() => void audit.refetch()}
+        rows={4}
+        empty={{ art: emptyArt.data, title: "No recorded activity for this user yet" }}
+      />
+      {entries.length > 0 ? (
+        <ul className="flex flex-col">
+          {entries.map((e) => (
+            <li key={e.id} className="border-b border-border py-2.5 text-sm last:border-0">
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-medium text-text">{ACTION_LABEL[e.action]}</span>
+                <span className="text-xs text-text-subtle">{formatDateTime(e.created_at)}</span>
+              </div>
+              <p className="mt-0.5 text-xs text-text-muted">
+                by {e.actor_username ?? e.actor_user_id}
+                {typeof e.detail?.role === "string" ? ` · ${e.detail.role}` : ""}
+                {typeof e.detail?.page === "string" ? ` · ${e.detail.page}` : ""}
+                {typeof e.detail?.role_access === "string" ? ` · ${e.detail.role_access}` : ""}
+                {e.detail?.fleet_wide === true ? " · fleet-wide" : ""}
+                {typeof e.detail?.node_id === "string" ? ` · ${e.detail.node_id}` : ""}
+              </p>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      <p className="mt-3 text-xs text-text-subtle">
+        User id: <span className="font-mono">{userID}</span>
+      </p>
+    </div>
+  );
+}
+
 // ------------------------------------------------------------- Modals ----
 
 function ErrorLine({ error }: { error: string | null }) {
   if (!error) return null;
   return <p className="mt-3 text-sm text-danger">{error}</p>;
+}
+
+/** The fleet-wide / specific-node picker every grant modal shares. No default
+ *  between the two — an admin picks one, the same rule the server enforces. */
+function ScopeFields({
+  scope,
+  setScope,
+  nodeID,
+  setNodeID,
+  nodes,
+  fleetOnly,
+  fleetOnlyReason,
+}: {
+  scope: "fleet-wide" | "node" | null;
+  setScope: (s: "fleet-wide" | "node") => void;
+  nodeID: string;
+  setNodeID: (id: string) => void;
+  nodes: { node_id: string; hostname: string }[];
+  fleetOnly?: boolean;
+  fleetOnlyReason?: string;
+}) {
+  return (
+    <fieldset className="flex flex-col gap-2">
+      <legend className="mb-1 text-sm text-text">Scope</legend>
+      {fleetOnly ? (
+        <p className="text-xs text-text-muted">{fleetOnlyReason ?? "This choice is fleet-wide only."}</p>
+      ) : null}
+      <label className="flex items-center gap-2 text-sm text-text">
+        <input type="radio" name="scope" checked={scope === "fleet-wide"} onChange={() => { setScope("fleet-wide"); }} />
+        Fleet-wide
+      </label>
+      <label className={`flex items-center gap-2 text-sm ${fleetOnly ? "text-text-subtle" : "text-text"}`}>
+        <input
+          type="radio"
+          name="scope"
+          disabled={fleetOnly}
+          checked={scope === "node"}
+          onChange={() => { setScope("node"); }}
+        />
+        Specific node
+      </label>
+      {scope === "node" && !fleetOnly ? (
+        <select
+          value={nodeID}
+          onChange={(e) => { setNodeID(e.target.value); }}
+          aria-label="Node"
+          className="ml-6 rounded-lg border border-border bg-bg px-3 py-2 text-sm text-text outline-none focus-visible:ring-2 focus-visible:ring-primary"
+        >
+          <option value="" disabled>Select node</option>
+          {nodes.map((n) => (
+            <option key={n.node_id} value={n.node_id}>
+              {n.hostname && n.hostname !== n.node_id ? `${n.node_id} (${n.hostname})` : n.node_id}
+            </option>
+          ))}
+        </select>
+      ) : null}
+    </fieldset>
+  );
 }
 
 function CreateUserModal({
@@ -662,8 +1346,6 @@ function GrantRoleModal({
 }) {
   const nodes = useNodes();
   const { push } = useToast();
-  // No default between fleet-wide and a specific node — an admin must pick
-  // one explicitly, the same rule GrantRoleRequest enforces server-side.
   const [role, setRole] = useState<Role | "">("");
   const [scope, setScope] = useState<"fleet-wide" | "node" | null>(null);
   const [nodeID, setNodeID] = useState("");
@@ -718,40 +1400,13 @@ function GrantRoleModal({
           </select>
         </label>
 
-        <fieldset className="flex flex-col gap-2">
-          <legend className="mb-1 text-sm text-text">Scope</legend>
-          <label className="flex items-center gap-2 text-sm text-text">
-            <input
-              type="radio"
-              name="scope"
-              checked={scope === "fleet-wide"}
-              onChange={() => { setScope("fleet-wide"); }}
-            />
-            Fleet-wide
-          </label>
-          <label className="flex items-center gap-2 text-sm text-text">
-            <input
-              type="radio"
-              name="scope"
-              checked={scope === "node"}
-              onChange={() => { setScope("node"); }}
-            />
-            Specific node
-          </label>
-          {scope === "node" ? (
-            <select
-              value={nodeID}
-              onChange={(e) => { setNodeID(e.target.value); }}
-              aria-label="Node"
-              className="ml-6 rounded-lg border border-border bg-bg px-3 py-2 text-sm text-text outline-none focus-visible:ring-2 focus-visible:ring-primary"
-            >
-              <option value="" disabled>Select node</option>
-              {(nodes.data?.nodes ?? []).map((n) => (
-                <option key={n.node_id} value={n.node_id}>{n.hostname}</option>
-              ))}
-            </select>
-          ) : null}
-        </fieldset>
+        <ScopeFields
+          scope={scope}
+          setScope={setScope}
+          nodeID={nodeID}
+          setNodeID={setNodeID}
+          nodes={nodes.data?.nodes ?? []}
+        />
 
         <ErrorLine error={error} />
         <ModalActions>
@@ -800,7 +1455,7 @@ function RevokePickModal({
                   <span className="font-medium text-text">{g.role}</span>{" "}
                   <span className="text-text-muted">· {scopeLabel(g, nodeNames)}</span>
                 </span>
-                <span className="text-xs text-text-subtle">{formatTime(g.granted_at)}</span>
+                <span className="text-xs text-text-subtle">{formatDateTime(g.granted_at)}</span>
               </button>
             </li>
           );
@@ -1003,47 +1658,397 @@ function ForceLogoutConfirmModal({
   );
 }
 
-function UserActivityDrawer({
-  userID,
-  username,
-  onClose,
-}: {
-  userID: string;
-  username: string;
-  onClose: () => void;
-}) {
-  const audit = useUserAudit(userID);
-  const entries = audit.data?.entries ?? emptyArray<AuditEntry>();
+function GrantPageAccessModal({ target, onClose }: { target: UserAccount; onClose: () => void }) {
+  const nodes = useNodes();
+  const grant = useGrantPageAccess();
+  const { push } = useToast();
+  const [page, setPage] = useState<Page | "">("");
+  const [scope, setScope] = useState<"fleet-wide" | "node" | null>(null);
+  const [nodeID, setNodeID] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  const fleetOnly = page !== "" && FLEET_ONLY_PAGES.has(page);
+  const effectiveScope = fleetOnly ? "fleet-wide" : scope;
+
+  function submit(e: { preventDefault: () => void }) {
+    e.preventDefault();
+    setError(null);
+    if (!page) {
+      setError("Choose a page.");
+      return;
+    }
+    if (effectiveScope === null) {
+      setError("Choose fleet-wide or a specific node — there is no default.");
+      return;
+    }
+    if (effectiveScope === "node" && !nodeID) {
+      setError("Choose a node.");
+      return;
+    }
+    grant.mutate(
+      {
+        userID: target.id,
+        body: { page, ...(effectiveScope === "fleet-wide" ? { fleet_wide: true } : { node_id: nodeID }) },
+      },
+      {
+        onSuccess: () => {
+          push({ tone: "success", title: `Granted ${PAGE_META[page].label} access to ${target.username}` });
+          onClose();
+        },
+        onError: (err) => { setError(messageFor(err)); },
+      },
+    );
+  }
 
   return (
-    <Drawer title="Activity" subtitle={username} onClose={onClose}>
-      <QueryState
-        isPending={audit.isPending}
-        error={audit.error}
-        isEmpty={entries.length === 0}
-        onRetry={() => void audit.refetch()}
-        rows={4}
-        empty={{ art: emptyArt.data, title: "No recorded activity for this user yet" }}
-      />
-      {entries.length > 0 ? (
-        <ul className="flex flex-col gap-1">
-          {entries.map((e) => (
-            <li key={e.id} className="border-b border-border py-2.5 text-sm last:border-0">
-              <div className="flex items-center justify-between gap-2">
-                <span className="font-medium text-text">{ACTION_LABEL[e.action]}</span>
-                <span className="text-xs text-text-subtle">{formatTime(e.created_at)}</span>
-              </div>
-              <p className="mt-0.5 text-xs text-text-muted">
-                by {e.actor_username ?? e.actor_user_id}
-                {typeof e.detail?.role === "string" ? ` · ${e.detail.role}` : ""}
-                {e.detail?.fleet_wide === true ? " · fleet-wide" : ""}
-                {typeof e.detail?.node_id === "string" ? ` · ${e.detail.node_id}` : ""}
-              </p>
-            </li>
-          ))}
-        </ul>
-      ) : null}
-      <DrawerField label="User id" value={<span className="font-mono text-xs">{userID}</span>} />
-    </Drawer>
+    <Modal title="Grant page access" onClose={onClose}>
+      <form onSubmit={submit} className="flex flex-col gap-4">
+        <p className="text-sm text-text-muted">
+          Give <span className="font-medium text-text">{target.username}</span> access to one page.
+        </p>
+        <label className="flex flex-col gap-1.5 text-sm text-text">
+          Page
+          <select
+            value={page}
+            onChange={(e) => { setPage(e.target.value as Page); }}
+            className="rounded-lg border border-border bg-bg px-3 py-2 text-sm text-text outline-none focus-visible:ring-2 focus-visible:ring-primary"
+          >
+            <option value="" disabled>Select page</option>
+            {PAGES.map((p) => (
+              <option key={p} value={p}>{PAGE_META[p].label}</option>
+            ))}
+          </select>
+        </label>
+
+        <ScopeFields
+          scope={effectiveScope}
+          setScope={setScope}
+          nodeID={nodeID}
+          setNodeID={setNodeID}
+          nodes={nodes.data?.nodes ?? []}
+          fleetOnly={fleetOnly}
+          fleetOnlyReason={`${page ? PAGE_META[page].label : "This page"} has no per-node scope — it is always fleet-wide.`}
+        />
+
+        <ErrorLine error={error} />
+        <ModalActions>
+          <Button type="button" variant="secondary" onClick={onClose}>Cancel</Button>
+          <Button type="submit" variant="primary" disabled={grant.isPending}>
+            {grant.isPending ? "Granting…" : "Grant"}
+          </Button>
+        </ModalActions>
+      </form>
+    </Modal>
+  );
+}
+
+interface PageResult {
+  page: Page;
+  ok: boolean;
+  note: string;
+}
+
+function GrantAllPagesModal({
+  target,
+  nodeNames,
+  onClose,
+}: {
+  target: UserAccount;
+  nodeNames: Map<string, string>;
+  onClose: () => void;
+}) {
+  const nodes = useNodes();
+  const grant = useGrantPageAccess();
+  const [nodeID, setNodeID] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [running, setRunning] = useState(false);
+  const [results, setResults] = useState<PageResult[] | null>(null);
+
+  async function run(e: { preventDefault: () => void }) {
+    e.preventDefault();
+    setError(null);
+    if (!nodeID) {
+      setError("Choose a node.");
+      return;
+    }
+    setRunning(true);
+    const out: PageResult[] = [];
+    for (const page of NODE_SCOPED_PAGES) {
+      try {
+        await grant.mutateAsync({ userID: target.id, body: { page, node_id: nodeID } });
+        out.push({ page, ok: true, note: "granted" });
+      } catch (err) {
+        // A conflict means a bundle or an existing grant already covers this
+        // page for the node — not a failure of intent, but surfaced, not hidden.
+        const conflict = err instanceof ApiError && (err.code === "already_exists" || err.code === "failed_precondition");
+        out.push({ page, ok: conflict, note: conflict ? "already granted" : messageFor(err) });
+      }
+      setResults([...out]);
+    }
+    setRunning(false);
+  }
+
+  const hostname = nodeID ? nodeNames.get(nodeID) : undefined;
+  const nodeLabel = !nodeID ? "" : hostname && hostname !== nodeID ? `${nodeID} (${hostname})` : nodeID;
+  const done = results !== null && !running;
+  const failures = results?.filter((r) => !r.ok).length ?? 0;
+
+  return (
+    <Modal title="Grant all pages for a node" onClose={onClose} width="md">
+      <form onSubmit={(e) => { void run(e); }} className="flex flex-col gap-4">
+        <p className="text-sm text-text-muted">
+          Grant <span className="font-medium text-text">{target.username}</span> access to every node-scoped page
+          ({NODE_SCOPED_PAGES.map((p) => PAGE_META[p].label).join(", ")}) for one node. Overview, Nodes and Users are
+          fleet-wide only and are not included.
+        </p>
+        <label className="flex flex-col gap-1.5 text-sm text-text">
+          Node
+          <select
+            value={nodeID}
+            onChange={(e) => { setNodeID(e.target.value); setResults(null); }}
+            disabled={running}
+            className="rounded-lg border border-border bg-bg px-3 py-2 text-sm text-text outline-none focus-visible:ring-2 focus-visible:ring-primary"
+          >
+            <option value="" disabled>Select node</option>
+            {(nodes.data?.nodes ?? []).map((n) => (
+              <option key={n.node_id} value={n.node_id}>
+                {n.hostname && n.hostname !== n.node_id ? `${n.node_id} (${n.hostname})` : n.node_id}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        {results ? (
+          <ul className="flex flex-col rounded-lg border border-border">
+            {NODE_SCOPED_PAGES.map((p) => {
+              const r = results.find((x) => x.page === p);
+              return (
+                <li
+                  key={p}
+                  className="flex items-center justify-between gap-3 border-b border-border/60 px-3 py-1.5 text-sm last:border-0"
+                >
+                  <span className="text-text">{PAGE_META[p].label}</span>
+                  {r ? (
+                    <span className={`text-xs ${r.ok ? "text-success" : "text-danger"}`}>
+                      {r.ok ? <Check size={12} className="mr-1 inline" /> : <X size={12} className="mr-1 inline" />}
+                      {r.note}
+                    </span>
+                  ) : (
+                    <span className="text-xs text-text-subtle">{running ? "…" : "pending"}</span>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        ) : null}
+
+        {done ? (
+          <p className={`text-sm ${failures > 0 ? "text-warning" : "text-success"}`}>
+            {failures > 0
+              ? `${NODE_SCOPED_PAGES.length - failures} of ${NODE_SCOPED_PAGES.length} pages granted for ${nodeLabel} — ${failures} failed.`
+              : `All ${NODE_SCOPED_PAGES.length} pages granted for ${nodeLabel}.`}
+          </p>
+        ) : null}
+
+        <ErrorLine error={error} />
+        <ModalActions>
+          <Button type="button" variant="secondary" onClick={onClose}>
+            {done ? "Done" : "Cancel"}
+          </Button>
+          {!done ? (
+            <Button type="submit" variant="primary" disabled={running || !nodeID}>
+              {running ? "Granting…" : "Grant pages"}
+            </Button>
+          ) : null}
+        </ModalActions>
+      </form>
+    </Modal>
+  );
+}
+
+function AssignBundleModal({
+  target,
+  definitions,
+  onClose,
+}: {
+  target: UserAccount;
+  definitions: { name: string; pages: Page[] }[];
+  onClose: () => void;
+}) {
+  const nodes = useNodes();
+  const assign = useAssignRoleAccess();
+  const { push } = useToast();
+  const [name, setName] = useState("");
+  const [scope, setScope] = useState<"fleet-wide" | "node" | null>(null);
+  const [nodeID, setNodeID] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  const selected = definitions.find((d) => d.name === name);
+
+  function submit(e: { preventDefault: () => void }) {
+    e.preventDefault();
+    setError(null);
+    if (!name) {
+      setError("Choose a bundle.");
+      return;
+    }
+    if (scope === null) {
+      setError("Choose fleet-wide or a specific node — there is no default.");
+      return;
+    }
+    if (scope === "node" && !nodeID) {
+      setError("Choose a node.");
+      return;
+    }
+    assign.mutate(
+      {
+        userID: target.id,
+        body: { role_access_name: name, ...(scope === "fleet-wide" ? { fleet_wide: true } : { node_id: nodeID }) },
+      },
+      {
+        onSuccess: () => {
+          push({ tone: "success", title: `Assigned ${name} to ${target.username}` });
+          onClose();
+        },
+        onError: (err) => { setError(messageFor(err)); },
+      },
+    );
+  }
+
+  return (
+    <Modal title="Assign bundle" onClose={onClose}>
+      <form onSubmit={submit} className="flex flex-col gap-4">
+        <p className="text-sm text-text-muted">
+          Assign a preset page bundle to <span className="font-medium text-text">{target.username}</span>.
+        </p>
+        <label className="flex flex-col gap-1.5 text-sm text-text">
+          Bundle
+          <select
+            value={name}
+            onChange={(e) => { setName(e.target.value); }}
+            className="rounded-lg border border-border bg-bg px-3 py-2 text-sm text-text outline-none focus-visible:ring-2 focus-visible:ring-primary"
+          >
+            <option value="" disabled>Select bundle</option>
+            {definitions.map((d) => (
+              <option key={d.name} value={d.name}>{d.name}</option>
+            ))}
+          </select>
+        </label>
+        {selected ? (
+          <p className="text-xs text-text-muted">
+            Pages: {selected.pages.map((p) => PAGE_META[p].label).join(", ") || "none"}
+          </p>
+        ) : null}
+
+        <ScopeFields
+          scope={scope}
+          setScope={setScope}
+          nodeID={nodeID}
+          setNodeID={setNodeID}
+          nodes={nodes.data?.nodes ?? []}
+        />
+
+        <ErrorLine error={error} />
+        <ModalActions>
+          <Button type="button" variant="secondary" onClick={onClose}>Cancel</Button>
+          <Button type="submit" variant="primary" disabled={assign.isPending}>
+            {assign.isPending ? "Assigning…" : "Assign"}
+          </Button>
+        </ModalActions>
+      </form>
+    </Modal>
+  );
+}
+
+function RevokePageAccessConfirmModal({
+  target,
+  assignment,
+  nodeNames,
+  onClose,
+}: {
+  target: UserAccount;
+  assignment: PageAccessAssignment;
+  nodeNames: Map<string, string>;
+  onClose: () => void;
+}) {
+  const revoke = useRevokePageAccess();
+  const { push } = useToast();
+  const [error, setError] = useState<string | null>(null);
+  const pageLabel = assignment.page ? PAGE_META[assignment.page].label : "this page";
+
+  return (
+    <Modal title="Revoke page access" onClose={onClose}>
+      <p className="text-sm text-text-muted">
+        Remove <span className="font-medium text-text">{pageLabel}</span> access for{" "}
+        <span className="font-medium text-text">{target.username}</span> on{" "}
+        <span className="font-medium text-text">{scopeLabel(assignment, nodeNames)}</span>?
+      </p>
+      <ErrorLine error={error} />
+      <ModalActions>
+        <Button variant="secondary" onClick={onClose}>Cancel</Button>
+        <Button
+          variant="danger"
+          disabled={revoke.isPending}
+          onClick={() => {
+            setError(null);
+            revoke.mutate(
+              { userID: target.id, grantID: assignment.id },
+              {
+                onSuccess: () => { push({ tone: "success", title: "Page access revoked" }); onClose(); },
+                onError: (err) => { setError(messageFor(err)); },
+              },
+            );
+          }}
+        >
+          {revoke.isPending ? "Revoking…" : "Revoke"}
+        </Button>
+      </ModalActions>
+    </Modal>
+  );
+}
+
+function RevokeBundleConfirmModal({
+  target,
+  assignment,
+  nodeNames,
+  onClose,
+}: {
+  target: UserAccount;
+  assignment: PageAccessAssignment;
+  nodeNames: Map<string, string>;
+  onClose: () => void;
+}) {
+  const revoke = useRevokeRoleAccess();
+  const { push } = useToast();
+  const [error, setError] = useState<string | null>(null);
+
+  return (
+    <Modal title="Revoke bundle" onClose={onClose}>
+      <p className="text-sm text-text-muted">
+        Remove the <span className="font-medium text-text">{assignment.role_access}</span> bundle from{" "}
+        <span className="font-medium text-text">{target.username}</span> on{" "}
+        <span className="font-medium text-text">{scopeLabel(assignment, nodeNames)}</span>?
+      </p>
+      <ErrorLine error={error} />
+      <ModalActions>
+        <Button variant="secondary" onClick={onClose}>Cancel</Button>
+        <Button
+          variant="danger"
+          disabled={revoke.isPending}
+          onClick={() => {
+            setError(null);
+            revoke.mutate(
+              { userID: target.id, assignmentID: assignment.id },
+              {
+                onSuccess: () => { push({ tone: "success", title: "Bundle revoked" }); onClose(); },
+                onError: (err) => { setError(messageFor(err)); },
+              },
+            );
+          }}
+        >
+          {revoke.isPending ? "Revoking…" : "Revoke"}
+        </Button>
+      </ModalActions>
+    </Modal>
   );
 }

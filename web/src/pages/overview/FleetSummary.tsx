@@ -1,6 +1,7 @@
 import { Link } from "react-router";
 import { ArrowRight } from "lucide-react";
 import type { Node, NodeStatus } from "../../api/types";
+import { nodePrimaryLabel, nodeSecondaryLabel } from "../../lib/nodeIdentity";
 
 /**
  * The fleet, as one strip.
@@ -104,7 +105,9 @@ export function FleetSummary({
               aria-hidden="true"
               className={`h-1.5 w-1.5 rounded-full ${STATUS_STYLE[n.status].dot}`}
             />
-            <span className="truncate">{n.hostname}</span>
+            <span className="truncate" title={nodeSecondaryLabel(n) ?? undefined}>
+              {nodePrimaryLabel(n)}
+            </span>
           </button>
         ))}
       </div>

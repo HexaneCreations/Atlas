@@ -2,6 +2,7 @@ import { useState } from "react";
 import { ChevronDown, Server } from "lucide-react";
 import { useNodes, usePrimaryNodeID } from "../api/queries";
 import { setSelectedNodeID } from "../lib/selectedNode";
+import { nodePrimaryLabel, nodeSecondaryLabel } from "../lib/nodeIdentity";
 import type { NodeStatus } from "../api/types";
 
 const STATUS_DOT: Record<NodeStatus, string> = {
@@ -34,7 +35,9 @@ export function NodeSwitcher() {
       >
         <Server size={13} className="text-text-muted" />
         <span className={`h-1.5 w-1.5 rounded-full ${active ? STATUS_DOT[active.status] : "bg-text-muted"}`} />
-        <span className="max-w-[10rem] truncate">{active?.hostname ?? "Select node"}</span>
+        <span className="max-w-[10rem] truncate" title={active ? nodeSecondaryLabel(active) : undefined}>
+          {active ? nodePrimaryLabel(active) : "Select node"}
+        </span>
         <ChevronDown size={13} className="text-text-muted" />
       </button>
 
@@ -62,9 +65,12 @@ export function NodeSwitcher() {
                 <span className="flex min-w-0 items-center gap-2">
                   <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${STATUS_DOT[n.status]}`} />
                   <span className="min-w-0">
-                    <span className="block truncate font-medium text-text">{n.hostname}</span>
+                    <span className="block truncate font-medium text-text" title={n.node_id}>
+                      {nodePrimaryLabel(n)}
+                    </span>
                     <span className="block truncate text-text-muted">
-                      {n.environment ?? "untagged"} · {n.node_id.slice(0, 12)}
+                      {n.environment ?? "untagged"}
+                      {nodeSecondaryLabel(n) ? ` · ${nodeSecondaryLabel(n)}` : ""}
                     </span>
                   </span>
                 </span>

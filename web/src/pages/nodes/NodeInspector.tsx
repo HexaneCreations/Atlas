@@ -5,6 +5,7 @@ import { Badge, type Tone } from "../../components/Badge";
 import { EmptyState } from "../../components/EmptyState";
 import { CopyButton } from "../processes/ProcessInspector";
 import { emptyArt } from "../../lib/assets";
+import { nodePrimaryLabel, nodeSecondaryLabel } from "../../lib/nodeIdentity";
 import { formatAgo, formatBytes, formatDuration, formatValue } from "../../format";
 import { readVitals, type Filesystem, type Interface, type Vitals } from "./nodeMetrics";
 import { UNTAGGED } from "./useNodeTable";
@@ -56,14 +57,19 @@ export function NodeInspector({
 
   return (
     <aside
-      aria-label={`Node details: ${node.hostname}`}
+      aria-label={`Node details: ${nodePrimaryLabel(node)}`}
       className="elev-3 sticky top-0 flex max-h-[calc(100vh-7rem)] flex-col overflow-hidden rounded-xl"
     >
       <header className="flex items-start justify-between gap-3 border-b border-border p-4">
         <div className="min-w-0">
-          <h2 className="truncate text-base font-semibold text-text" title={node.hostname}>
-            {node.hostname}
+          <h2 className="truncate text-base font-semibold text-text" title={node.node_id}>
+            {nodePrimaryLabel(node)}
           </h2>
+          {nodeSecondaryLabel(node) ? (
+            <p className="truncate text-xs text-text-muted" title={nodeSecondaryLabel(node)}>
+              {nodeSecondaryLabel(node)}
+            </p>
+          ) : null}
           <div className="mt-1 flex flex-wrap items-center gap-2">
             <Badge tone={STATUS_TONE[node.status]} pulse={node.status === "down"}>
               {node.status}

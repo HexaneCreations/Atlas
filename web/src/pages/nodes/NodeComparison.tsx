@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import type { LatestValue, Node } from "../../api/types";
 import { Card, CardHeader } from "../../components/Card";
 import { formatValue } from "../../format";
+import { nodePrimaryLabel, nodeSecondaryLabel } from "../../lib/nodeIdentity";
 import { readVitals } from "./nodeMetrics";
 
 /**
@@ -104,10 +105,11 @@ export function NodeComparison({
             {rows.map((r) => (
               <tr key={r.node.node_id} className="border-b border-border/60 last:border-0">
                 <td className="max-w-[14rem] py-2.5 pr-3">
-                  <span className="block truncate font-medium text-text" title={r.node.hostname}>
-                    {r.node.hostname}
+                  <span className="block truncate font-medium text-text" title={r.node.node_id}>
+                    {nodePrimaryLabel(r.node)}
                   </span>
                   <span className="block truncate text-[11px] text-text-subtle">
+                    {nodeSecondaryLabel(r.node) ? `${nodeSecondaryLabel(r.node)} · ` : ""}
                     {r.node.environment ?? "untagged"}
                     {r.node.cpu_cores ? ` · ${String(r.node.cpu_cores)} cores` : ""}
                   </span>

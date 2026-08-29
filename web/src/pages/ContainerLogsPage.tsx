@@ -6,6 +6,7 @@ import type { Container, ContainerState } from "../api/types";
 import { emptyArray } from "../api/empty";
 import { Card } from "../components/Card";
 import { Badge, type Tone } from "../components/Badge";
+import { nodePrimaryLabel } from "../lib/nodeIdentity";
 import { LogViewer } from "./containers/LogViewer";
 
 const STATE_TONE: Record<ContainerState, Tone> = {
@@ -74,7 +75,7 @@ export function ContainerLogsPage() {
               <span>
                 Node:{" "}
                 <span className="text-text">
-                  {node?.hostname ?? nodeID ?? "—"}
+                  {node ? nodePrimaryLabel(node) : (nodeID ?? "—")}
                 </span>
               </span>
               {container ? (

@@ -2,15 +2,21 @@ import { keepPreviousData, useMutation, useQueries, useQuery, useQueryClient } f
 import {
   ApiError,
   apiGet,
+  assignRoleAccess,
   createUser,
   disableUser,
   enableUser,
   forceLogout,
+  fetchRoleAccessDefinitions,
   fetchUserAudit,
+  fetchUserPageAccess,
   fetchUsers,
+  grantPageAccess,
   grantRole,
   resetPassword,
+  revokePageAccess,
   revokeRole,
+  revokeRoleAccess,
 } from "./client";
 import { emptyArray } from "./empty";
 import { useSelectedNodeID } from "../lib/selectedNode";
@@ -18,7 +24,9 @@ import type {
   CollectorsResponse,
   ContainerDetail,
   ContainerLogsResponse,
+  AssignRoleAccessRequest,
   CreateUserRequest,
+  GrantPageAccessRequest,
   GrantRoleRequest,
   ListContainersResponse,
   ListCronJobsResponse,
@@ -26,8 +34,10 @@ import type {
   ListMountsResponse,
   ListPortsResponse,
   ListProcessesResponse,
+  ListRoleAccessResponse,
   ListServicesResponse,
   ListUserAuditResponse,
+  ListUserPageAccessResponse,
   ServiceDetail,
   ServiceGraph,
   LatestResponse,
@@ -475,7 +485,13 @@ export function useContainerLogs(containerID: string | null, nodeID: string | un
 export const userKeys = {
   all: ["users"] as const,
   audit: (userID: string) => ["users", userID, "audit"] as const,
+  pageAccess: (userID: string) => ["users", userID, "page-access"] as const,
 } as const;
+
+/** RoleAccess bundle definitions — one list, shared by every open user
+ *  panel's "Assign bundle" picker and its "show the Bundles section at
+ *  all" check. */
+export const roleAccessKeys = { definitions: ["role-access"] as const } as const;
 
 /** Every user Atlas knows about, with their current active role grants. */
 export function useUsers() {
@@ -551,5 +567,99 @@ export function useResetPassword() {
 export function useForceLogout() {
   return useMutation({
     mutationFn: (userID: string) => forceLogout(userID),
+  });
+}
+
+// ------------------------------------------- Admin: Page Access ----
+//
+// A user's page access is a second grant axis, managed on the same admin
+// page. Its mutations invalidate that user's page-access cache (which the
+// list column's per-user badge and the open panel both read from the same
+// key), never userKeys.all — page access does not touch role grants.
+
+/** Every defined RoleAccess bundle. Rarely changes; a long staleTime keeps
+ *  it from refetching each time a user panel opens. */
+export function useRoleAccessDefinitions() {
+  return useQuery({
+    queryKey: roleAccessKeys.definitions,
+    queryFn: ({ signal }): Promise<ListRoleAccessResponse> => fetchRoleAccessDefinitions(signal),
+    staleTime: 5 * 60_000,
+  });
+}
+
+/** One user's bundle assignments and direct page grants. Only fetched while
+ *  a panel is open (userID non-null). */
+export function useUserPageAccess(userID: string | null) {
+  return useQuery({
+    queryKey: userKeys.pageAccess(userID ?? ""),
+    queryFn: ({ signal }): Promise<ListUserPageAccessResponse> => fetchUserPageAccess(userID ?? "", signal),
+    enabled: Boolean(userID),
+  });
+}
+
+/**
+ * Page access for several users at once, for the list's per-row badge.
+ *
+ * There is no bulk endpoint, so this fans out one request per visible user
+ * and shares each user's cache entry with [useUserPageAccess] — the panel
+ * that opens next reads what the badge already fetched. Linear in the number
+ * of users shown, which is fine at the scale this admin page targets; the
+ * fix if that changes is a count on the /users response, not batching here.
+ * Same trade-off [useFleetLatestMetrics] documents.
+ */
+export function usePageAccessByUser(userIDs: string[]) {
+  return useQueries({
+    queries: userIDs.map((id) => ({
+      queryKey: userKeys.pageAccess(id),
+      queryFn: ({ signal }: { signal: AbortSignal }): Promise<ListUserPageAccessResponse> =>
+        fetchUserPageAccess(id, signal),
+    })),
+    combine: (results) => ({
+      byUser: new Map(userIDs.map((id, i) => [id, results[i]?.data])),
+      isPending: results.some((r) => r.isPending),
+    }),
+  });
+}
+
+function useInvalidateUserPageAccess() {
+  const queryClient = useQueryClient();
+  return (userID: string) => {
+    void queryClient.invalidateQueries({ queryKey: userKeys.pageAccess(userID) });
+  };
+}
+
+export function useGrantPageAccess() {
+  const invalidate = useInvalidateUserPageAccess();
+  return useMutation({
+    mutationFn: ({ userID, body }: { userID: string; body: GrantPageAccessRequest }) =>
+      grantPageAccess(userID, body),
+    onSuccess: (_data, { userID }) => { invalidate(userID); },
+  });
+}
+
+export function useRevokePageAccess() {
+  const invalidate = useInvalidateUserPageAccess();
+  return useMutation({
+    mutationFn: ({ userID, grantID }: { userID: string; grantID: string }) =>
+      revokePageAccess(userID, grantID),
+    onSuccess: (_data, { userID }) => { invalidate(userID); },
+  });
+}
+
+export function useAssignRoleAccess() {
+  const invalidate = useInvalidateUserPageAccess();
+  return useMutation({
+    mutationFn: ({ userID, body }: { userID: string; body: AssignRoleAccessRequest }) =>
+      assignRoleAccess(userID, body),
+    onSuccess: (_data, { userID }) => { invalidate(userID); },
+  });
+}
+
+export function useRevokeRoleAccess() {
+  const invalidate = useInvalidateUserPageAccess();
+  return useMutation({
+    mutationFn: ({ userID, assignmentID }: { userID: string; assignmentID: string }) =>
+      revokeRoleAccess(userID, assignmentID),
+    onSuccess: (_data, { userID }) => { invalidate(userID); },
   });
 }

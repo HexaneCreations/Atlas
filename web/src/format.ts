@@ -64,6 +64,19 @@ export function formatTime(iso: string): string {
   return d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
+/** Date and time together — for audit trails and grant history, where "when"
+ *  means the day as much as the minute. */
+export function formatDateTime(iso: string): string {
+  const d = new Date(iso);
+  return d.toLocaleString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
 /** How long ago, for staleness. */
 export function formatAgo(seconds: number): string {
   if (seconds < 2) return "just now";

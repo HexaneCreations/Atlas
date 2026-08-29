@@ -81,13 +81,15 @@ export function useNodeTable(nodes: Node[]) {
 
   const sorted = useMemo(() => {
     const sign = direction === "asc" ? 1 : -1;
-    // Hostname breaks every tie, and always ascending regardless of the
+    // node_id breaks every tie, and always ascending regardless of the
     // primary direction. Ties are the common case rather than the exception
     // here — a fleet of identical VMs shares a core count exactly, and hosts
     // booted together share an uptime — so without this the rows fell back to
-    // whatever order the API returned and reshuffled under the reader.
+    // whatever order the API returned and reshuffled under the reader. The
+    // tiebreak is node_id, not hostname: hostname is not stable (a container
+    // restart rewrites it), so tiebreaking on it reshuffles rows on restart.
     return [...filtered].sort(
-      (a, b) => sign * compare(a, b, sortKey) || a.hostname.localeCompare(b.hostname),
+      (a, b) => sign * compare(a, b, sortKey) || a.node_id.localeCompare(b.node_id),
     );
   }, [filtered, sortKey, direction]);
 
@@ -118,7 +120,9 @@ const STATUS_RANK: Record<NodeStatus, number> = { down: 0, stale: 1, up: 2 };
 function compare(a: Node, b: Node, key: SortKey): number {
   switch (key) {
     case "hostname":
-      return a.hostname.localeCompare(b.hostname);
+      // The "Node" column shows node_id as its primary label, so it sorts by
+      // node_id. (The SortKey is still named "hostname" for compatibility.)
+      return a.node_id.localeCompare(b.node_id);
     case "status":
       return STATUS_RANK[a.status] - STATUS_RANK[b.status];
     case "environment":

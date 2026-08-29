@@ -28,6 +28,7 @@ import { Badge, type Tone } from "../components/Badge";
 import { PageHeader } from "../components/PageHeader";
 import { QueryState } from "../components/QueryState";
 import { emptyArt, errorArt } from "../lib/assets";
+import { nodePrimaryLabel, nodeSecondaryLabel } from "../lib/nodeIdentity";
 import { TABLE, TABLE_WRAP, TD, TD_MUTED, TD_NUM, TH, THEAD_TR, TR } from "../components/table";
 import { formatAgo, formatDuration, formatValue } from "../format";
 
@@ -136,7 +137,7 @@ export function OverviewPage() {
           {
             label: "CPU",
             value: cpu ? formatValue(cpu.value, "percent") : "—",
-            hint: node.hostname,
+            hint: nodePrimaryLabel(node),
             tone: cpu && cpu.value >= 90 ? "danger" : cpu && cpu.value >= 75 ? "warning" : "default",
           },
           {
@@ -169,7 +170,12 @@ export function OverviewPage() {
       <FleetSummary nodes={nodeList} selectedID={node.node_id} onSelect={setSelected} />
 
       <h2 className="eyebrow mb-3">
-        This node · {node.hostname}
+        This node · {nodePrimaryLabel(node)}
+        {nodeSecondaryLabel(node) ? (
+          <span className="ml-2 font-normal normal-case text-text-muted">
+            {nodeSecondaryLabel(node)}
+          </span>
+        ) : null}
       </h2>
 
       <div className="mb-4 flex flex-wrap items-center gap-4 text-sm text-text-muted">

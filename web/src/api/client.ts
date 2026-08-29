@@ -1,12 +1,16 @@
 import type {
   ApiErrorBody,
   ApiErrorResponse,
+  AssignRoleAccessRequest,
   CreateUserRequest,
   CreateUserResponse,
   CurrentUser,
   ErrorCode,
+  GrantPageAccessRequest,
   GrantRoleRequest,
+  ListRoleAccessResponse,
   ListUserAuditResponse,
+  ListUserPageAccessResponse,
   ListUsersResponse,
   ResetPasswordResponse,
 } from "./types";
@@ -271,6 +275,64 @@ export async function forceLogout(userID: string): Promise<void> {
  *  reset-password and force-logout taken against their account. */
 export async function fetchUserAudit(userID: string, signal?: AbortSignal): Promise<ListUserAuditResponse> {
   return apiGet<ListUserAuditResponse>(`/users/${encodeURIComponent(userID)}/audit`, signal ? { signal } : {});
+}
+
+// ------------------------------------------------- Admin: Page Access ----
+//
+// The page-visibility axis (internal/core/pageauthz), managed alongside role
+// grants on the same admin Users page. Bundle *definitions* are CLI-only;
+// only assigning an existing bundle and granting a page directly are here.
+
+/** Every defined RoleAccess bundle and the pages it carries — for the
+ *  assign-bundle picker. */
+export async function fetchRoleAccessDefinitions(signal?: AbortSignal): Promise<ListRoleAccessResponse> {
+  return apiGet<ListRoleAccessResponse>("/role-access", signal ? { signal } : {});
+}
+
+/** One user's full page-access picture: active bundle assignments and
+ *  active direct page grants. */
+export async function fetchUserPageAccess(
+  userID: string,
+  signal?: AbortSignal,
+): Promise<ListUserPageAccessResponse> {
+  return apiGet<ListUserPageAccessResponse>(
+    `/users/${encodeURIComponent(userID)}/page-access`,
+    signal ? { signal } : {},
+  );
+}
+
+/** Grants a user direct access to one page, scoped to a node or fleet-wide.
+ *  Refused by the server when an assigned bundle already covers it. */
+export async function grantPageAccess(userID: string, body: GrantPageAccessRequest): Promise<void> {
+  await request(`/users/${encodeURIComponent(userID)}/page-access`, {
+    method: "POST",
+    headers: JSON_HEADERS,
+    body: JSON.stringify(body),
+  });
+}
+
+/** Revokes one direct page grant by its own id. */
+export async function revokePageAccess(userID: string, grantID: string): Promise<void> {
+  await request(`/users/${encodeURIComponent(userID)}/page-access/${encodeURIComponent(grantID)}`, {
+    method: "DELETE",
+  });
+}
+
+/** Assigns an existing RoleAccess bundle to a user, scoped to a node or
+ *  fleet-wide. */
+export async function assignRoleAccess(userID: string, body: AssignRoleAccessRequest): Promise<void> {
+  await request(`/users/${encodeURIComponent(userID)}/role-access`, {
+    method: "POST",
+    headers: JSON_HEADERS,
+    body: JSON.stringify(body),
+  });
+}
+
+/** Revokes one RoleAccess bundle assignment by its own id. */
+export async function revokeRoleAccess(userID: string, assignmentID: string): Promise<void> {
+  await request(`/users/${encodeURIComponent(userID)}/role-access/${encodeURIComponent(assignmentID)}`, {
+    method: "DELETE",
+  });
 }
 
 /**
