@@ -60,6 +60,7 @@ import { SearchInput, Toolbar } from "../components/Toolbar";
 import { NAV_PAGES } from "../shell/pages";
 import { emptyArt, errorArt } from "../lib/assets";
 import { formatDateTime } from "../format";
+import { effectivePages, revokeGuard } from "./usersAccess";
 
 /** Every role a grant may name — see internal/core/user.KnownRoles. */
 const ROLES: Role[] = ["viewer", "operator", "admin"];
@@ -233,6 +234,15 @@ export function UsersPage() {
   const bundleDefs = useRoleAccessDefinitions();
   const hasBundles = (bundleDefs.data?.total ?? 0) > 0;
 
+  // bundle name → the pages it carries, so the list badge can count a user's
+  // *effective* page access (direct grants ∪ pages via assigned bundles), not
+  // just their direct grants.
+  const bundlePages = useMemo(() => {
+    const map = new Map<string, Page[]>();
+    for (const d of bundleDefs.data?.role_access ?? []) map.set(d.name, d.pages);
+    return map;
+  }, [bundleDefs.data]);
+
   // How many *other* enabled users hold a fleet-wide admin grant — the same
   // condition the backend's last-admin guard checks, computed here only to
   // disable the action ahead of a request that would fail anyway.
@@ -342,7 +352,8 @@ export function UsersPage() {
                     selected={u.id === selectedUserID}
                     nodeNames={nodeNames}
                     pageAccess={pageAccess.byUser.get(u.id)}
-                    pageAccessLoading={pageAccess.isPending}
+                    pageAccessLoading={pageAccess.isPending || bundleDefs.isPending}
+                    bundlePages={bundlePages}
                     isOnlyFleetAdmin={enabledFleetAdmins.has(u.id) && enabledFleetAdmins.size <= 1}
                     onSelect={() => { togglePanel(u.id); }}
                     onGrant={() => { setModal({ kind: "grant", target: u }); }}
@@ -510,22 +521,29 @@ function Th({ children, align = "left" }: { children: React.ReactNode; align?: "
 
 function PageAccessBadge({
   pageAccess,
+  bundlePages,
   loading,
 }: {
   pageAccess: ListUserPageAccessResponse | undefined;
+  bundlePages: ReadonlyMap<string, readonly Page[]>;
   loading: boolean;
 }) {
   if (!pageAccess) {
     return <span className="text-xs text-text-subtle">{loading ? "…" : "—"}</span>;
   }
-  const count = pageAccess.pages.length;
+  // Effective access, not just direct grants: a user whose only page access
+  // comes from an assigned bundle still has that access.
+  const count = effectivePages(pageAccess, bundlePages).size;
   // "No pages" is a warning, never a neutral empty cell: a user with zero
   // page access is a state an admin must notice, not glance past.
   if (count === 0) {
     return <Badge tone="warning">No pages</Badge>;
   }
   return (
-    <span className="rounded bg-primary/10 px-1.5 py-0.5 text-[11px] font-medium text-primary">
+    <span
+      className="rounded bg-primary/10 px-1.5 py-0.5 text-[11px] font-medium text-primary"
+      title="Pages reachable through direct grants and assigned bundles"
+    >
       {count} page{count === 1 ? "" : "s"}
     </span>
   );
@@ -538,6 +556,7 @@ function UserRow({
   nodeNames,
   pageAccess,
   pageAccessLoading,
+  bundlePages,
   isOnlyFleetAdmin,
   onSelect,
   onGrant,
@@ -554,6 +573,7 @@ function UserRow({
   nodeNames: Map<string, string>;
   pageAccess: ListUserPageAccessResponse | undefined;
   pageAccessLoading: boolean;
+  bundlePages: ReadonlyMap<string, readonly Page[]>;
   isOnlyFleetAdmin: boolean;
   onSelect: () => void;
   onGrant: () => void;
@@ -639,7 +659,7 @@ function UserRow({
         )}
       </td>
       <td className="px-3 py-2.5">
-        <PageAccessBadge pageAccess={pageAccess} loading={pageAccessLoading} />
+        <PageAccessBadge pageAccess={pageAccess} bundlePages={bundlePages} loading={pageAccessLoading} />
       </td>
       <td className="px-3 py-2.5">
         <Badge tone={u.disabled ? "danger" : "success"}>{u.disabled ? "Disabled" : "Active"}</Badge>
@@ -834,6 +854,13 @@ function UserDetailPanel({
 
       {tab === "overview" ? (
         <div className="grid gap-4 p-4 lg:grid-cols-2">
+          {isSelf ? (
+            <p className="rounded-lg border border-border bg-surface-hover/40 px-3 py-2 text-xs text-text-muted lg:col-span-2">
+              You&rsquo;re viewing your own account. Revoke actions are disabled here so you can&rsquo;t
+              accidentally remove your own access — ask another admin if a change is needed.
+            </p>
+          ) : null}
+
           {/* 1. Roles */}
           <Section
             n={1}
@@ -850,7 +877,7 @@ function UserDetailPanel({
             ) : (
               <AccessTable head={["Role", "Granted by", "Granted at", ""]}>
                 {grants.map((g) => {
-                  const blocked = isRevokeBlocked(g);
+                  const guard = revokeGuard({ isSelf, lastAdmin: isRevokeBlocked(g) });
                   return (
                     <tr key={g.id} className="border-t border-border/60">
                       <td className="py-2 pr-3">
@@ -862,8 +889,8 @@ function UserDetailPanel({
                       <td className="py-2 text-right">
                         <button
                           type="button"
-                          disabled={blocked}
-                          title={blocked ? "Can't revoke — this is the last user with admin access" : "Revoke"}
+                          disabled={guard.disabled}
+                          title={guard.reason ?? "Revoke"}
                           onClick={() => { onRevokeRole(g); }}
                           className="rounded px-2 py-1 text-xs font-medium text-danger hover:bg-danger/10 disabled:cursor-not-allowed disabled:opacity-40"
                         >
@@ -906,6 +933,7 @@ function UserDetailPanel({
                   {directPages.map((a) => {
                     const meta = a.page ? PAGE_META[a.page] : undefined;
                     const Icon = meta?.icon ?? FileKey;
+                    const guard = revokeGuard({ isSelf });
                     return (
                       <tr key={a.id} className="border-t border-border/60">
                         <td className="py-2 pr-3">
@@ -921,9 +949,10 @@ function UserDetailPanel({
                           <button
                             type="button"
                             aria-label={`Revoke ${meta?.label ?? a.page ?? "page"} access`}
-                            title="Revoke"
+                            disabled={guard.disabled}
+                            title={guard.reason ?? "Revoke"}
                             onClick={() => { onRevokePage(a); }}
-                            className="rounded p-1 text-text-muted hover:bg-danger/10 hover:text-danger"
+                            className="rounded p-1 text-text-muted hover:bg-danger/10 hover:text-danger disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-text-muted"
                           >
                             <X size={14} />
                           </button>
@@ -954,23 +983,28 @@ function UserDetailPanel({
                 <EmptyRow>No bundles assigned to this user.</EmptyRow>
               ) : (
                 <AccessTable head={["Bundle", "Scope", "Granted by", "Granted at", ""]}>
-                  {roleAccess.map((a) => (
-                    <tr key={a.id} className="border-t border-border/60">
-                      <td className="py-2 pr-3 font-medium text-text">{a.role_access}</td>
-                      <td className="py-2 pr-3 text-xs text-text-muted">{scopeLabel(a, nodeNames)}</td>
-                      <td className="py-2 pr-3 text-xs text-text-muted">{a.granted_by ?? "—"}</td>
-                      <td className="py-2 pr-3 text-xs text-text-muted">{formatDateTime(a.granted_at)}</td>
-                      <td className="py-2 text-right">
-                        <button
-                          type="button"
-                          onClick={() => { onRevokeBundle(a); }}
-                          className="rounded px-2 py-1 text-xs font-medium text-danger hover:bg-danger/10"
-                        >
-                          Revoke
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
+                  {roleAccess.map((a) => {
+                    const guard = revokeGuard({ isSelf });
+                    return (
+                      <tr key={a.id} className="border-t border-border/60">
+                        <td className="py-2 pr-3 font-medium text-text">{a.role_access}</td>
+                        <td className="py-2 pr-3 text-xs text-text-muted">{scopeLabel(a, nodeNames)}</td>
+                        <td className="py-2 pr-3 text-xs text-text-muted">{a.granted_by ?? "—"}</td>
+                        <td className="py-2 pr-3 text-xs text-text-muted">{formatDateTime(a.granted_at)}</td>
+                        <td className="py-2 text-right">
+                          <button
+                            type="button"
+                            disabled={guard.disabled}
+                            title={guard.reason ?? "Revoke"}
+                            onClick={() => { onRevokeBundle(a); }}
+                            className="rounded px-2 py-1 text-xs font-medium text-danger hover:bg-danger/10 disabled:cursor-not-allowed disabled:opacity-40"
+                          >
+                            Revoke
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </AccessTable>
               )}
             </Section>
