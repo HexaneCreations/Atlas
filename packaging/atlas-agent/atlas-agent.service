@@ -37,9 +37,8 @@ ConfigurationDirectory=atlas-agent
 ConfigurationDirectoryMode=0750
 
 # --- Hardening --------------------------------------------------------
-# Conservative by default: everything here is deny-by-default sandboxing
-# with no capability granted beyond reading /proc and the network. The one
-# exception operators may want is commented below.
+# Deny-by-default sandboxing. The only capability granted is CAP_SYS_PTRACE,
+# for Ports socket-to-process attribution — see the note above that line.
 NoNewPrivileges=true
 ProtectSystem=strict
 ReadWritePaths=/var/lib/atlas-agent
@@ -63,11 +62,14 @@ SystemCallFilter=@system-service
 SystemCallErrorNumber=EPERM
 
 # Full socket-to-process attribution on the Ports page needs CAP_SYS_PTRACE
-# to read other users' /proc/[pid]/fd entries — without it, sockets owned
-# by another user report as unattributed rather than guessed (see
-# docs/architecture/agent-design.md sec 3). Uncomment both lines to grant it:
-# CapabilityBoundingSet=CAP_SYS_PTRACE
-# AmbientCapabilities=CAP_SYS_PTRACE
+# to read other users' /proc/[pid]/fd entries — without it, sockets owned by
+# another user report as unattributed (see docs/architecture/agent-design.md
+# sec 3). This is the one and only capability granted: the plugin reads
+# /proc, it never calls ptrace(2), so SystemCallFilter is left untouched. It
+# is also the minimum — the cross-UID /proc/[pid]/fd read is gated by the
+# kernel's ptrace_may_access() check, which no narrower capability satisfies.
+CapabilityBoundingSet=CAP_SYS_PTRACE
+AmbientCapabilities=CAP_SYS_PTRACE
 
 [Install]
 WantedBy=multi-user.target
