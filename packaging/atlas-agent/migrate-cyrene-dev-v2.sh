@@ -225,11 +225,13 @@ info "new binary: $ver"
 step "1. Pre-flight snapshot"
 # =========================================================================
 
-# 1a. resolve the CURRENT data dir from the live unit / env file, unless
-#     the operator pinned it explicitly.
+# 1a. resolve the CURRENT data dir from the live unit / env file, unless the
+#     operator pinned it with --old-data-dir. Reading the running unit's
+#     Environment= and the env file are harmless queries, done even under
+#     --dry-run when systemd is present (the real box).
 if [ -z "$OLD_DATA_DIR" ]; then
   cand=""
-  if [ "$DRY_RUN" -eq 0 ]; then
+  if command -v systemctl >/dev/null 2>&1; then
     envblob="$(systemctl show -p Environment --value "$UNIT" 2>/dev/null || true)"
     cand="$(printf '%s\n' "$envblob" | tr ' ' '\n' | sed -n 's/^ATLAS_AGENT_DATA_DIR=//p' | head -1)"
   fi
@@ -243,7 +245,10 @@ info "current data dir: $OLD_DATA_DIR"
 [ "$OLD_DATA_DIR" != "$NEW_DATA_DIR" ] || die "old and new data dir are identical ($OLD_DATA_DIR) — nothing to migrate"
 
 OLD_KEY="$OLD_DATA_DIR/p2p-identity.key"
-[ -f "$OLD_KEY" ] || die "no identity at $OLD_KEY — pass --old-data-dir if the current data dir is elsewhere"
+[ -f "$OLD_KEY" ] || die "no identity at $OLD_KEY
+    Auto-detection read ATLAS_AGENT_DATA_DIR from the running unit / $OLD_ENV_FILE
+    and found none, so it fell back to the default. If the box keeps its data
+    elsewhere (e.g. /root/atlas-agent), re-run with:  --old-data-dir /root/atlas-agent"
 
 # 1b. relationship set from the live env file, each relationship.json present + parses
 RELS=""
