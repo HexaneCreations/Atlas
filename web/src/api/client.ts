@@ -66,6 +66,19 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * For a `not_implemented` inventory error, says whether the gap is local
+ * ("this host has no Docker / no systemd / no readable crontab") or remote
+ * ("this node is reached through an agent that does not report this
+ * subject"). Returns undefined for anything that is not a `not_implemented`
+ * ApiError. Backed by `details.reason`, set on the server in
+ * internal/api/v1/{inventory,containers,remote_inventory}.go.
+ */
+export function inventoryGapKind(error: unknown): "local" | "agent" | undefined {
+  if (!(error instanceof ApiError) || error.code !== "not_implemented") return undefined;
+  return error.details?.reason === "agent_no_subject" ? "agent" : "local";
+}
+
 /** Raised when the server could not be reached at all. */
 export class NetworkError extends Error {
   constructor(cause: unknown) {

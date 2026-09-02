@@ -379,6 +379,44 @@ func (r *Repository) ListAudit(ctx context.Context, targetUserID string) ([]core
 	return out, nil
 }
 
+// IsSuperadmin reports whether userID currently holds an active, unrevoked
+// fleet-wide superadmin grant — the one protected tier user management
+// refuses to act on for a non-superadmin actor. Checked fleet-wide only, the
+// same shape as [isActiveFleetWideAdmin]: superadmin, like admin's
+// user.manage, is not a per-node concept.
+func (r *Repository) IsSuperadmin(ctx context.Context, userID string) (bool, error) {
+	const op = "user.Repository.IsSuperadmin"
+	const q = `
+		SELECT EXISTS (
+			SELECT 1 FROM user_node_roles
+			WHERE user_id = $1 AND role_name = $2 AND node_id IS NULL AND revoked_at IS NULL
+		)`
+	var exists bool
+	if err := r.pool.QueryRow(ctx, q, userID, coreuser.RoleSuperadmin).Scan(&exists); err != nil {
+		return false, errs.Wrap(err, errs.CodeUnavailable, "could not check the user's superadmin grant").WithOp(op)
+	}
+	return exists, nil
+}
+
+// GrantOwner returns the user id that grantID belongs to, or "" when no
+// active grant has that id. The "" case is not an error: [Repository.RevokeGrant]
+// already treats an unknown or already-revoked grant as a caller-intent
+// no-op, so the handler's superadmin guard simply has nothing to protect.
+func (r *Repository) GrantOwner(ctx context.Context, grantID string) (string, error) {
+	const op = "user.Repository.GrantOwner"
+	var userID string
+	err := r.pool.QueryRow(ctx,
+		`SELECT user_id FROM user_node_roles WHERE id = $1 AND revoked_at IS NULL`, grantID).Scan(&userID)
+	switch {
+	case err == nil:
+		return userID, nil
+	case err == pgx.ErrNoRows:
+		return "", nil
+	default:
+		return "", errs.Wrap(err, errs.CodeUnavailable, "could not look up the role grant's owner").WithOp(op)
+	}
+}
+
 // isActiveFleetWideAdmin reports whether userID currently holds an active,
 // unrevoked fleet-wide admin grant.
 func isActiveFleetWideAdmin(ctx context.Context, tx pgx.Tx, userID string) (bool, error) {

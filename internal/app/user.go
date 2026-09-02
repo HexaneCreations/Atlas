@@ -62,6 +62,12 @@ func (l lazyUserStore) Grant(ctx context.Context, spec coreuser.GrantSpec, now t
 func (l lazyUserStore) RevokeGrant(ctx context.Context, grantID, revokedBy string, now time.Time) error {
 	return l.repo().RevokeGrant(ctx, grantID, revokedBy, now)
 }
+func (l lazyUserStore) IsSuperadmin(ctx context.Context, userID string) (bool, error) {
+	return l.repo().IsSuperadmin(ctx, userID)
+}
+func (l lazyUserStore) GrantOwner(ctx context.Context, grantID string) (string, error) {
+	return l.repo().GrantOwner(ctx, grantID)
+}
 
 // lazyAuthorizer wraps [lazyUserStore] in [coreuser.Authorizer], the
 // handler-facing policy layer — see internal/api/v1's requireScope.

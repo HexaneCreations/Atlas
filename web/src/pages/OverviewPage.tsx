@@ -9,11 +9,13 @@ import {
   useMounts,
   useNodes,
   usePorts,
+  usePrimaryNodeID,
   useProcesses,
   useServices,
   useSystemHealth,
   useSystemRuntime,
 } from "../api/queries";
+import { setSelectedNodeID } from "../lib/selectedNode";
 import type { CollectorHealth, LatestValue, MetricUnit, Node, Series } from "../api/types";
 import { emptyArray } from "../api/empty";
 import { AttentionRequired } from "./overview/AttentionRequired";
@@ -47,13 +49,18 @@ const CHART_METRICS = [
 /** The landing page: this node's vitals, right now and over time. */
 export function OverviewPage() {
   const nodes = useNodes();
-  const [selected, setSelected] = useState<string | null>(null);
   const [range, setRange] = useState<Range>("1h");
+
+  // The node every panel on this page reflects: the same one the shell node
+  // switcher and every other inventory page read. Overview used to keep its
+  // own independent selection that defaulted to `nodeList[0]`, which churns
+  // as nodes reorder by last_seen_at and left this page showing a different
+  // host from the rest of the app.
+  const nodeID = usePrimaryNodeID();
 
   // Stable identity when empty: a fresh [] each render would re-run the
   // findings memo on every poll.
   const nodeList = nodes.data?.nodes ?? emptyArray<Node>();
-  const nodeID = selected ?? nodeList[0]?.node_id;
   const node = nodeList.find((n) => n.node_id === nodeID);
 
   const latest = useLatestMetrics(nodeID);
@@ -65,12 +72,12 @@ export function OverviewPage() {
   // The operations centre reads every source at once. These are the same
   // queries the individual pages use, so they are served from one shared
   // cache rather than fetched twice.
-  const services = useServices();
+  const services = useServices(nodeID);
   const containers = useContainers(nodeID);
-  const mounts = useMounts();
-  const ports = usePorts();
-  const processes = useProcesses();
-  const cron = useCronJobs();
+  const mounts = useMounts(nodeID);
+  const ports = usePorts(nodeID);
+  const processes = useProcesses(nodeID);
+  const cron = useCronJobs(nodeID);
 
   const values = useMemo(() => indexLatest(latest.data?.values ?? []), [latest.data]);
 
@@ -167,7 +174,7 @@ export function OverviewPage() {
       {/* The fleet roll-up. Its chips are also the selector for the vitals
           below, so "how is the fleet" and "which host am I reading" are one
           control instead of two rows listing the same machines. */}
-      <FleetSummary nodes={nodeList} selectedID={node.node_id} onSelect={setSelected} />
+      <FleetSummary nodes={nodeList} selectedID={node.node_id} onSelect={setSelectedNodeID} />
 
       <h2 className="eyebrow mb-3">
         This node · {nodePrimaryLabel(node)}

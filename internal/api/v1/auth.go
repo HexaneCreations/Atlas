@@ -90,6 +90,11 @@ type CurrentUserResponse struct {
 	// every /users endpoint independently checks PermissionUserManage
 	// itself regardless of what this says.
 	CanManageUsers bool `json:"can_manage_users"`
+	// IsSuperadmin lets the admin Users page disable per-row actions against
+	// the protected superadmin account for everyone who is not the
+	// superadmin. A display hint only: guardSuperadminTarget re-checks it on
+	// every action endpoint regardless of what this says.
+	IsSuperadmin bool `json:"is_superadmin"`
 	// PageAccess is every page this caller can reach, with the scope it
 	// applies at — the frontend hides nav items and redirects direct-URL
 	// visits to unreachable routes with it. A navigation hint only: every
@@ -126,6 +131,13 @@ func (h *Handler) currentUserResponse(ctx context.Context, principal user.Princi
 	}
 	if h.deps.Authz != nil {
 		resp.CanManageUsers = h.deps.Authz.Require(ctx, principal, user.PermissionUserManage, "") == nil
+	}
+	if h.deps.UserAdmin != nil {
+		isSuper, err := h.deps.UserAdmin.IsSuperadmin(ctx, principal.UserID)
+		if err != nil {
+			return CurrentUserResponse{}, err
+		}
+		resp.IsSuperadmin = isSuper
 	}
 	if h.deps.PageAuthz != nil {
 		reach, err := h.deps.PageAuthz.EffectiveAccessByPage(ctx, principal.UserID)

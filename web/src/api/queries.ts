@@ -294,11 +294,16 @@ export const containerKeys = {
   detail: (id: string) => ["containers", id, "detail"] as const,
 } as const;
 
-/** The container-list request path for nodeID. Exported for testing: this is
- *  the one line that decides whether the page can ever show a remote node's
- *  containers instead of the control plane's own. */
+/** Scopes an inventory request path to nodeID. Exported for testing: this is
+ *  the one line that decides whether a page reads the selected node's
+ *  inventory or silently falls back to the control plane's own host. */
+export function inventoryPath(base: string, nodeID: string | undefined): string {
+  return `${base}?node=${encodeURIComponent(nodeID ?? "")}`;
+}
+
+/** The container-list request path for nodeID. */
 export function containersPath(nodeID: string | undefined): string {
-  return `/containers?node=${encodeURIComponent(nodeID ?? "")}`;
+  return inventoryPath("/containers", nodeID);
 }
 
 /**
@@ -341,21 +346,32 @@ export function useContainerDetail(containerID: string | null) {
   });
 }
 
-/** Every process on the host, heaviest first. */
-export function useProcesses() {
+/**
+ * Every process on nodeID, heaviest first.
+ *
+ * Without a node param this silently resolved to whatever host the control
+ * plane runs on rather than the selected node — see [useContainers] for the
+ * same regression. The node id is part of the query key so switching nodes
+ * cannot show a stale list from a different one.
+ */
+export function useProcesses(nodeID: string | undefined) {
   return useQuery({
-    queryKey: ["processes"] as const,
-    queryFn: ({ signal }) => apiGet<ListProcessesResponse>("/processes", { signal }),
+    queryKey: ["processes", nodeID ?? ""] as const,
+    queryFn: ({ signal }) =>
+      apiGet<ListProcessesResponse>(inventoryPath("/processes", nodeID), { signal }),
+    enabled: Boolean(nodeID),
     refetchInterval: REFRESH_INTERVAL_MS,
     retry: retryUnlessNotImplemented,
   });
 }
 
-/** Every systemd unit, failed ones first. */
-export function useServices() {
+/** Every systemd unit on nodeID, failed ones first. */
+export function useServices(nodeID: string | undefined) {
   return useQuery({
-    queryKey: ["services"] as const,
-    queryFn: ({ signal }) => apiGet<ListServicesResponse>("/services", { signal }),
+    queryKey: ["services", nodeID ?? ""] as const,
+    queryFn: ({ signal }) =>
+      apiGet<ListServicesResponse>(inventoryPath("/services", nodeID), { signal }),
+    enabled: Boolean(nodeID),
     refetchInterval: REFRESH_INTERVAL_MS,
     retry: retryUnlessNotImplemented,
   });
@@ -373,6 +389,7 @@ export function useServices() {
  * polls at the normal live interval without re-reading unit files.
  */
 export function useServiceGraph(params: {
+  node: string | undefined;
   root?: string | undefined;
   depth?: number | undefined;
   direction?: "dependencies" | "dependents" | undefined;
@@ -380,12 +397,13 @@ export function useServiceGraph(params: {
   limit?: number | undefined;
   enabled?: boolean;
 }) {
-  const { root, depth, direction, edgeClass, limit, enabled = true } = params;
+  const { node, root, depth, direction, edgeClass, limit, enabled = true } = params;
 
   return useQuery({
-    queryKey: ["services", "graph", root ?? "", depth ?? 0, direction ?? "", edgeClass ?? "", limit ?? 0] as const,
+    queryKey: ["services", "graph", node ?? "", root ?? "", depth ?? 0, direction ?? "", edgeClass ?? "", limit ?? 0] as const,
     queryFn: ({ signal }) => {
       const q = new URLSearchParams();
+      if (node) q.set("node", node);
       if (root) q.set("root", root);
       if (depth) q.set("depth", String(depth));
       if (direction) q.set("direction", direction);
@@ -394,30 +412,34 @@ export function useServiceGraph(params: {
       const suffix = q.toString();
       return apiGet<ServiceGraph>(`/services/graph${suffix ? `?${suffix}` : ""}`, { signal });
     },
-    enabled,
+    enabled: enabled && Boolean(node),
     refetchInterval: REFRESH_INTERVAL_MS,
     retry: retryUnlessNotImplemented,
   });
 }
 
-/** One unit with its direct relationships and blast radius. */
-export function useServiceDetail(unit: string | null) {
+/** One unit on nodeID with its direct relationships and blast radius. */
+export function useServiceDetail(unit: string | null, nodeID: string | undefined) {
   return useQuery({
-    queryKey: ["services", "detail", unit ?? ""] as const,
+    queryKey: ["services", "detail", nodeID ?? "", unit ?? ""] as const,
     queryFn: ({ signal }) =>
-      apiGet<ServiceDetail>(`/services/${encodeURIComponent(unit ?? "")}`, { signal }),
-    enabled: Boolean(unit),
+      apiGet<ServiceDetail>(
+        inventoryPath(`/services/${encodeURIComponent(unit ?? "")}`, nodeID),
+        { signal },
+      ),
+    enabled: Boolean(unit) && Boolean(nodeID),
     refetchInterval: REFRESH_INTERVAL_MS,
     retry: retryUnlessNotImplemented,
   });
 }
 
-/** Every readable scheduled job. Crontabs change rarely, so this polls
- *  slower than the live-state endpoints. */
-export function useCronJobs() {
+/** Every readable scheduled job on nodeID. Crontabs change rarely, so this
+ *  polls slower than the live-state endpoints. */
+export function useCronJobs(nodeID: string | undefined) {
   return useQuery({
-    queryKey: ["cron"] as const,
-    queryFn: ({ signal }) => apiGet<ListCronJobsResponse>("/cron", { signal }),
+    queryKey: ["cron", nodeID ?? ""] as const,
+    queryFn: ({ signal }) => apiGet<ListCronJobsResponse>(inventoryPath("/cron", nodeID), { signal }),
+    enabled: Boolean(nodeID),
     refetchInterval: REFRESH_INTERVAL_MS * 6,
     retry: retryUnlessNotImplemented,
   });
@@ -433,22 +455,25 @@ export function useActivity(limit = 12) {
   });
 }
 
-/** Every listening port, with certificate detail where TLS was found. */
-export function usePorts() {
+/** Every listening port on nodeID, with certificate detail where TLS was
+ *  found. */
+export function usePorts(nodeID: string | undefined) {
   return useQuery({
-    queryKey: ["ports"] as const,
-    queryFn: ({ signal }) => apiGet<ListPortsResponse>("/ports", { signal }),
+    queryKey: ["ports", nodeID ?? ""] as const,
+    queryFn: ({ signal }) => apiGet<ListPortsResponse>(inventoryPath("/ports", nodeID), { signal }),
+    enabled: Boolean(nodeID),
     refetchInterval: REFRESH_INTERVAL_MS,
     retry: retryUnlessNotImplemented,
   });
 }
 
-/** Every mounted filesystem. Capacity moves slowly, so this polls slower
- *  than the live-state endpoints. */
-export function useMounts() {
+/** Every mounted filesystem on nodeID. Capacity moves slowly, so this polls
+ *  slower than the live-state endpoints. */
+export function useMounts(nodeID: string | undefined) {
   return useQuery({
-    queryKey: ["mounts"] as const,
-    queryFn: ({ signal }) => apiGet<ListMountsResponse>("/mounts", { signal }),
+    queryKey: ["mounts", nodeID ?? ""] as const,
+    queryFn: ({ signal }) => apiGet<ListMountsResponse>(inventoryPath("/mounts", nodeID), { signal }),
+    enabled: Boolean(nodeID),
     refetchInterval: REFRESH_INTERVAL_MS * 6,
     retry: retryUnlessNotImplemented,
   });

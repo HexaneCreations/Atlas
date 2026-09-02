@@ -22,16 +22,18 @@ type Tab = "overview" | "dependencies" | "dependents" | "impact";
  */
 export function ServiceInspector({
   row,
+  nodeID,
   onClose,
   onSelectUnit,
 }: {
   row: ServiceRow;
+  nodeID: string | undefined;
   onClose: () => void;
   /** Jumping to a related unit is how an operator walks a dependency chain. */
   onSelectUnit: (unit: string) => void;
 }) {
   const [tab, setTab] = useState<Tab>("overview");
-  const detail = useServiceDetail(row.unit.name);
+  const detail = useServiceDetail(row.unit.name, nodeID);
 
   const impact = detail.data?.impact;
   const impactCount = impact ? impact.hard.length + impact.soft.length : 0;

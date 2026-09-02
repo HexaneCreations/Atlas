@@ -150,11 +150,14 @@ func TestGrantSpecValidateAcceptsFleetWide(t *testing.T) {
 func TestGrantSpecValidateRejectsUnknownRole(t *testing.T) {
 	t.Parallel()
 
-	err := (user.GrantSpec{UserID: "u1", NodeID: "node-1", Role: "superadmin"}).Validate()
+	// "root" is genuinely not a role. ("superadmin" was the fixture here
+	// before it became a real, protected fourth role — see
+	// user.RoleSuperadmin and migrations/0019_superadmin_role.sql.)
+	err := (user.GrantSpec{UserID: "u1", NodeID: "node-1", Role: "root"}).Validate()
 	if err == nil {
 		t.Fatal("Validate succeeded with an unknown role")
 	}
-	if !strings.Contains(err.Error(), "superadmin") {
+	if !strings.Contains(err.Error(), "root") {
 		t.Errorf("error does not name the offending role: %v", err)
 	}
 }

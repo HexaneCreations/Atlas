@@ -1,7 +1,8 @@
 import { useMemo, useState } from "react";
 import { ArrowDown, ArrowUp, ChevronsUpDown } from "lucide-react";
-import { usePorts } from "../api/queries";
-import { ApiError } from "../api/client";
+import { usePorts, usePrimaryNodeID } from "../api/queries";
+import { ApiError, inventoryGapKind } from "../api/client";
+import { AgentSubjectGap } from "../components/AgentSubjectGap";
 import type { Port } from "../api/types";
 import { emptyArray } from "../api/empty";
 import { Card } from "../components/Card";
@@ -80,7 +81,8 @@ const TLS_OPTIONS = [
  * dashboard misleads.
  */
 export function PortsPage() {
-  const ports = usePorts();
+  const nodeID = usePrimaryNodeID();
+  const ports = usePorts(nodeID);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
 
   const all = ports.data?.ports ?? emptyArray<Port>();
@@ -101,6 +103,10 @@ export function PortsPage() {
   );
 
   const attention = posture.expired.length + posture.expiring.length + posture.exposedPlaintext.length;
+
+  if (inventoryGapKind(ports.error) === "agent") {
+    return <AgentSubjectGap subject="listening ports" />;
+  }
 
   if (ports.error instanceof ApiError && ports.error.code === "not_implemented") {
     return (

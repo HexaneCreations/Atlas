@@ -9,19 +9,28 @@ import (
 )
 
 // Role names — the fixed set docs/adr/0011-deferred-rbac.md names. Not an
-// open registry: adding a fourth role is a schema and code change, not a
-// value an operator can introduce by typing a new string.
+// open registry: adding a role is a schema and code change, not a value an
+// operator can introduce by typing a new string.
 const (
 	RoleViewer   = "viewer"
 	RoleOperator = "operator"
 	RoleAdmin    = "admin"
+	// RoleSuperadmin is a protected fourth tier: a strict superset of admin
+	// in permissions (see migrations/0019_superadmin_role.sql) that ordinary
+	// fleet-wide admins cannot act on. There is exactly one, assigned once by
+	// a deliberate manual grant — never through the REST grant endpoint,
+	// which rejects it outright (see [ErrSuperadminNotGrantable]). Being in
+	// KnownRoles lets it be read, validated, and set through the CLI /
+	// database; it does not make it grantable through the API.
+	RoleSuperadmin = "superadmin"
 )
 
 // KnownRoles are every role a grant may name.
 var KnownRoles = map[string]bool{
-	RoleViewer:   true,
-	RoleOperator: true,
-	RoleAdmin:    true,
+	RoleViewer:     true,
+	RoleOperator:   true,
+	RoleAdmin:      true,
+	RoleSuperadmin: true,
 }
 
 // Permission is an action a role may be granted, checked per node. Expressed
@@ -92,7 +101,7 @@ func (s GrantSpec) Validate() error {
 		return errs.New(errs.CodeInvalidArgument,
 			"a grant cannot name a node id and request fleet-wide at the same time").WithOp(op)
 	case !KnownRoles[s.Role]:
-		return errs.New(errs.CodeInvalidArgument, "unknown role %q; want one of viewer, operator, admin", s.Role).WithOp(op)
+		return errs.New(errs.CodeInvalidArgument, "unknown role %q; want one of viewer, operator, admin, superadmin", s.Role).WithOp(op)
 	}
 	return nil
 }
@@ -150,6 +159,34 @@ var ErrPermissionDenied = errs.New(errs.CodePermissionDenied, "you do not have p
 // refuses even an otherwise-valid, otherwise-authorized request.
 var ErrLastAdminGrant = errs.New(errs.CodeFailedPrecondition,
 	"this is the last user with fleet-wide admin access; grant it to someone else first")
+
+// ErrSuperadminNotGrantable is returned by the grant-role endpoint for any
+// request naming [RoleSuperadmin], from any caller — including the superadmin
+// itself. There is exactly one superadmin, set once by a direct database
+// change or the CLI's `user grant`; no API caller can create or move it.
+//
+// Distinct from [GrantSpec.Validate], which only checks a role name is
+// *known*: "known" and "grantable through this endpoint" are different
+// questions, and superadmin is the one role that is the first without being
+// the second. CodeInvalidArgument (400), not CodePermissionDenied — the
+// request is malformed for this endpoint regardless of who sends it, not a
+// permission the caller is missing.
+var ErrSuperadminNotGrantable = errs.New(errs.CodeInvalidArgument,
+	"the superadmin role cannot be granted through this endpoint")
+
+// ErrProtectedSuperadmin is returned when a non-superadmin actor attempts a
+// target-specific user-management action — grant, revoke, disable, enable,
+// reset password, force logout, or view audit — against the account that
+// holds the superadmin role.
+//
+// Unlike [ErrPermissionDenied] (a grant an admin could be given), this
+// refuses the action for what the *target* is, not for what the actor
+// lacks, the same way [ErrLastAdminGrant] refuses an otherwise-authorized
+// request on a system-integrity ground. It never fires for a superadmin
+// actor, and never fires when the target is not the superadmin — see
+// internal/api/v1.Handler.guardSuperadminTarget.
+var ErrProtectedSuperadmin = errs.New(errs.CodePermissionDenied,
+	"the superadmin account cannot be modified through user management")
 
 // Authorizer is the authorization policy layer: it answers whether an
 // authenticated principal may perform a permission-gated action against a

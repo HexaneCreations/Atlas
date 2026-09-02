@@ -27,6 +27,14 @@ type UserAdmin interface {
 	ListAudit(ctx context.Context, targetUserID string) ([]user.AuditEntry, error)
 	Grant(ctx context.Context, spec user.GrantSpec, now time.Time) error
 	RevokeGrant(ctx context.Context, grantID, revokedBy string, now time.Time) error
+	// IsSuperadmin reports whether userID currently holds the protected
+	// fleet-wide superadmin grant — see [Handler.guardSuperadminTarget].
+	IsSuperadmin(ctx context.Context, userID string) (bool, error)
+	// GrantOwner returns the user id a role grant belongs to, or "" when no
+	// active grant has that id. Lets RevokeRole run the superadmin guard,
+	// which is keyed on the target user, against a grant identified only by
+	// its own id.
+	GrantOwner(ctx context.Context, grantID string) (string, error)
 }
 
 // GrantResponse is one role grant as the admin Users page sees it.
@@ -92,6 +100,42 @@ func (h *Handler) actor(r *http.Request, op string) (string, error) {
 		return "", errs.New(errs.CodeUnauthenticated, "authentication required").WithOp(op)
 	}
 	return principal.UserID, nil
+}
+
+// guardSuperadminTarget refuses a target-specific user-management action when
+// the caller is not the superadmin and the target is. It gates every
+// per-user action in this file — GrantRole, RevokeRole, DisableUser,
+// EnableUser, ResetPassword, ForceLogout, ListUserAudit — and nothing else:
+// ListUsers is deliberately left ungated, so the superadmin's row stays
+// visible to any admin, and only actions on it are refused.
+//
+// It runs after requirePermission and actor resolution, so an
+// unauthenticated or unauthorized caller still gets 401/403 first and never
+// learns which account is the superadmin. It never fires for a superadmin
+// actor, never fires when the target is not the superadmin, and treats an
+// actor acting on their own account as trivially allowed (moot for the real
+// superadmin, since the grant endpoint cannot create a second one). Admin-
+// vs-admin actions are entirely unaffected — the guard's precondition is
+// specifically "target holds superadmin".
+func (h *Handler) guardSuperadminTarget(ctx context.Context, store UserAdmin, actorID, targetID string) error {
+	if targetID == "" || actorID == targetID {
+		return nil
+	}
+	targetSuper, err := store.IsSuperadmin(ctx, targetID)
+	if err != nil {
+		return err
+	}
+	if !targetSuper {
+		return nil
+	}
+	actorSuper, err := store.IsSuperadmin(ctx, actorID)
+	if err != nil {
+		return err
+	}
+	if actorSuper {
+		return nil
+	}
+	return user.ErrProtectedSuperadmin
 }
 
 // ListUsers returns every user and their current active role grants.
@@ -200,11 +244,20 @@ func (h *Handler) GrantRole(w http.ResponseWriter, r *http.Request) error {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		return errs.New(errs.CodeInvalidArgument, "invalid request body").WithOp(op)
 	}
+	// The superadmin role is never grantable through this endpoint, by any
+	// caller — see [user.ErrSuperadminNotGrantable]. GrantSpec.Validate would
+	// accept it (it is a known role); "grantable here" is the separate check.
+	if req.Role == user.RoleSuperadmin {
+		return user.ErrSuperadminNotGrantable
+	}
 	spec := user.GrantSpec{
 		UserID: r.PathValue("userID"), Role: req.Role,
 		NodeID: req.NodeID, FleetWide: req.FleetWide, GrantedBy: actorID,
 	}
 	if err := spec.Validate(); err != nil {
+		return err
+	}
+	if err := h.guardSuperadminTarget(r.Context(), store, actorID, spec.UserID); err != nil {
 		return err
 	}
 	if err := store.Grant(r.Context(), spec, time.Now()); err != nil {
@@ -232,7 +285,15 @@ func (h *Handler) RevokeRole(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 
-	if err := store.RevokeGrant(r.Context(), r.PathValue("grantID"), actorID, time.Now()); err != nil {
+	grantID := r.PathValue("grantID")
+	ownerID, err := store.GrantOwner(r.Context(), grantID)
+	if err != nil {
+		return err
+	}
+	if err := h.guardSuperadminTarget(r.Context(), store, actorID, ownerID); err != nil {
+		return err
+	}
+	if err := store.RevokeGrant(r.Context(), grantID, actorID, time.Now()); err != nil {
 		return err
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -262,6 +323,9 @@ func (h *Handler) DisableUser(w http.ResponseWriter, r *http.Request) error {
 	if targetID == actorID {
 		return errs.New(errs.CodeInvalidArgument, "you cannot disable your own account").WithOp(op)
 	}
+	if err := h.guardSuperadminTarget(r.Context(), store, actorID, targetID); err != nil {
+		return err
+	}
 	if err := store.DisableUser(r.Context(), targetID, actorID, time.Now()); err != nil {
 		return err
 	}
@@ -284,7 +348,11 @@ func (h *Handler) EnableUser(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 
-	if err := store.EnableUser(r.Context(), r.PathValue("userID"), actorID, time.Now()); err != nil {
+	targetID := r.PathValue("userID")
+	if err := h.guardSuperadminTarget(r.Context(), store, actorID, targetID); err != nil {
+		return err
+	}
+	if err := store.EnableUser(r.Context(), targetID, actorID, time.Now()); err != nil {
 		return err
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -312,7 +380,11 @@ func (h *Handler) ResetPassword(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 
-	plaintext, err := store.ResetPassword(r.Context(), r.PathValue("userID"), actorID, time.Now())
+	targetID := r.PathValue("userID")
+	if err := h.guardSuperadminTarget(r.Context(), store, actorID, targetID); err != nil {
+		return err
+	}
+	plaintext, err := store.ResetPassword(r.Context(), targetID, actorID, time.Now())
 	if err != nil {
 		return err
 	}
@@ -334,6 +406,10 @@ func (h *Handler) ForceLogout(w http.ResponseWriter, r *http.Request) error {
 	if h.deps.Sessions == nil {
 		return errs.New(errs.CodeNotImplemented, "user management is not enabled").WithOp(op)
 	}
+	store, err := h.userAdmin(op)
+	if err != nil {
+		return err
+	}
 	actorID, err := h.actor(r, op)
 	if err != nil {
 		return err
@@ -342,6 +418,9 @@ func (h *Handler) ForceLogout(w http.ResponseWriter, r *http.Request) error {
 	targetID := r.PathValue("userID")
 	if targetID == actorID {
 		return errs.New(errs.CodeInvalidArgument, "you cannot force-logout your own account").WithOp(op)
+	}
+	if err := h.guardSuperadminTarget(r.Context(), store, actorID, targetID); err != nil {
+		return err
 	}
 	if err := h.deps.Sessions.RevokeAllSessions(r.Context(), targetID, actorID, time.Now()); err != nil {
 		return err
@@ -379,8 +458,16 @@ func (h *Handler) ListUserAudit(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
+	actorID, err := h.actor(r, op)
+	if err != nil {
+		return err
+	}
+	targetID := r.PathValue("userID")
+	if err := h.guardSuperadminTarget(r.Context(), store, actorID, targetID); err != nil {
+		return err
+	}
 
-	entries, err := store.ListAudit(r.Context(), r.PathValue("userID"))
+	entries, err := store.ListAudit(r.Context(), targetID)
 	if err != nil {
 		return err
 	}

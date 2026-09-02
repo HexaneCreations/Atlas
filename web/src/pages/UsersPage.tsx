@@ -60,7 +60,7 @@ import { SearchInput, Toolbar } from "../components/Toolbar";
 import { NAV_PAGES } from "../shell/pages";
 import { emptyArt, errorArt } from "../lib/assets";
 import { formatDateTime } from "../format";
-import { effectivePages, revokeGuard } from "./usersAccess";
+import { PROTECTED_SUPERADMIN_MESSAGE, effectivePages, holdsSuperadmin, revokeGuard } from "./usersAccess";
 
 /** Every role a grant may name — see internal/core/user.KnownRoles. */
 const ROLES: Role[] = ["viewer", "operator", "admin"];
@@ -252,6 +252,13 @@ export function UsersPage() {
   );
   const isRevokeBlocked = (g: Grant) => isFleetWideAdmin(g) && enabledFleetAdmins.size <= 1;
 
+  // The superadmin account is off-limits to every per-user action for anyone
+  // who is not themselves a superadmin — the client-side mirror of the
+  // backend's guardSuperadminTarget 403, so an admin sees a disabled control
+  // instead of a working-looking one that then fails.
+  const iAmSuperadmin = me?.is_superadmin ?? false;
+  const isProtectedTarget = (u: UserAccount) => holdsSuperadmin(u.grants) && !iAmSuperadmin;
+
   const selectedUser = all.find((u) => u.id === selectedUserID) ?? null;
   // A user removed from the list (never happens today — no delete) should not
   // leave a panel open against nothing.
@@ -355,6 +362,7 @@ export function UsersPage() {
                     pageAccessLoading={pageAccess.isPending || bundleDefs.isPending}
                     bundlePages={bundlePages}
                     isOnlyFleetAdmin={enabledFleetAdmins.has(u.id) && enabledFleetAdmins.size <= 1}
+                    protectedTarget={isProtectedTarget(u)}
                     onSelect={() => { togglePanel(u.id); }}
                     onGrant={() => { setModal({ kind: "grant", target: u }); }}
                     onRevokePick={() => { setModal({ kind: "revokePick", target: u }); }}
@@ -380,6 +388,7 @@ export function UsersPage() {
         <UserDetailPanel
           user={selectedUser}
           isSelf={selectedUser.id === me.user_id}
+          protectedTarget={isProtectedTarget(selectedUser)}
           nodeNames={nodeNames}
           showBundles={hasBundles}
           tab={panelTab}
@@ -558,6 +567,7 @@ function UserRow({
   pageAccessLoading,
   bundlePages,
   isOnlyFleetAdmin,
+  protectedTarget,
   onSelect,
   onGrant,
   onRevokePick,
@@ -575,6 +585,7 @@ function UserRow({
   pageAccessLoading: boolean;
   bundlePages: ReadonlyMap<string, readonly Page[]>;
   isOnlyFleetAdmin: boolean;
+  protectedTarget: boolean;
   onSelect: () => void;
   onGrant: () => void;
   onRevokePick: () => void;
@@ -586,7 +597,7 @@ function UserRow({
 }) {
   const grants = u.grants ?? [];
 
-  const items: RowMenuItem[] = [
+  const rawItems: RowMenuItem[] = [
     { label: "Grant role", icon: ShieldPlus, onClick: onGrant },
     {
       label: "Revoke role",
@@ -620,6 +631,13 @@ function UserRow({
     },
     { label: "View activity", icon: History, onClick: onViewActivity },
   ];
+
+  // The superadmin account: every per-user action is refused server-side
+  // (guardSuperadminTarget) for a non-superadmin. Disable them all here so
+  // the menu never offers a control that would 403.
+  const items: RowMenuItem[] = protectedTarget
+    ? rawItems.map((it) => ({ ...it, disabled: true, disabledReason: PROTECTED_SUPERADMIN_MESSAGE }))
+    : rawItems;
 
   return (
     <tr
@@ -784,6 +802,7 @@ function RowMenu({ items }: { items: RowMenuItem[] }) {
 function UserDetailPanel({
   user,
   isSelf,
+  protectedTarget,
   nodeNames,
   showBundles,
   tab,
@@ -800,6 +819,7 @@ function UserDetailPanel({
 }: {
   user: UserAccount;
   isSelf: boolean;
+  protectedTarget: boolean;
   nodeNames: Map<string, string>;
   showBundles: boolean;
   tab: PanelTab;
@@ -859,6 +879,11 @@ function UserDetailPanel({
               You&rsquo;re viewing your own account. Revoke actions are disabled here so you can&rsquo;t
               accidentally remove your own access — ask another admin if a change is needed.
             </p>
+          ) : protectedTarget ? (
+            <p className="rounded-lg border border-border bg-surface-hover/40 px-3 py-2 text-xs text-text-muted lg:col-span-2">
+              This is the superadmin account. {PROTECTED_SUPERADMIN_MESSAGE} — role and account actions
+              are disabled here.
+            </p>
           ) : null}
 
           {/* 1. Roles */}
@@ -867,7 +892,14 @@ function UserDetailPanel({
             title="Roles"
             hint="Roles define the level of access in Atlas."
             actions={
-              <Button variant="primary" size="sm" icon={Plus} onClick={onGrantRole}>
+              <Button
+                variant="primary"
+                size="sm"
+                icon={Plus}
+                onClick={onGrantRole}
+                disabled={protectedTarget}
+                title={protectedTarget ? PROTECTED_SUPERADMIN_MESSAGE : undefined}
+              >
                 Grant role
               </Button>
             }
@@ -877,7 +909,7 @@ function UserDetailPanel({
             ) : (
               <AccessTable head={["Role", "Granted by", "Granted at", ""]}>
                 {grants.map((g) => {
-                  const guard = revokeGuard({ isSelf, lastAdmin: isRevokeBlocked(g) });
+                  const guard = revokeGuard({ isSelf, lastAdmin: isRevokeBlocked(g), protectedSuperadmin: protectedTarget });
                   return (
                     <tr key={g.id} className="border-t border-border/60">
                       <td className="py-2 pr-3">

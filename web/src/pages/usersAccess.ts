@@ -1,4 +1,4 @@
-import type { ListUserPageAccessResponse, Page } from "../api/types";
+import type { Grant, ListUserPageAccessResponse, Page } from "../api/types";
 
 /**
  * Shown on a Revoke control that is disabled because the user detail panel is
@@ -17,6 +17,11 @@ export const SELF_REVOKE_MESSAGE = "You cannot revoke your own access.";
  *  grant in the system. */
 export const LAST_ADMIN_REVOKE_MESSAGE = "Can't revoke — this is the last user with admin access";
 
+/** Shown on any per-user action blocked because the target holds the
+ *  protected `superadmin` role and the signed-in user does not. Mirrors the
+ *  backend's guardSuperadminTarget 403. */
+export const PROTECTED_SUPERADMIN_MESSAGE = "Only a superadmin can act on the superadmin account";
+
 export interface RevokeGuard {
   disabled: boolean;
   reason?: string;
@@ -26,14 +31,29 @@ export interface RevokeGuard {
  * Whether a Revoke control in the user detail panel must be disabled, and the
  * reason to surface on hover.
  *
+ * `protectedSuperadmin` applies to every action against the superadmin's
+ * account by a non-superadmin — it is the most absolute block and wins.
  * `lastAdmin` applies to role grants only; `isSelf` applies to every access
- * axis — role grants, direct page grants, and bundle assignments alike. The
- * last-admin reason takes precedence when both hold.
+ * axis — role grants, direct page grants, and bundle assignments alike.
  */
-export function revokeGuard(opts: { isSelf: boolean; lastAdmin?: boolean }): RevokeGuard {
+export function revokeGuard(opts: {
+  isSelf: boolean;
+  lastAdmin?: boolean;
+  protectedSuperadmin?: boolean;
+}): RevokeGuard {
+  if (opts.protectedSuperadmin) return { disabled: true, reason: PROTECTED_SUPERADMIN_MESSAGE };
   if (opts.lastAdmin) return { disabled: true, reason: LAST_ADMIN_REVOKE_MESSAGE };
   if (opts.isSelf) return { disabled: true, reason: SELF_REVOKE_MESSAGE };
   return { disabled: false };
+}
+
+/**
+ * Whether a user holds the protected superadmin role — an active fleet-wide
+ * grant of it. The one account every per-user action on the Users page is
+ * refused against, for anyone who is not themselves a superadmin.
+ */
+export function holdsSuperadmin(grants: readonly Grant[] | undefined): boolean {
+  return (grants ?? []).some((g) => g.role === "superadmin" && g.fleet_wide);
 }
 
 /**

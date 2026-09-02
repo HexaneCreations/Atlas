@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { X } from "lucide-react";
 import { Link } from "react-router";
-import { useProcesses } from "../../api/queries";
+import { usePrimaryNodeID, useProcesses } from "../../api/queries";
 import type { Port } from "../../api/types";
 import { Badge, type Tone } from "../../components/Badge";
 import { CopyButton } from "../processes/ProcessInspector";
@@ -154,7 +154,7 @@ export function SocketInspector({
 }
 
 function ProcessTab({ socket: s, siblings }: { socket: Port; siblings: Port[] }) {
-  const processes = useProcesses();
+  const processes = useProcesses(usePrimaryNodeID());
 
   // A real join on pid, not a name match: two processes can share a name, and
   // the pid is what the socket table actually recorded.

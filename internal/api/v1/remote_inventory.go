@@ -46,8 +46,21 @@ func resolveInventory[T any](
 		return zero, inventory.Meta{}, err
 	}
 	if scope.IsLocal(h.deps.Collection.Identity().NodeID) {
-		if err := h.requirePlugin(pluginID); err != nil {
-			return zero, inventory.Meta{}, err
+		if perr := h.requirePlugin(pluginID); perr != nil {
+			// The plugin backing this subject is not active in this process.
+			// A co-located agent may have pushed a snapshot for this same
+			// node id; prefer it over an absence that is only true of the
+			// control plane. If nothing was pushed, perr — which carries
+			// reason=no_local_plugin — is the honest answer.
+			if errs.CodeOf(perr) != errs.CodeNotImplemented || h.deps.Inventory == nil {
+				return zero, inventory.Meta{}, perr
+			}
+			localID := h.deps.Collection.Identity().NodeID
+			data, meta, rerr := resolveRemoteInventory[T](r.Context(), h, localID, subject)
+			if rerr != nil {
+				return zero, inventory.Meta{}, perr
+			}
+			return data, meta, nil
 		}
 		data, err := local(r.Context(), scope)
 		if err != nil {
@@ -114,7 +127,8 @@ func resolveRemoteInventory[T any](ctx context.Context, h *Handler, nodeID strin
 		if reported {
 			return zero, inventory.Meta{}, errs.New(errs.CodeNotImplemented,
 				"this node's agent does not report %s", subject).
-				WithOp(op).WithDetail("node", nodeID).WithDetail("subject", string(subject))
+				WithOp(op).WithDetail("node", nodeID).WithDetail("subject", string(subject)).
+				WithDetail("reason", "agent_no_subject")
 		}
 		return zero, inventory.Meta{}, errs.New(errs.CodeUnavailable,
 			"no agent has reported for this node yet").

@@ -3,7 +3,13 @@ import type { CurrentUser, PageAccessEntry } from "../api/types";
 import { canReachPage } from "./pageAccess";
 
 function user(pageAccess: PageAccessEntry[]): CurrentUser {
-  return { user_id: "u1", username: "abhishek", can_manage_users: false, page_access: pageAccess };
+  return {
+    user_id: "u1",
+    username: "abhishek",
+    can_manage_users: false,
+    is_superadmin: false,
+    page_access: pageAccess,
+  };
 }
 
 describe("canReachPage", () => {

@@ -2,7 +2,8 @@ import { useMemo, useState } from "react";
 import { ArrowDown, ArrowUp, ChevronsUpDown, FileText } from "lucide-react";
 import { Link } from "react-router";
 import { useContainers, useLatestMetrics, usePrimaryNodeID } from "../api/queries";
-import { ApiError } from "../api/client";
+import { ApiError, inventoryGapKind } from "../api/client";
+import { AgentSubjectGap } from "../components/AgentSubjectGap";
 import type { Container, ContainerState } from "../api/types";
 import { emptyArray } from "../api/empty";
 import { Card } from "../components/Card";
@@ -112,6 +113,10 @@ export function ContainersPage() {
   const abnormalExits = useMemo(() => all.filter((c) => readExit(c).abnormal).length, [all]);
 
   const selected = useMemo(() => all.find((c) => c.id === selectedID) ?? null, [all, selectedID]);
+
+  if (inventoryGapKind(containers.error) === "agent") {
+    return <AgentSubjectGap subject="containers" />;
+  }
 
   if (containers.error instanceof ApiError && containers.error.code === "not_implemented") {
     return (

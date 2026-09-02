@@ -1,7 +1,8 @@
 import { useMemo, useState } from "react";
 import { ArrowDown, ArrowUp, ChevronsUpDown, Cpu, MemoryStick } from "lucide-react";
 import { useLatestMetrics, useMetricSeries, useProcesses, usePrimaryNodeID } from "../api/queries";
-import { ApiError } from "../api/client";
+import { ApiError, inventoryGapKind } from "../api/client";
+import { AgentSubjectGap } from "../components/AgentSubjectGap";
 import type { Process, ProcessState, Series } from "../api/types";
 import { emptyArray } from "../api/empty";
 import { Card, CardHeader } from "../components/Card";
@@ -85,8 +86,8 @@ const MEM_OPTIONS = [
  * controls do.
  */
 export function ProcessesPage() {
-  const processes = useProcesses();
   const nodeID = usePrimaryNodeID();
+  const processes = useProcesses(nodeID);
   const cpuHistory = useMetricSeries(nodeID, ["process.top.cpu"], "1h");
   const stateHistory = useMetricSeries(nodeID, ["process.count"], "1h");
   const latest = useLatestMetrics(nodeID);
@@ -152,6 +153,10 @@ export function ProcessesPage() {
       fraction: p.memory_rss / max,
     }));
   }, [all]);
+
+  if (inventoryGapKind(processes.error) === "agent") {
+    return <AgentSubjectGap subject="processes" />;
+  }
 
   if (processes.error instanceof ApiError && processes.error.code === "not_implemented") {
     return (

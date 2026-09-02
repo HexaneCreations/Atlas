@@ -78,6 +78,11 @@ export interface CurrentUser {
    *  Overview stays reachable regardless of what this contains (see
    *  shell/pageAccess). Always present; may be empty. */
   page_access: PageAccessEntry[];
+  /** True when this caller holds the protected `superadmin` role. The admin
+   *  Users page uses it to disable per-row actions against the superadmin's
+   *  account for everyone else — a display hint only; the backend re-checks
+   *  it on every action endpoint (guardSuperadminTarget). */
+  is_superadmin: boolean;
 }
 
 /** One reachable page in [CurrentUser.page_access]. `fleet_wide` true means
@@ -91,8 +96,10 @@ export interface PageAccessEntry {
 // ------------------------------------------------------- Admin: Users ----
 
 /** The fixed role set — see internal/core/user.KnownRoles. Not an open set:
- *  the backend rejects anything else. */
-export type Role = "viewer" | "operator" | "admin";
+ *  the backend rejects anything else. `superadmin` is a protected tier that
+ *  cannot be granted through the API (POST /users/{id}/grants rejects it);
+ *  it appears here only so an existing grant can be read and rendered. */
+export type Role = "viewer" | "operator" | "admin" | "superadmin";
 
 /** One role grant. Scoped to one node, or fleet-wide when `fleet_wide` is
  *  true — the two are mutually exclusive, mirroring the backend's own

@@ -1,6 +1,7 @@
 import { Clock, ShieldAlert } from "lucide-react";
-import { useCronJobs } from "../api/queries";
-import { ApiError } from "../api/client";
+import { useCronJobs, usePrimaryNodeID } from "../api/queries";
+import { ApiError, inventoryGapKind } from "../api/client";
+import { AgentSubjectGap } from "../components/AgentSubjectGap";
 import type { CronJob } from "../api/types";
 import { Card } from "../components/Card";
 import { EmptyState } from "../components/EmptyState";
@@ -12,7 +13,12 @@ import { QueryState } from "../components/QueryState";
 import { TABLE, TABLE_WRAP, TD, TD_MUTED, TH, THEAD_TR, TR } from "../components/table";
 
 export function CronPage() {
-  const cron = useCronJobs();
+  const nodeID = usePrimaryNodeID();
+  const cron = useCronJobs(nodeID);
+
+  if (inventoryGapKind(cron.error) === "agent") {
+    return <AgentSubjectGap subject="scheduled jobs" />;
+  }
 
   if (cron.error instanceof ApiError && cron.error.code === "not_implemented") {
     return (

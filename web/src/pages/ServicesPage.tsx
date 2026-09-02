@@ -1,7 +1,8 @@
 import { useMemo, useState } from "react";
 import { ArrowDown, ArrowUp, ChevronsUpDown } from "lucide-react";
-import { useServiceGraph, useServices } from "../api/queries";
-import { ApiError } from "../api/client";
+import { usePrimaryNodeID, useServiceGraph, useServices } from "../api/queries";
+import { ApiError, inventoryGapKind } from "../api/client";
+import { AgentSubjectGap } from "../components/AgentSubjectGap";
 import type { GraphHealth, Service } from "../api/types";
 import { emptyArray } from "../api/empty";
 import { Card, CardHeader } from "../components/Card";
@@ -69,7 +70,8 @@ const DIRECTION_OPTIONS = [
  * ordering. Showing them by default would drown the 294 that mean something.
  */
 export function ServicesPage() {
-  const services = useServices();
+  const nodeID = usePrimaryNodeID();
+  const services = useServices(nodeID);
   const [selected, setSelected] = useState<string | null>(null);
   const [depth, setDepth] = useState<"1" | "2" | "3">("1");
   const [edgeClass, setEdgeClass] = useState<"requirement" | "all">("requirement");
@@ -78,9 +80,10 @@ export function ServicesPage() {
   // The unrooted graph supplies propagated health for the whole list. Its node
   // cap is generous because it is data, not a drawing — nothing renders 202
   // nodes at once.
-  const fleetGraph = useServiceGraph({ limit: 1000 });
+  const fleetGraph = useServiceGraph({ node: nodeID, limit: 1000 });
   // The rooted graph is what gets drawn.
   const rootedGraph = useServiceGraph({
+    node: nodeID,
     root: selected ?? undefined,
     depth: Number(depth),
     direction,
@@ -112,6 +115,10 @@ export function ServicesPage() {
   );
 
   const notEnabled = rows.filter((r) => r.unit.active_state === "active" && !r.unit.enabled).length;
+
+  if (inventoryGapKind(services.error) === "agent") {
+    return <AgentSubjectGap subject="services" />;
+  }
 
   if (services.error instanceof ApiError && services.error.code === "not_implemented") {
     return (
@@ -376,6 +383,7 @@ export function ServicesPage() {
         {selectedRow ? (
           <ServiceInspector
             row={selectedRow}
+            nodeID={nodeID}
             onClose={() => { setSelected(null); }}
             onSelectUnit={setSelected}
           />

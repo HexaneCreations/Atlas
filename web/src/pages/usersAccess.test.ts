@@ -1,11 +1,23 @@
 import { describe, expect, it } from "vitest";
-import type { ListUserPageAccessResponse, Page, PageAccessAssignment } from "../api/types";
+import type { Grant, ListUserPageAccessResponse, Page, PageAccessAssignment } from "../api/types";
 import {
   LAST_ADMIN_REVOKE_MESSAGE,
+  PROTECTED_SUPERADMIN_MESSAGE,
   SELF_REVOKE_MESSAGE,
   effectivePages,
+  holdsSuperadmin,
   revokeGuard,
 } from "./usersAccess";
+
+function grant(partial: Partial<Grant>): Grant {
+  return {
+    id: "g1",
+    role: "admin",
+    fleet_wide: true,
+    granted_at: "2026-01-01T00:00:00Z",
+    ...partial,
+  };
+}
 
 function directGrant(page: Page): PageAccessAssignment {
   return { id: `d-${page}`, fleet_wide: true, granted_at: "2026-01-01T00:00:00Z", page };
@@ -40,6 +52,33 @@ describe("revokeGuard", () => {
       disabled: true,
       reason: LAST_ADMIN_REVOKE_MESSAGE,
     });
+  });
+
+  it("blocks every action against the superadmin, ahead of both other reasons", () => {
+    expect(revokeGuard({ isSelf: true, lastAdmin: true, protectedSuperadmin: true })).toEqual({
+      disabled: true,
+      reason: PROTECTED_SUPERADMIN_MESSAGE,
+    });
+    expect(revokeGuard({ isSelf: false, protectedSuperadmin: true })).toEqual({
+      disabled: true,
+      reason: PROTECTED_SUPERADMIN_MESSAGE,
+    });
+  });
+});
+
+describe("holdsSuperadmin", () => {
+  it("is true only for an active fleet-wide superadmin grant", () => {
+    expect(holdsSuperadmin([grant({ role: "superadmin", fleet_wide: true })])).toBe(true);
+  });
+
+  it("ignores a node-scoped superadmin grant — the protected tier is fleet-wide", () => {
+    expect(holdsSuperadmin([grant({ role: "superadmin", fleet_wide: false, node_id: "n1" })])).toBe(false);
+  });
+
+  it("is false for admin, and for a user with no grants", () => {
+    expect(holdsSuperadmin([grant({ role: "admin", fleet_wide: true })])).toBe(false);
+    expect(holdsSuperadmin([])).toBe(false);
+    expect(holdsSuperadmin(undefined)).toBe(false);
   });
 });
 

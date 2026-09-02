@@ -2,7 +2,8 @@ import { useMemo } from "react";
 import { AlertTriangle, ChevronRight, HardDrive } from "lucide-react";
 import { motion } from "framer-motion";
 import { useMetricSeries, useMounts, usePrimaryNodeID } from "../api/queries";
-import { ApiError } from "../api/client";
+import { ApiError, inventoryGapKind } from "../api/client";
+import { AgentSubjectGap } from "../components/AgentSubjectGap";
 import type { Mount, Series } from "../api/types";
 import { emptyArray } from "../api/empty";
 import { Card, CardHeader } from "../components/Card";
@@ -26,8 +27,8 @@ import { formatBytes } from "../format";
  * the one thing a percentage cannot tell you.
  */
 export function DisksPage() {
-  const mounts = useMounts();
   const nodeID = usePrimaryNodeID();
+  const mounts = useMounts(nodeID);
   const history = useMetricSeries(nodeID, ["system.disk.usage"], "24h");
 
   const all = mounts.data?.mounts ?? emptyArray<Mount>();
@@ -40,6 +41,10 @@ export function DisksPage() {
 
   const fullest = pools[0];
   const atRisk = pools.filter((m) => m.used_percent >= 75);
+
+  if (inventoryGapKind(mounts.error) === "agent") {
+    return <AgentSubjectGap subject="mounted filesystems" />;
+  }
 
   if (mounts.error instanceof ApiError && mounts.error.code === "not_implemented") {
     return (

@@ -799,3 +799,148 @@ func TestListUsersWithGrantsReturnsOnlyActiveGrants(t *testing.T) {
 		t.Errorf("grants = %+v, want exactly the one active viewer grant", found.Grants)
 	}
 }
+
+// grantFleetSuperadmin mirrors grantFleetAdmin for the protected fourth
+// role, added in migrations/0019_superadmin_role.sql.
+func grantFleetSuperadmin(t *testing.T, repo *user.Repository, userID string, now time.Time) {
+	t.Helper()
+	spec := coreuser.GrantSpec{UserID: userID, FleetWide: true, Role: coreuser.RoleSuperadmin, GrantedBy: "test"}
+	if err := repo.Grant(context.Background(), spec, now); err != nil {
+		t.Fatalf("Grant(superadmin, fleet-wide): %v", err)
+	}
+}
+
+// A fleet-wide superadmin grant round-trips, is reported by IsSuperadmin
+// (fleet-wide only, matching admin's user.manage), and carries every
+// permission admin does — it is a strict superset.
+func TestSuperadminGrantRoundTripsAndHoldsEveryAdminPermission(t *testing.T) {
+	repo := newRepository(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	u := createTestUser(t, repo, "sofia-super")
+	grantFleetSuperadmin(t, repo, u.ID, now)
+
+	is, err := repo.IsSuperadmin(ctx, u.ID)
+	if err != nil {
+		t.Fatalf("IsSuperadmin: %v", err)
+	}
+	if !is {
+		t.Fatal("IsSuperadmin false right after a fleet-wide superadmin grant")
+	}
+
+	for _, p := range []coreuser.Permission{
+		coreuser.PermissionNodeRead, coreuser.PermissionNodeLogsRead,
+		coreuser.PermissionFleetWrite, coreuser.PermissionUserManage,
+	} {
+		ok, err := repo.HasPermission(ctx, u.ID, "any-node", p)
+		if err != nil {
+			t.Fatalf("HasPermission(%s): %v", p, err)
+		}
+		if !ok {
+			t.Errorf("superadmin lacks %s; it must be a strict superset of admin", p)
+		}
+	}
+
+	other := createTestUser(t, repo, "tariq-plain")
+	if is, err := repo.IsSuperadmin(ctx, other.ID); err != nil || is {
+		t.Errorf("IsSuperadmin(non-superadmin) = %v, %v; want false, nil", is, err)
+	}
+}
+
+// A node-scoped superadmin grant (which the manual bootstrap never creates,
+// but nothing at the storage layer forbids) does not satisfy IsSuperadmin —
+// the protected tier is a fleet concept, the same shape as the last-admin
+// guard's isActiveFleetWideAdmin.
+func TestIsSuperadminIgnoresANodeScopedGrant(t *testing.T) {
+	repo := newRepository(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	u := createTestUser(t, repo, "uma-node-super")
+	spec := coreuser.GrantSpec{UserID: u.ID, NodeID: "node-1", Role: coreuser.RoleSuperadmin, GrantedBy: "test"}
+	if err := repo.Grant(ctx, spec, now); err != nil {
+		t.Fatalf("Grant(superadmin, node-scoped): %v", err)
+	}
+
+	is, err := repo.IsSuperadmin(ctx, u.ID)
+	if err != nil {
+		t.Fatalf("IsSuperadmin: %v", err)
+	}
+	if is {
+		t.Error("IsSuperadmin true for a node-scoped grant; it must require fleet-wide")
+	}
+}
+
+// GrantOwner resolves a grant id back to its user, and returns "" (not an
+// error) for an unknown or already-revoked id — the same caller-intent
+// no-op RevokeGrant itself applies.
+func TestGrantOwnerResolvesActiveGrantsOnly(t *testing.T) {
+	repo := newRepository(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	u := createTestUser(t, repo, "victor-owner")
+	grantFleetAdmin(t, repo, u.ID, now)
+
+	grants, err := repo.ListGrants(ctx, u.ID)
+	if err != nil {
+		t.Fatalf("ListGrants: %v", err)
+	}
+	gid := grants[0].ID
+
+	owner, err := repo.GrantOwner(ctx, gid)
+	if err != nil {
+		t.Fatalf("GrantOwner: %v", err)
+	}
+	if owner != u.ID {
+		t.Errorf("GrantOwner = %q, want %q", owner, u.ID)
+	}
+
+	if owner, err := repo.GrantOwner(ctx, "no-such-grant-id"); err != nil || owner != "" {
+		t.Errorf("GrantOwner(unknown) = %q, %v; want \"\", nil", owner, err)
+	}
+
+	// A second fleet admin so the revoke below is not blocked by the
+	// last-admin guard.
+	second := createTestUser(t, repo, "wendy-owner")
+	grantFleetAdmin(t, repo, second.ID, now)
+	if err := repo.RevokeGrant(ctx, gid, "operator", now); err != nil {
+		t.Fatalf("RevokeGrant: %v", err)
+	}
+	if owner, err := repo.GrantOwner(ctx, gid); err != nil || owner != "" {
+		t.Errorf("GrantOwner(revoked) = %q, %v; want \"\", nil", owner, err)
+	}
+}
+
+// Point 6 of the superadmin feature request, confirmed against real SQL: the
+// last-admin guard counts role_name = 'admin' rows only. A superadmin grant
+// is a different role string, so it does NOT satisfy "at least one fleet-wide
+// admin remains" — revoking the sole admin's grant still trips
+// ErrLastAdminGrant even while a superadmin exists.
+//
+// This is deliberately left as-is (the request said flag, do not change
+// without approval). The practical guidance: keep an admin grant on the
+// superadmin user too, or follow up to teach otherEnabledFleetWideAdminExists
+// about superadmin.
+func TestSuperadminDoesNotCountTowardTheLastAdminGuard(t *testing.T) {
+	repo := newRepository(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	onlyAdmin := createTestUser(t, repo, "xena-admin")
+	grantFleetAdmin(t, repo, onlyAdmin.ID, now)
+	superOnly := createTestUser(t, repo, "yuri-super")
+	grantFleetSuperadmin(t, repo, superOnly.ID, now)
+
+	grants, err := repo.ListGrants(ctx, onlyAdmin.ID)
+	if err != nil {
+		t.Fatalf("ListGrants: %v", err)
+	}
+	err = repo.RevokeGrant(ctx, grants[0].ID, "operator", now)
+	if !errs.Is(err, coreuser.ErrLastAdminGrant) {
+		t.Fatalf("RevokeGrant(sole admin, with a superadmin present) = %v, want ErrLastAdminGrant — superadmin must not count as an admin here", err)
+	}
+
+	// And DisableUser hits the same guard for the same reason.
+	if err := repo.DisableUser(ctx, onlyAdmin.ID, "operator", now); !errs.Is(err, coreuser.ErrLastAdminGrant) {
+		t.Fatalf("DisableUser(sole admin) = %v, want ErrLastAdminGrant", err)
+	}
+}

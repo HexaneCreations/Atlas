@@ -191,15 +191,28 @@ func (h *Handler) ListContainers(w http.ResponseWriter, r *http.Request) error {
 	)
 
 	if h.deps.Collection != nil && scope.IsLocal(h.deps.Collection.Identity().NodeID) {
-		client, err := h.dockerClient(scope)
-		if err != nil {
-			return err
+		client, cerr := h.dockerClient(scope)
+		switch {
+		case cerr == nil:
+			containers, err = client.Containers(r.Context())
+			if err != nil {
+				return err
+			}
+			meta = inventory.LiveMeta(h.resolvedNode(scope))
+		case errs.CodeOf(cerr) == errs.CodeNotImplemented && h.deps.Inventory != nil:
+			// This process has no local Docker socket, but a co-located agent
+			// may have pushed a container snapshot for this same node id.
+			// Prefer that over an absence that is only true of the control
+			// plane, not of the host. If nothing was pushed, cerr — which
+			// already carries reason=no_local_docker — is the honest answer.
+			localID := h.deps.Collection.Identity().NodeID
+			containers, meta, err = resolveRemoteInventory[[]docker.Container](r.Context(), h, localID, inventory.SubjectContainers)
+			if err != nil {
+				return cerr
+			}
+		default:
+			return cerr
 		}
-		containers, err = client.Containers(r.Context())
-		if err != nil {
-			return err
-		}
-		meta = inventory.LiveMeta(h.resolvedNode(scope))
 	} else {
 		var err error
 		containers, meta, err = resolveRemoteInventory[[]docker.Container](r.Context(), h, scope.NodeID, inventory.SubjectContainers)
@@ -668,7 +681,8 @@ func (h *Handler) dockerClient(scope inventory.Scope) (docker.Client, error) {
 	client := h.deps.Collection.DockerClient()
 	if client == nil {
 		return nil, errs.New(errs.CodeNotImplemented,
-			"Docker is not available on this host").WithOp(op)
+			"Docker is not available on this host").WithOp(op).
+			WithDetail("reason", "no_local_docker")
 	}
 	return client, nil
 }

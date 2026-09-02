@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { Copy, X } from "lucide-react";
-import { usePorts } from "../../api/queries";
+import { usePorts, usePrimaryNodeID } from "../../api/queries";
 import type { Port, Process, ProcessState, Series } from "../../api/types";
 import { Badge, type Tone } from "../../components/Badge";
 import { TimeSeriesChart, toChartSeries } from "../../components/Chart";
@@ -46,7 +46,7 @@ export function ProcessInspector({
   onClose: () => void;
 }) {
   const [tab, setTab] = useState<Tab>("overview");
-  const ports = usePorts();
+  const ports = usePorts(usePrimaryNodeID());
 
   // Sockets this PID owns. The ports plugin records the owning process, so
   // this is a real cross-reference rather than an inference from names.

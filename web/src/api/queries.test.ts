@@ -1,5 +1,28 @@
 import { describe, expect, it } from "vitest";
-import { containerKeys, containersPath, selectPrimaryNodeID } from "./queries";
+import { containerKeys, containersPath, inventoryPath, selectPrimaryNodeID } from "./queries";
+
+// Regression: useProcesses / useServices / useCronJobs / usePorts / useMounts
+// used to fetch their bare path with no node param, which — exactly like
+// useContainers before it — silently resolved to the control plane's own
+// host rather than the selected node. Every one of them now routes through
+// inventoryPath.
+describe("inventoryPath", () => {
+  it("scopes the request to the given node", () => {
+    expect(inventoryPath("/processes", "cyrene-dev-v2")).toBe("/processes?node=cyrene-dev-v2");
+  });
+
+  it("url-encodes the node id", () => {
+    expect(inventoryPath("/ports", "node with spaces")).toBe("/ports?node=node%20with%20spaces");
+  });
+
+  it("emits an empty node param rather than silently defaulting when none is selected", () => {
+    expect(inventoryPath("/mounts", undefined)).toBe("/mounts?node=");
+  });
+
+  it("backs containersPath", () => {
+    expect(containersPath("node-a")).toBe(inventoryPath("/containers", "node-a"));
+  });
+});
 
 // Regression: useContainers used to fetch "/containers" with no node param,
 // which silently resolved to the control plane's own host — never the

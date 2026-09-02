@@ -321,7 +321,7 @@ func (h *Handler) requirePlugin(id string) error {
 	if !h.deps.Collection.PluginActive(id) {
 		return errs.New(errs.CodeNotImplemented,
 			"the %s integration is not available on this host", id).
-			WithOp(op).WithDetail("plugin", id)
+			WithOp(op).WithDetail("plugin", id).WithDetail("reason", "no_local_plugin")
 	}
 	return nil
 }

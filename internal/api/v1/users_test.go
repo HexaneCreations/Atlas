@@ -135,6 +135,27 @@ func (f *fakeUserAdmin) Grant(_ context.Context, spec user.GrantSpec, now time.T
 	return nil
 }
 
+func (f *fakeUserAdmin) IsSuperadmin(_ context.Context, userID string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, g := range f.grants {
+		if g.UserID == userID && g.Role == user.RoleSuperadmin && g.NodeID == nil && g.RevokedAt == nil {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (f *fakeUserAdmin) GrantOwner(_ context.Context, grantID string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	g, ok := f.grants[grantID]
+	if !ok || g.RevokedAt != nil {
+		return "", nil
+	}
+	return g.UserID, nil
+}
+
 func (f *fakeUserAdmin) RevokeGrant(_ context.Context, grantID, _ string, now time.Time) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
