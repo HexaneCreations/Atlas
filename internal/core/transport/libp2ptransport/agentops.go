@@ -280,9 +280,21 @@ func handleAgentOpsStream(s network.Stream, lookup AgentOpsRelationshipLookup, l
 
 	ctx, cancel := context.WithTimeout(context.Background(), maxSessionDuration)
 	defer cancel()
+	// Reset only when the session ends abnormally (the timeout, or the peer
+	// going away). On the handler's own return the deferred s.Close() must
+	// flush the terminal frame instead: a reset discards data the peer has
+	// not read yet, so it would race away the one frame explaining the
+	// outcome. finished is closed before cancel() runs (defers are LIFO), so
+	// this goroutine always sees it on a normal return.
+	finished := make(chan struct{})
+	defer close(finished)
 	go func() {
 		<-ctx.Done()
-		_ = s.Reset()
+		select {
+		case <-finished:
+		default:
+			_ = s.Reset()
+		}
 	}()
 	// Mirrors the outbound direction above: this handler never expects
 	// another message after the request, so a blocked Read only returns

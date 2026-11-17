@@ -5,12 +5,14 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/hexane/atlas/internal/platform/pki"
 	"github.com/libp2p/go-libp2p/core/host"
+	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 )
 
@@ -177,6 +179,7 @@ func TestRequestContainerLogsNonFollow(t *testing.T) {
 	}
 
 	var got []string
+	var last AgentOpFrame
 	for f := range frames {
 		if f.Type == "error" {
 			t.Fatalf("unexpected error frame: %s", f.Reason)
@@ -184,6 +187,10 @@ func TestRequestContainerLogsNonFollow(t *testing.T) {
 		if f.Type == "line" {
 			got = append(got, f.Message)
 		}
+		last = f
+	}
+	if last.Type != "end" {
+		t.Fatalf("last frame = %+v, want the terminal %q frame", last, "end")
 	}
 	if len(got) != len(want) {
 		t.Fatalf("got %v lines, want %d", got, len(want))
@@ -499,6 +506,124 @@ func TestRequestContainerLogsSurfacesAgentSideError(t *testing.T) {
 	f, ok := <-frames
 	if !ok || f.Type != "error" || f.Reason == "" {
 		t.Fatalf("frame = %+v, ok=%v, want a populated error frame", f, ok)
+	}
+}
+
+// The terminal frame is the one that explains a session's outcome, so it must
+// arrive on every request, not most: the handler's own return used to reset
+// the stream, racing the graceful close and discarding the frame unread.
+func TestRequestContainerLogsAlwaysDeliversTheTerminalFrame(t *testing.T) {
+	const runs = 200
+
+	cases := []struct {
+		name       string
+		logs       ContainerLogsFunc
+		wantType   string
+		wantReason string
+	}{
+		{"error", erroringLogsFunc("docker is not available on this host"), "error", "docker is not available on this host"},
+		{"end", fixedLinesFunc([]LogLine{{Message: "one"}}), "end", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			serverHost, agentHost := setupAgentOpsHosts(t)
+			// Sized past runs so a session still releasing its slot can never
+			// turn the next request into a limiter refusal.
+			RegisterAgentOpsHandler(agentHost, tc.logs, NewSessionLimiter(runs), acceptAnyPeer(true))
+
+			for i := range runs {
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				frames, err := RequestContainerLogs(ctx, serverHost, agentHost.ID(),
+					AgentOpRequest{ProtocolVersion: AgentOpsProtocolVersion, Op: AgentOpContainerLogs, ContainerID: "c1"})
+				if err != nil {
+					cancel()
+					t.Fatalf("run %d: RequestContainerLogs: %v", i, err)
+				}
+				var last AgentOpFrame
+				var got bool
+				for f := range frames {
+					last, got = f, true
+				}
+				cancel()
+				if !got || last.Type != tc.wantType || last.Reason != tc.wantReason {
+					t.Fatalf("run %d: last frame = %+v (received any: %v), want type %q reason %q",
+						i, last, got, tc.wantType, tc.wantReason)
+				}
+			}
+		})
+	}
+}
+
+// The handler's close-detection Read must not outlive a normal return. Here
+// the control plane reads its terminal frame and then never closes or resets
+// its side, so the only thing that can end that Read is the handler's own
+// s.Close().
+func TestHandleAgentOpsStreamReadGoroutineExitsWhenClientNeverCloses(t *testing.T) {
+	const sessions = 50
+
+	serverHost, agentHost := setupAgentOpsHosts(t)
+	RegisterAgentOpsHandler(agentHost, fixedLinesFunc([]LogLine{{Message: "one"}}), NewSessionLimiter(sessions+1), acceptAnyPeer(true))
+
+	var held []network.Stream
+	t.Cleanup(func() {
+		for _, s := range held {
+			_ = s.Reset()
+		}
+	})
+	runSession := func() {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		s, err := serverHost.NewStream(ctx, agentHost.ID(), AgentOpsProtocolID)
+		if err != nil {
+			t.Fatalf("NewStream: %v", err)
+		}
+		held = append(held, s)
+		if err := json.NewEncoder(s).Encode(AgentOpRequest{ProtocolVersion: AgentOpsProtocolVersion, Op: AgentOpContainerLogs, ContainerID: "c1"}); err != nil {
+			t.Fatalf("send request: %v", err)
+		}
+		dec := json.NewDecoder(s)
+		for {
+			var f AgentOpFrame
+			if err := dec.Decode(&f); err != nil {
+				t.Fatalf("decode before terminal frame: %v", err)
+			}
+			if f.Type != "line" {
+				return
+			}
+		}
+	}
+
+	// settledCount polls until the count is at most atMost or has held
+	// steady for several samples, whichever comes first.
+	settledCount := func(atMost int) int {
+		n, steady := runtime.NumGoroutine(), 0
+		for deadline := time.Now().Add(3 * time.Second); n > atMost && steady < 5 && time.Now().Before(deadline); {
+			time.Sleep(20 * time.Millisecond)
+			next := runtime.NumGoroutine()
+			if next == n {
+				steady++
+			} else {
+				steady = 0
+			}
+			n = next
+		}
+		return n
+	}
+
+	// One warm-up session starts whatever per-connection goroutines the
+	// stack creates lazily, so the baseline counts only steady state.
+	runSession()
+	baseline := settledCount(0)
+
+	for range sessions {
+		runSession()
+	}
+	// A leaked Read goroutine per session would put the count at least
+	// `sessions` above baseline; the slack absorbs unrelated churn.
+	const slack = 5
+	if n := settledCount(baseline + slack); n > baseline+slack {
+		t.Fatalf("goroutines = %d after %d sessions, baseline %d: handler goroutines did not exit", n, sessions, baseline)
 	}
 }
 
