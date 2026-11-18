@@ -1,7 +1,9 @@
 package metric
 
 import (
+	"cmp"
 	"context"
+	"slices"
 	"time"
 
 	"github.com/hexane/atlas/internal/core/collect"
@@ -72,6 +74,13 @@ func upsertLatest(ctx context.Context, tx pgx.Tx, nodeID string, batch collect.B
 			newest[k] = i
 		}
 	}
+
+	// Fixed lock order: every batch touches its rows sorted the same way, so
+	// two concurrent transactions with overlapping series wait on each other
+	// instead of deadlocking. unnest feeds the INSERT in array order.
+	slices.SortFunc(order, func(a, b key) int {
+		return cmp.Or(cmp.Compare(a.metric, b.metric), cmp.Compare(a.series, b.series))
+	})
 
 	n := len(order)
 	metrics, seriesKeys, labels := make([]string, n), make([]string, n), make([]string, n)

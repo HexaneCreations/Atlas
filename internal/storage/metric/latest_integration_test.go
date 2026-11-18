@@ -4,6 +4,7 @@ package metric_test
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 	"testing"
 	"time"
@@ -290,5 +291,67 @@ func TestLatestMatchesSampleScan(t *testing.T) {
 				t.Errorf("LatestForMetric(%s, %v):\n got  %+v\n want %+v", name, within, got, want)
 			}
 		}
+	}
+}
+
+// Two transactions upserting the same series in opposite input orders must
+// not deadlock: upsertLatest sorts the series, so both lock rows in one
+// order and the second simply waits for the first. This calls upsertLatest
+// directly because InsertBatch also takes the node's row lock first, which
+// already serializes batches for one node and would hide a lock-order bug.
+func TestLatestConcurrentOppositeOrderUpsertsDoNotDeadlock(t *testing.T) {
+	_, pool := newRepository(t)
+	ctx := context.Background()
+	base := time.Now().UTC().Add(-time.Hour)
+
+	const series = 2000
+	batchAt := func(at time.Time, reverse bool) collect.Batch {
+		samples := make([]collect.Sample, series)
+		for i := range samples {
+			j := i
+			if reverse {
+				j = series - 1 - i
+			}
+			samples[i] = sample("system.disk.usage", map[string]string{"mountpoint": fmt.Sprintf("/m%04d", j)}, at, float64(j))
+		}
+		return collect.Batch{CollectorID: "system.disk", Samples: samples}
+	}
+	upsert := func(batch collect.Batch) error {
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback(ctx) }()
+		if err := metric.UpsertLatest(ctx, tx, "node-lock", batch); err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
+	}
+
+	if err := upsert(batchAt(base, false)); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	for round := 1; round <= 10; round++ {
+		at := base.Add(time.Duration(round) * time.Minute)
+		start := make(chan struct{})
+		errc := make(chan error, 2)
+		for i, reverse := range []bool{false, true} {
+			batch := batchAt(at.Add(time.Duration(i)*time.Second), reverse)
+			go func() {
+				<-start
+				errc <- upsert(batch)
+			}()
+		}
+		close(start)
+		for range 2 {
+			if err := <-errc; err != nil {
+				t.Fatalf("round %d: concurrent upsert: %v", round, err)
+			}
+		}
+	}
+
+	if n := latestRowCount(t, pool, "node-lock"); n != series {
+		t.Fatalf("metric_latest rows = %d, want %d", n, series)
 	}
 }
