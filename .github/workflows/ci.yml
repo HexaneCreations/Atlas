@@ -466,12 +466,12 @@ jobs:
       - name: Configure and deploy
         uses: appleboy/ssh-action@v1.0.3
         env:
-          # Created ONCE (openssl rand -base64 32) and stored as a production
+          # Created ONCE (openssl rand -base64 32) and stored as a production (TEMPORARY: a variable, move to a secret)
           # Environment secret. This job only ever copies it to the server;
           # it never generates one, so a deploy cannot rotate it and strand
           # every stored channel secret. Passed through the environment
           # rather than spliced into the script text.
-          ATLAS_NOTIFICATIONS_ENCRYPTION_KEY: ${{ secrets.NOTIFICATIONS_ENCRYPTION_KEY }}
+          ATLAS_NOTIFICATIONS_ENCRYPTION_KEY: ${{ vars.NOTIFICATIONS_ENCRYPTION_KEY }}
         with:
           host: ${{ secrets.PROD_SERVER_HOST }}
           username: ${{ secrets.PROD_SERVER_USER }}
@@ -529,12 +529,12 @@ jobs:
             # start atlas-server with notifications disabled or with a new
             # key. Neither check prints the key.
             if [ -z "${ATLAS_NOTIFICATIONS_ENCRYPTION_KEY:-}" ]; then
-              echo "the NOTIFICATIONS_ENCRYPTION_KEY production secret is not set" >&2
+              echo "the NOTIFICATIONS_ENCRYPTION_KEY production variable is not set" >&2
               exit 1
             fi
             KEY_BYTES=$(printf '%s' "$ATLAS_NOTIFICATIONS_ENCRYPTION_KEY" | base64 -d 2>/dev/null | wc -c) || KEY_BYTES=0
             if [ "$KEY_BYTES" -ne 32 ]; then
-              echo "the NOTIFICATIONS_ENCRYPTION_KEY production secret must be 32 bytes, base64-encoded" >&2
+              echo "the NOTIFICATIONS_ENCRYPTION_KEY production variable must be 32 bytes, base64-encoded" >&2
               exit 1
             fi
             printf '%s' "$ATLAS_NOTIFICATIONS_ENCRYPTION_KEY" > secrets/atlas_notifications_key.txt
