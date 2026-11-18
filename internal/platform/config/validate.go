@@ -6,6 +6,8 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+
+	"github.com/hexane/atlas/internal/platform/secretbox"
 )
 
 // violations accumulates every configuration problem found in one pass.
@@ -56,12 +58,24 @@ func (c *Config) Validate() error {
 	c.EventBus.validate(v)
 	c.Collection.validate(v)
 	c.Fleet.validate(v)
+	c.Notifications.validate(v)
 
 	if err := c.Logging.Validate(); err != nil {
 		v.addf("logging", "%s", err)
 	}
 
 	return v.err()
+}
+
+// validate checks the key's shape only. The message comes from
+// secretbox.ParseKey, which never includes the key itself.
+func (n Notifications) validate(v *violations) {
+	if n.EncryptionKey == "" {
+		return
+	}
+	if _, err := secretbox.ParseKey(n.EncryptionKey.Reveal()); err != nil {
+		v.addf("notifications.encryption_key", "%s (want %d random bytes, base64-encoded)", err, secretbox.KeySize)
+	}
 }
 
 func (f Fleet) validate(v *violations) {

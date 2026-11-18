@@ -9,6 +9,7 @@ import (
 	corealert "github.com/hexane/atlas/internal/core/alert"
 	corenotification "github.com/hexane/atlas/internal/core/notification"
 	"github.com/hexane/atlas/internal/platform/postgres"
+	"github.com/hexane/atlas/internal/platform/secretbox"
 	storagenotification "github.com/hexane/atlas/internal/storage/notification"
 )
 
@@ -21,18 +22,27 @@ import (
 type notificationPipeline struct {
 	logger *slog.Logger
 	pool   *postgres.Pool
+	// key encrypts channel secrets. Nil disables the pipeline entirely.
+	key *secretbox.Key
 
 	mu     sync.RWMutex
 	engine *corenotification.Engine
 }
 
-func newNotificationPipeline(logger *slog.Logger, pool *postgres.Pool) *notificationPipeline {
-	return &notificationPipeline{logger: logger, pool: pool}
+func newNotificationPipeline(logger *slog.Logger, pool *postgres.Pool, key *secretbox.Key) *notificationPipeline {
+	return &notificationPipeline{logger: logger, pool: pool, key: key}
 }
 
 func (p *notificationPipeline) Name() string { return "notification.pipeline" }
 
 func (p *notificationPipeline) Start(ctx context.Context) error {
+	if p.key == nil {
+		// The engine stays nil, so HandleAlertTransition enqueues nothing
+		// and nothing is ever dispatched.
+		p.logger.WarnContext(ctx, "notifications are disabled: ATLAS_NOTIFICATIONS_ENCRYPTION_KEY is not set; "+
+			"channel endpoints answer 503 and no notification is sent")
+		return nil
+	}
 	store := lazyNotificationStore{pool: p.pool}
 	engine := corenotification.NewEngine(corenotification.Options{
 		Channels: store, Deliveries: store, Logger: p.logger,
@@ -47,7 +57,7 @@ func (p *notificationPipeline) Start(ctx context.Context) error {
 
 	go engine.Run(ctx)
 
-	p.logger.InfoContext(ctx, "notification dispatcher ready")
+	p.logger.InfoContext(ctx, "notification dispatcher ready", slog.String("encryption_key_id", p.key.ID()))
 	return nil
 }
 

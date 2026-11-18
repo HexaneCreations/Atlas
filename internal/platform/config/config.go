@@ -79,10 +79,44 @@ type Config struct {
 	// hold anything, including a value an operator considers sensitive, and
 	// the `atlas-server config` output is safe to run in production precisely
 	// because it cannot print things it does not understand.
-	Plugins    map[string]yaml.Node `yaml:"plugins" json:"-" env:"-"`
-	Collection Collection           `yaml:"collection" json:"collection" env:"COLLECTION"`
-	Fleet      Fleet                `yaml:"fleet" json:"fleet" env:"FLEET"`
+	Plugins       map[string]yaml.Node `yaml:"plugins" json:"-" env:"-"`
+	Collection    Collection           `yaml:"collection" json:"collection" env:"COLLECTION"`
+	Fleet         Fleet                `yaml:"fleet" json:"fleet" env:"FLEET"`
+	Notifications Notifications        `yaml:"notifications" json:"notifications" env:"NOTIFICATIONS"`
 }
+
+// Notifications configures outbound notification delivery.
+type Notifications struct {
+	// EncryptionKey encrypts channel secrets at rest: 32 bytes,
+	// base64-encoded, supplied as ATLAS_NOTIFICATIONS_ENCRYPTION_KEY_FILE
+	// pointing at a mounted secret. Excluded from YAML for the same reason as
+	// Database.Password. Empty disables notifications: the channel endpoints
+	// answer 503 and nothing is sent — there is never a plaintext fallback.
+	// `atlas-server config` shows only whether it is set.
+	EncryptionKey Secret `yaml:"-" json:"-" env:"ENCRYPTION_KEY" redacted:"encryption_key"`
+}
+
+// Secret is a configuration string that must never be printed. Every
+// formatting path yields a placeholder; [Secret.Reveal] is the only way to
+// read it.
+type Secret string
+
+const secretPlaceholder = "[REDACTED]"
+
+// Reveal returns the secret's value.
+func (s Secret) Reveal() string { return string(s) }
+
+// String implements fmt.Stringer with a placeholder.
+func (s Secret) String() string { return secretPlaceholder }
+
+// GoString implements fmt.GoStringer with a placeholder, covering %#v.
+func (s Secret) GoString() string { return secretPlaceholder }
+
+// MarshalJSON never emits the value.
+func (s Secret) MarshalJSON() ([]byte, error) { return []byte(`"` + secretPlaceholder + `"`), nil }
+
+// MarshalText never emits the value.
+func (s Secret) MarshalText() ([]byte, error) { return []byte(secretPlaceholder), nil }
 
 // Fleet configures the agent-facing listeners: the HTTPS/mTLS one, and
 // optionally the libp2p one (see LibP2PEnabled). Disabled by default: a

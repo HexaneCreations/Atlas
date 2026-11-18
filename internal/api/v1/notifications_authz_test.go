@@ -175,3 +175,32 @@ func TestCurrentUserReportsCanManageNotificationsForSuperadminOnly(t *testing.T)
 		})
 	}
 }
+
+// With no encryption key the app wires no notification store: every
+// endpoint answers 503 to a superadmin, and the permission check still runs
+// first, so nobody else learns whether notifications are configured.
+func TestNotificationEndpointsAre503WithoutAStore(t *testing.T) {
+	t.Parallel()
+
+	for _, c := range []struct {
+		name  string
+		authz roleAuthorizer
+		want  int
+	}{
+		{"fleet-wide superadmin", roleAuthorizer{role: user.RoleSuperadmin}, http.StatusServiceUnavailable},
+		{"fleet-wide admin", roleAuthorizer{role: user.RoleAdmin}, http.StatusForbidden},
+	} {
+		for _, a := range notificationActions() {
+			t.Run(c.name+"/"+a.name, func(t *testing.T) {
+				t.Parallel()
+				u := testUser(t, "notif-nokey", "correct horse battery staple")
+				srv := newWriteEndpointTestServer(t, u, c.authz, nil)
+				client := mustClientWithCookies(t)
+				login(t, client, srv.URL, u.Username, "correct horse battery staple").Body.Close()
+				if code := do(t, client, srv.URL, a.guardAction); code != c.want {
+					t.Fatalf("status = %d, want %d", code, c.want)
+				}
+			})
+		}
+	}
+}

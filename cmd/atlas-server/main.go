@@ -22,6 +22,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"syscall"
@@ -69,7 +70,7 @@ func run() error {
 	case "migrate":
 		return migrate(configPath)
 	case "config":
-		return printConfig(configPath)
+		return printConfig(os.Stdout, configPath)
 	case "enroll-token":
 		return enrollToken(configPath, flags.Args()[1:])
 	case "peer":
@@ -169,13 +170,14 @@ func migrate(configPath string) error {
 	return nil
 }
 
-// printConfig writes the resolved configuration to stdout.
+// printConfig writes the resolved configuration to w.
 //
 // Operators use it to confirm which layer supplied a value when a deployment
 // behaves unexpectedly. The database password is never part of the output:
 // the field is tagged to be omitted, so this cannot become a way to read a
-// secret out of a running container.
-func printConfig(configPath string) error {
+// secret out of a running container. The notifications encryption key is
+// shown only as set ("[REDACTED]") or unset ("").
+func printConfig(w io.Writer, configPath string) error {
 	cfg, err := config.Load(config.Options{Path: configPath})
 	if err != nil {
 		return err
@@ -185,7 +187,7 @@ func printConfig(configPath string) error {
 	out["database_dsn"] = cfg.Database.SafeDSN()
 	out["recognised_env_vars"] = config.EnvVars()
 
-	enc := json.NewEncoder(os.Stdout)
+	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	return enc.Encode(out)
 }

@@ -22,6 +22,7 @@ import (
 	"strings"
 
 	"github.com/hexane/atlas/internal/api"
+	v1 "github.com/hexane/atlas/internal/api/v1"
 	"github.com/hexane/atlas/internal/core/activity"
 	corealert "github.com/hexane/atlas/internal/core/alert"
 	coreeventstore "github.com/hexane/atlas/internal/core/eventstore"
@@ -36,6 +37,7 @@ import (
 	"github.com/hexane/atlas/internal/platform/lifecycle"
 	"github.com/hexane/atlas/internal/platform/log"
 	"github.com/hexane/atlas/internal/platform/postgres"
+	"github.com/hexane/atlas/internal/platform/secretbox"
 	"github.com/hexane/atlas/migrations"
 )
 
@@ -91,8 +93,22 @@ func New(cfg *config.Config, logger *slog.Logger) (*App, error) {
 		return nil, errs.Wrap(err, errs.CodeInternal, "could not resolve this node's identity").WithOp(op)
 	}
 
+	// Notifications run only with an encryption key: without one there is
+	// nowhere safe to keep channel secrets, so the channel endpoints answer
+	// 503 and the dispatcher never starts. Config validation has already
+	// checked the key's shape; the error here deliberately carries no detail.
+	var notificationKey *secretbox.Key
+	var notificationStore v1.NotificationStore
+	if raw := cfg.Notifications.EncryptionKey.Reveal(); raw != "" {
+		notificationKey, err = secretbox.ParseKey(raw)
+		if err != nil {
+			return nil, errs.New(errs.CodeInvalidArgument, "notifications.encryption_key is invalid").WithOp(op)
+		}
+		notificationStore = lazyNotificationStore{pool: pool}
+	}
+
 	incidentPipe := newIncidentPipeline(logger, pool)
-	notificationPipe := newNotificationPipeline(logger, pool)
+	notificationPipe := newNotificationPipeline(logger, pool, notificationKey)
 	// Alert transitions reach both the incident correlator and the
 	// notification dispatcher. Neither depends on the other — the same
 	// "independent consumers of one hook" shape as onEvent below.
@@ -140,7 +156,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*App, error) {
 		GoldenSignals:     goldenSignals,
 		SLO:               sloEngine,
 		SLOStore:          lazySLOStore{pool: pool},
-		NotificationStore: lazyNotificationStore{pool: pool},
+		NotificationStore: notificationStore,
 		Users:             lazyUserStore{pool: pool},
 		Sessions:          lazyUserStore{pool: pool},
 		Authz:             lazyAuthorizer{pool: pool},

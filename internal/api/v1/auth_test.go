@@ -610,17 +610,22 @@ func newWriteEndpointTestServer(t *testing.T, seedUser user.User, authz v1.Autho
 	bus := eventbus.New(eventbus.Options{BufferSize: 8})
 	t.Cleanup(func() { _ = bus.Close() })
 
-	handler := api.New(api.Deps{
-		Config:            &cfg,
-		Health:            health.NewRegistry(nil),
-		Pool:              postgres.NewPool(cfg.Database, nil),
-		Bus:               bus,
-		Collection:        fakeCollection{},
-		Users:             users,
-		Sessions:          sessions,
-		Authz:             authz,
-		NotificationStore: notifications,
-	})
+	deps := api.Deps{
+		Config:     &cfg,
+		Health:     health.NewRegistry(nil),
+		Pool:       postgres.NewPool(cfg.Database, nil),
+		Bus:        bus,
+		Collection: fakeCollection{},
+		Users:      users,
+		Sessions:   sessions,
+		Authz:      authz,
+	}
+	// A nil store stays a nil interface: that is how the app wires a server
+	// with no notifications encryption key.
+	if notifications != nil {
+		deps.NotificationStore = notifications
+	}
+	handler := api.New(deps)
 
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)

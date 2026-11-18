@@ -14,6 +14,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/cookiejar"
 	"os"
@@ -34,9 +35,20 @@ import (
 
 const testDatabaseURLEnv = "ATLAS_TEST_DATABASE_URL"
 
+// testNotificationsKey is the notifications encryption key every booted test
+// server runs with, so the notification endpoints are live by default.
+const testNotificationsKey = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
+
 // bootServer starts a complete Atlas against a fresh database and returns its
 // base URL. Everything is torn down when the test finishes.
 func bootServer(t *testing.T) string {
+	t.Helper()
+	return bootServerWith(t, nil, log.Discard())
+}
+
+// bootServerWith is [bootServer] with a hook to adjust the configuration
+// after the test defaults are applied, and a caller-chosen logger.
+func bootServerWith(t *testing.T, adjust func(*config.Config), logger *slog.Logger) string {
 	t.Helper()
 
 	dsn := os.Getenv(testDatabaseURLEnv)
@@ -58,12 +70,16 @@ func bootServer(t *testing.T) string {
 	cfg.Database.Password = parsed.ConnConfig.Password
 	cfg.Database.SSLMode = "disable"
 	cfg.Database.MigrateOnStart = true
+	cfg.Notifications.EncryptionKey = testNotificationsKey
+	if adjust != nil {
+		adjust(&cfg)
+	}
 
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("test configuration is invalid: %v", err)
 	}
 
-	instance, err := app.New(&cfg, log.Discard())
+	instance, err := app.New(&cfg, logger)
 	if err != nil {
 		t.Fatalf("app.New() error = %v", err)
 	}

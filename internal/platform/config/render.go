@@ -69,6 +69,14 @@ func renderStruct(v reflect.Value) map[string]any {
 		// redaction rule lives in exactly one place.
 		name, ok := field.Tag.Lookup("json")
 		if !ok || name == "-" {
+			// A secret that should still be visible as set or unset names
+			// its display key in a redacted tag; the value never appears.
+			if display, ok := field.Tag.Lookup("redacted"); ok {
+				out[display] = ""
+				if !v.Field(i).IsZero() {
+					out[display] = secretPlaceholder
+				}
+			}
 			continue
 		}
 		out[name] = renderValue(v.Field(i))

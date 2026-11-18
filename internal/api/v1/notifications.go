@@ -67,7 +67,8 @@ type ListNotificationChannelsResponse struct {
 
 func (h *Handler) notifications(op string) (NotificationStore, error) {
 	if h.deps.NotificationStore == nil {
-		return nil, errs.New(errs.CodeUnavailable, "notifications are not configured").WithOp(op)
+		return nil, errs.New(errs.CodeUnavailable,
+			"notifications are disabled: no encryption key is configured").WithOp(op)
 	}
 	return h.deps.NotificationStore, nil
 }
