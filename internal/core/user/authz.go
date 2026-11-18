@@ -50,7 +50,7 @@ const (
 	// credentials and customer data no other endpoint exposes.
 	PermissionNodeLogsRead Permission = "node.logs.read"
 	// PermissionFleetWrite covers privileged-configuration writes that are
-	// not node-scoped: alert rules, SLO definitions, notification channels.
+	// not node-scoped: alert rules and SLO definitions.
 	// Checked with an empty node id — see [Handler.requirePermission] — so
 	// only a fleet-wide grant (user_node_roles.node_id IS NULL) can satisfy
 	// it; a node-scoped grant never does, since HasPermission's node_id = $2
@@ -61,6 +61,11 @@ const (
 	// passwords, and forcing logout. Checked the same fleet-wide-only way as
 	// PermissionFleetWrite — user management is not a per-node concept.
 	PermissionUserManage Permission = "user.manage"
+	// PermissionNotificationsManage covers every notification endpoint:
+	// channels (which hold delivery secrets) and the delivery log. Held by
+	// superadmin only (see migrations/0021_notifications_manage_permission.sql)
+	// and checked fleet-wide-only, the same way as PermissionUserManage.
+	PermissionNotificationsManage Permission = "notifications.manage"
 )
 
 // FleetWide is the sentinel passed to [GrantSpec.NodeID] to mean "every

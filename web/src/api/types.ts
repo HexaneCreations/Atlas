@@ -83,6 +83,9 @@ export interface CurrentUser {
    *  account for everyone else — a display hint only; the backend re-checks
    *  it on every action endpoint (guardSuperadminTarget). */
   is_superadmin: boolean;
+  /** True when this caller holds `notifications.manage` (superadmin only).
+   *  A display hint only; every /notifications endpoint checks it itself. */
+  can_manage_notifications: boolean;
 }
 
 /** One reachable page in [CurrentUser.page_access]. `fleet_wide` true means

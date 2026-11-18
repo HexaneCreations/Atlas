@@ -95,6 +95,10 @@ type CurrentUserResponse struct {
 	// superadmin. A display hint only: guardSuperadminTarget re-checks it on
 	// every action endpoint regardless of what this says.
 	IsSuperadmin bool `json:"is_superadmin"`
+	// CanManageNotifications tells the frontend whether to show the
+	// notification settings. A display hint only: every /notifications
+	// endpoint checks PermissionNotificationsManage itself.
+	CanManageNotifications bool `json:"can_manage_notifications"`
 	// PageAccess is every page this caller can reach, with the scope it
 	// applies at — the frontend hides nav items and redirects direct-URL
 	// visits to unreachable routes with it. A navigation hint only: every
@@ -115,9 +119,9 @@ type PageAccessEntry struct {
 }
 
 // currentUserResponse builds [CurrentUserResponse] for principal, checking
-// PermissionUserManage the same way [Handler.requirePermission] does and
-// resolving the caller's effective page access for the frontend's nav and
-// route hints.
+// PermissionUserManage and PermissionNotificationsManage the same way
+// [Handler.requirePermission] does and resolving the caller's effective page
+// access for the frontend's nav and route hints.
 //
 // A failure to resolve page access is returned, not swallowed: an empty
 // PageAccess is a meaningful (and wrong) answer that would strand the user
@@ -131,6 +135,7 @@ func (h *Handler) currentUserResponse(ctx context.Context, principal user.Princi
 	}
 	if h.deps.Authz != nil {
 		resp.CanManageUsers = h.deps.Authz.Require(ctx, principal, user.PermissionUserManage, "") == nil
+		resp.CanManageNotifications = h.deps.Authz.Require(ctx, principal, user.PermissionNotificationsManage, "") == nil
 	}
 	if h.deps.UserAdmin != nil {
 		isSuper, err := h.deps.UserAdmin.IsSuperadmin(ctx, principal.UserID)

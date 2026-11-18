@@ -52,10 +52,9 @@ func TestAlertTransitionDeliversARealSignedWebhook(t *testing.T) {
 		t.Skipf("%s is not set; run `make db-up` first", testDatabaseURLEnv)
 	}
 	base := bootServer(t)
-	// Registering a notification channel and an alert rule are both
-	// fleet.write actions now — see docs/adr/0013-human-user-authentication-and-authorization.md
-	// and migrations/0013_fleet_write_permission.sql.
-	client := authenticatedTestClient(t, base, "operator")
+	// Every notification endpoint needs notifications.manage (superadmin
+	// only, migrations/0021); superadmin also holds fleet.write for the rule.
+	client := authenticatedTestClient(t, base, "superadmin")
 
 	const secret = "integration-secret"
 	var (
@@ -130,7 +129,7 @@ func TestAlertTransitionDeliversARealSignedWebhook(t *testing.T) {
 	}
 
 	// The delivery is durably recorded as delivered.
-	resp, err := http.Get(base + "/api/v1/notifications/deliveries?status=delivered")
+	resp, err := client.Get(base + "/api/v1/notifications/deliveries?status=delivered")
 	if err != nil {
 		t.Fatalf("get deliveries: %v", err)
 	}

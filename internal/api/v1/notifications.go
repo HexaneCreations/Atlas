@@ -75,6 +75,9 @@ func (h *Handler) notifications(op string) (NotificationStore, error) {
 // ListNotificationChannels returns every configured channel.
 func (h *Handler) ListNotificationChannels(w http.ResponseWriter, r *http.Request) error {
 	const op = "v1.Handler.ListNotificationChannels"
+	if err := h.requirePermission(r, user.PermissionNotificationsManage, pageauthz.PageNone); err != nil {
+		return err
+	}
 	store, err := h.notifications(op)
 	if err != nil {
 		return err
@@ -95,6 +98,9 @@ func (h *Handler) ListNotificationChannels(w http.ResponseWriter, r *http.Reques
 // GetNotificationChannel returns one channel by id.
 func (h *Handler) GetNotificationChannel(w http.ResponseWriter, r *http.Request) error {
 	const op = "v1.Handler.GetNotificationChannel"
+	if err := h.requirePermission(r, user.PermissionNotificationsManage, pageauthz.PageNone); err != nil {
+		return err
+	}
 	store, err := h.notifications(op)
 	if err != nil {
 		return err
@@ -111,7 +117,7 @@ func (h *Handler) GetNotificationChannel(w http.ResponseWriter, r *http.Request)
 // CreateNotificationChannel defines a new channel.
 func (h *Handler) CreateNotificationChannel(w http.ResponseWriter, r *http.Request) error {
 	const op = "v1.Handler.CreateNotificationChannel"
-	if err := h.requirePermission(r, user.PermissionFleetWrite, pageauthz.PageNone); err != nil {
+	if err := h.requirePermission(r, user.PermissionNotificationsManage, pageauthz.PageNone); err != nil {
 		return err
 	}
 	store, err := h.notifications(op)
@@ -139,7 +145,7 @@ func (h *Handler) CreateNotificationChannel(w http.ResponseWriter, r *http.Reque
 // UpdateNotificationChannel replaces an existing channel's definition.
 func (h *Handler) UpdateNotificationChannel(w http.ResponseWriter, r *http.Request) error {
 	const op = "v1.Handler.UpdateNotificationChannel"
-	if err := h.requirePermission(r, user.PermissionFleetWrite, pageauthz.PageNone); err != nil {
+	if err := h.requirePermission(r, user.PermissionNotificationsManage, pageauthz.PageNone); err != nil {
 		return err
 	}
 	store, err := h.notifications(op)
@@ -168,7 +174,7 @@ func (h *Handler) UpdateNotificationChannel(w http.ResponseWriter, r *http.Reque
 // removed with it — see the migration's ON DELETE CASCADE.
 func (h *Handler) DeleteNotificationChannel(w http.ResponseWriter, r *http.Request) error {
 	const op = "v1.Handler.DeleteNotificationChannel"
-	if err := h.requirePermission(r, user.PermissionFleetWrite, pageauthz.PageNone); err != nil {
+	if err := h.requirePermission(r, user.PermissionNotificationsManage, pageauthz.PageNone); err != nil {
 		return err
 	}
 	store, err := h.notifications(op)
@@ -213,6 +219,9 @@ type ListNotificationDeliveriesResponse struct {
 // first, optionally filtered by channel or status.
 func (h *Handler) ListNotificationDeliveries(w http.ResponseWriter, r *http.Request) error {
 	const op = "v1.Handler.ListNotificationDeliveries"
+	if err := h.requirePermission(r, user.PermissionNotificationsManage, pageauthz.PageNone); err != nil {
+		return err
+	}
 	store, err := h.notifications(op)
 	if err != nil {
 		return err

@@ -9,12 +9,14 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/hexane/atlas/internal/api"
+	v1 "github.com/hexane/atlas/internal/api/v1"
 	"github.com/hexane/atlas/internal/core/user"
 	"github.com/hexane/atlas/internal/platform/config"
 	"github.com/hexane/atlas/internal/platform/errs"
@@ -122,6 +124,8 @@ type fakeAuthorizer struct {
 	failWith      error
 	gotPermission user.Permission
 	gotNodeID     string
+	// checked is every permission Require was asked for, in order.
+	checked []user.Permission
 
 	// For AuthorizedNodes — independent of allow/failWith above, which only
 	// drive Require's single pass/fail check.
@@ -133,6 +137,7 @@ func (f *fakeAuthorizer) Require(_ context.Context, _ user.Principal, permission
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.gotPermission, f.gotNodeID = permission, nodeID
+	f.checked = append(f.checked, permission)
 	if f.failWith != nil {
 		return f.failWith
 	}
@@ -372,8 +377,8 @@ func TestCurrentUserReportsCanManageUsersFromTheRealAuthzDecision(t *testing.T) 
 			if got.CanManageUsers != allow {
 				t.Errorf("can_manage_users = %t, want %t", got.CanManageUsers, allow)
 			}
-			if authz.gotPermission != user.PermissionUserManage {
-				t.Errorf("permission checked = %q, want user.manage", authz.gotPermission)
+			if !slices.Contains(authz.checked, user.PermissionUserManage) {
+				t.Errorf("permissions checked = %q, want user.manage among them", authz.checked)
 			}
 		})
 	}
@@ -580,20 +585,22 @@ func TestContainerLogsFollowRejectsAnUnauthenticatedUpgrade(t *testing.T) {
 	}
 }
 
-// --- Write-endpoint protection (fleet.write) ------------------------------
+// --- Write-endpoint protection (fleet.write, notifications.manage) ---------
 //
-// notifications/channels, alerts/rules, and slo writes are not node-scoped
-// — see docs/adr/0013-human-user-authentication-and-authorization.md and
+// alerts/rules and slo writes are not node-scoped — see
 // migrations/0013_fleet_write_permission.sql — so they're gated by
-// requirePermission(PermissionFleetWrite), not requireScope. Before this,
-// any caller could register a notification channel — including an
-// arbitrary webhook URL — with zero authentication.
+// requirePermission(PermissionFleetWrite), not requireScope. Every
+// notifications endpoint is gated the same way by
+// PermissionNotificationsManage (migrations/0021); its role matrix is in
+// notifications_authz_test.go. Before this, any caller could register a
+// notification channel — including an arbitrary webhook URL — with zero
+// authentication.
 
 // newWriteEndpointTestServer reuses [fakeNotificationStore] (defined in
 // notifications_test.go, same package) rather than a second fake — the
 // concrete risk described in review is registering a channel through
 // exactly that store.
-func newWriteEndpointTestServer(t *testing.T, seedUser user.User, authz *fakeAuthorizer, notifications *fakeNotificationStore) *httptest.Server {
+func newWriteEndpointTestServer(t *testing.T, seedUser user.User, authz v1.Authorizer, notifications *fakeNotificationStore) *httptest.Server {
 	t.Helper()
 
 	users := &memUserStore{byUsername: map[string]user.User{seedUser.Username: seedUser}}
@@ -640,8 +647,8 @@ func TestCreateNotificationChannelRequiresAuthentication(t *testing.T) {
 	}
 }
 
-// Authenticated but not granted fleet.write (a viewer, say) must be denied.
-func TestCreateNotificationChannelRequiresFleetWritePermission(t *testing.T) {
+// Authenticated but not granted notifications.manage must be denied.
+func TestCreateNotificationChannelRequiresNotificationsManagePermission(t *testing.T) {
 	t.Parallel()
 
 	u := testUser(t, "oscar", "correct horse battery staple")
@@ -658,12 +665,12 @@ func TestCreateNotificationChannelRequiresFleetWritePermission(t *testing.T) {
 	if resp.StatusCode != http.StatusForbidden {
 		t.Errorf("status = %d, want 403", resp.StatusCode)
 	}
-	if authz.gotPermission != user.PermissionFleetWrite {
-		t.Errorf("permission checked = %q, want fleet.write", authz.gotPermission)
+	if authz.gotPermission != user.PermissionNotificationsManage || authz.gotNodeID != "" {
+		t.Errorf("permission checked = %q for node %q, want notifications.manage fleet-wide", authz.gotPermission, authz.gotNodeID)
 	}
 }
 
-// Authenticated and granted fleet.write (operator/admin) succeeds — and the
+// Authenticated and granted notifications.manage succeeds — and the
 // channel actually reaches the store, proving the check is a gate, not a
 // silent no-op.
 func TestCreateNotificationChannelSucceedsWhenGranted(t *testing.T) {
@@ -696,7 +703,7 @@ func TestCreateNotificationChannelSucceedsWhenGranted(t *testing.T) {
 
 // The remaining 8 write handlers (alerts create/update/delete, SLO
 // create/update/delete, notification channel update/delete) all go through
-// the same requirePermission(PermissionFleetWrite) call — this proves each
+// requirePermission (fleet.write or notifications.manage) — this proves each
 // one actually does, by confirming an unauthenticated request to every one
 // of them is refused with 401 before it ever reaches its store (which is
 // nil in this harness and would otherwise surface as 503, not 401 — the

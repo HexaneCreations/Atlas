@@ -944,3 +944,40 @@ func TestSuperadminDoesNotCountTowardTheLastAdminGuard(t *testing.T) {
 		t.Fatalf("DisableUser(sole admin) = %v, want ErrLastAdminGrant", err)
 	}
 }
+
+// notifications.manage is held by superadmin and no other role, and only a
+// fleet-wide grant satisfies it when checked the way the notification
+// handlers check it: with an empty node id.
+func TestNotificationsManageIsHeldByFleetWideSuperadminOnly(t *testing.T) {
+	repo := newRepository(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	for _, role := range []string{coreuser.RoleViewer, coreuser.RoleOperator, coreuser.RoleAdmin, coreuser.RoleSuperadmin} {
+		u := createTestUser(t, repo, "notif-"+role)
+		spec := coreuser.GrantSpec{UserID: u.ID, FleetWide: true, Role: role, GrantedBy: "test"}
+		if err := repo.Grant(ctx, spec, now); err != nil {
+			t.Fatalf("Grant(%s, fleet-wide): %v", role, err)
+		}
+		ok, err := repo.HasPermission(ctx, u.ID, "", coreuser.PermissionNotificationsManage)
+		if err != nil {
+			t.Fatalf("HasPermission(%s): %v", role, err)
+		}
+		if want := role == coreuser.RoleSuperadmin; ok != want {
+			t.Errorf("fleet-wide %s holds notifications.manage = %v, want %v", role, ok, want)
+		}
+	}
+
+	scoped := createTestUser(t, repo, "notif-node-super")
+	spec := coreuser.GrantSpec{UserID: scoped.ID, NodeID: "node-1", Role: coreuser.RoleSuperadmin, GrantedBy: "test"}
+	if err := repo.Grant(ctx, spec, now); err != nil {
+		t.Fatalf("Grant(superadmin, node-scoped): %v", err)
+	}
+	ok, err := repo.HasPermission(ctx, scoped.ID, "", coreuser.PermissionNotificationsManage)
+	if err != nil {
+		t.Fatalf("HasPermission(node-scoped superadmin): %v", err)
+	}
+	if ok {
+		t.Error("a node-scoped superadmin grant satisfied a fleet-wide-only check")
+	}
+}

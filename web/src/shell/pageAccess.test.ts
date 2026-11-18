@@ -8,6 +8,7 @@ function user(pageAccess: PageAccessEntry[]): CurrentUser {
     username: "abhishek",
     can_manage_users: false,
     is_superadmin: false,
+    can_manage_notifications: false,
     page_access: pageAccess,
   };
 }
