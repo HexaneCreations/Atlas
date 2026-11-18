@@ -180,8 +180,9 @@ var ErrSuperadminNotGrantable = errs.New(errs.CodeInvalidArgument,
 	"the superadmin role cannot be granted through this endpoint")
 
 // ErrProtectedSuperadmin is returned when a non-superadmin actor attempts a
-// target-specific user-management action — grant, revoke, disable, enable,
-// reset password, force logout, or view audit — against the account that
+// target-specific user-management action — grant or revoke a role, disable,
+// enable, reset password, force logout, view audit, or change page access
+// (bundle assignments and direct page grants) — against an account that
 // holds the superadmin role.
 //
 // Unlike [ErrPermissionDenied] (a grant an admin could be given), this
@@ -191,7 +192,7 @@ var ErrSuperadminNotGrantable = errs.New(errs.CodeInvalidArgument,
 // actor, and never fires when the target is not the superadmin — see
 // internal/api/v1.Handler.guardSuperadminTarget.
 var ErrProtectedSuperadmin = errs.New(errs.CodePermissionDenied,
-	"the superadmin account cannot be modified through user management")
+	"superadmin accounts can only be changed by a superadmin")
 
 // Authorizer is the authorization policy layer: it answers whether an
 // authenticated principal may perform a permission-gated action against a

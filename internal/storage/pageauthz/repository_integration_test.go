@@ -312,6 +312,83 @@ func TestRevokeRoleAccessAssignmentRemovesTheCoverage(t *testing.T) {
 	}
 }
 
+// The user-scoped revokes only reach a row owned by the named user: another
+// user's assignment or grant id behaves exactly like an unknown id (nil, no
+// change, no audit row).
+func TestUserScopedRevokesIgnoreAnotherUsersID(t *testing.T) {
+	repo, users := newRepositories(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	owner := createTestUser(t, users, "scoped-owner")
+	other := createTestUser(t, users, "scoped-other")
+
+	if err := repo.CreateRoleAccess(ctx, "scoped-bundle", "operator", now); err != nil {
+		t.Fatalf("CreateRoleAccess: %v", err)
+	}
+	if err := repo.AddPageToRoleAccess(ctx, "scoped-bundle", corepageauthz.PageContainers); err != nil {
+		t.Fatalf("AddPageToRoleAccess: %v", err)
+	}
+	if err := repo.AssignRoleAccess(ctx, corepageauthz.RoleAccessAssignmentSpec{
+		UserID: owner.ID, RoleAccessName: "scoped-bundle", FleetWide: true,
+	}, now); err != nil {
+		t.Fatalf("AssignRoleAccess: %v", err)
+	}
+	if err := repo.GrantPageAccess(ctx, corepageauthz.PageGrantSpec{
+		UserID: owner.ID, Page: corepageauthz.PageDisks, FleetWide: true, GrantedBy: "operator",
+	}, now); err != nil {
+		t.Fatalf("GrantPageAccess: %v", err)
+	}
+	assignments, err := repo.ListRoleAccessAssignments(ctx, owner.ID)
+	if err != nil || len(assignments) != 1 {
+		t.Fatalf("ListRoleAccessAssignments = %d, %v; want 1", len(assignments), err)
+	}
+	grants, err := repo.ListPageAccessGrants(ctx, owner.ID)
+	if err != nil || len(grants) != 1 {
+		t.Fatalf("ListPageAccessGrants = %d, %v; want 1", len(grants), err)
+	}
+	audit := func() int {
+		entries, err := users.ListAudit(ctx, owner.ID)
+		if err != nil {
+			t.Fatalf("ListAudit: %v", err)
+		}
+		return len(entries)
+	}
+	auditBefore := audit()
+
+	if err := repo.RevokeUserRoleAccessAssignment(ctx, other.ID, assignments[0].ID, "operator", now); err != nil {
+		t.Errorf("RevokeUserRoleAccessAssignment(mismatched owner) = %v, want nil", err)
+	}
+	if err := repo.RevokeUserPageAccess(ctx, other.ID, grants[0].ID, "operator", now); err != nil {
+		t.Errorf("RevokeUserPageAccess(mismatched owner) = %v, want nil", err)
+	}
+	for _, page := range []corepageauthz.Page{corepageauthz.PageContainers, corepageauthz.PageDisks} {
+		if fw, _, err := repo.EffectiveAccess(ctx, owner.ID, page); err != nil || !fw {
+			t.Errorf("owner lost %s through a mismatched revoke: fleetWide=%v err=%v", page, fw, err)
+		}
+	}
+	if got := audit(); got != auditBefore {
+		t.Errorf("audit rows for owner %d -> %d after mismatched revokes", auditBefore, got)
+	}
+
+	if err := repo.RevokeUserRoleAccessAssignment(ctx, owner.ID, assignments[0].ID, "operator", now); err != nil {
+		t.Fatalf("RevokeUserRoleAccessAssignment(owner): %v", err)
+	}
+	if err := repo.RevokeUserPageAccess(ctx, owner.ID, grants[0].ID, "operator", now); err != nil {
+		t.Fatalf("RevokeUserPageAccess(owner): %v", err)
+	}
+	for _, page := range []corepageauthz.Page{corepageauthz.PageContainers, corepageauthz.PageDisks} {
+		if fw, ids, err := repo.EffectiveAccess(ctx, owner.ID, page); err != nil || fw || len(ids) != 0 {
+			t.Errorf("owner still reaches %s after a matching revoke: fleetWide=%v ids=%v err=%v", page, fw, ids, err)
+		}
+	}
+	if got := audit(); got != auditBefore+2 {
+		t.Errorf("audit rows for owner %d -> %d, want +2 after the matching revokes", auditBefore, got)
+	}
+	if err := repo.RevokeUserPageAccess(ctx, "", grants[0].ID, "operator", now); errs.CodeOf(err) != errs.CodeInvalidArgument {
+		t.Errorf("RevokeUserPageAccess(empty user) = %v, want CodeInvalidArgument", err)
+	}
+}
+
 // --- Direct UserAccess grants (user_page_access) + the conflict check -----
 
 func TestGrantPageAccessThenEffectiveAccessReflectsIt(t *testing.T) {

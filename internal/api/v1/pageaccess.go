@@ -26,10 +26,10 @@ import (
 type PageAdmin interface {
 	ListRoleAccessDefinitions(ctx context.Context) ([]pageauthz.RoleAccess, error)
 	AssignRoleAccess(ctx context.Context, spec pageauthz.RoleAccessAssignmentSpec, now time.Time) error
-	RevokeRoleAccessAssignment(ctx context.Context, assignmentID, revokedBy string, now time.Time) error
+	RevokeUserRoleAccessAssignment(ctx context.Context, userID, assignmentID, revokedBy string, now time.Time) error
 	ListRoleAccessAssignments(ctx context.Context, userID string) ([]pageauthz.RoleAccessAssignment, error)
 	GrantPageAccess(ctx context.Context, spec pageauthz.PageGrantSpec, now time.Time) error
-	RevokePageAccess(ctx context.Context, grantID, revokedBy string, now time.Time) error
+	RevokeUserPageAccess(ctx context.Context, userID, grantID, revokedBy string, now time.Time) error
 	ListPageAccessGrants(ctx context.Context, userID string) ([]pageauthz.PageGrant, error)
 }
 
@@ -206,7 +206,8 @@ func (h *Handler) AssignRoleAccess(w http.ResponseWriter, r *http.Request) error
 }
 
 // RevokeRoleAccessAssignment revokes one RoleAccess assignment, identified
-// by its own id.
+// by its own id. The id must belong to the path user; any other id is a
+// no-op 204, indistinguishable from an unknown one.
 func (h *Handler) RevokeRoleAccessAssignment(w http.ResponseWriter, r *http.Request) error {
 	const op = "v1.Handler.RevokeRoleAccessAssignment"
 	if err := h.requirePermission(r, user.PermissionUserManage, pageauthz.PageUsers); err != nil {
@@ -221,7 +222,7 @@ func (h *Handler) RevokeRoleAccessAssignment(w http.ResponseWriter, r *http.Requ
 		return err
 	}
 
-	if err := store.RevokeRoleAccessAssignment(r.Context(), r.PathValue("assignmentID"), actorID, time.Now()); err != nil {
+	if err := store.RevokeUserRoleAccessAssignment(r.Context(), r.PathValue("userID"), r.PathValue("assignmentID"), actorID, time.Now()); err != nil {
 		return err
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -272,6 +273,8 @@ func (h *Handler) GrantPageAccess(w http.ResponseWriter, r *http.Request) error 
 }
 
 // RevokePageAccess revokes one direct page grant, identified by its own id.
+// The id must belong to the path user; any other id is a no-op 204,
+// indistinguishable from an unknown one.
 func (h *Handler) RevokePageAccess(w http.ResponseWriter, r *http.Request) error {
 	const op = "v1.Handler.RevokePageAccess"
 	if err := h.requirePermission(r, user.PermissionUserManage, pageauthz.PageUsers); err != nil {
@@ -286,7 +289,7 @@ func (h *Handler) RevokePageAccess(w http.ResponseWriter, r *http.Request) error
 		return err
 	}
 
-	if err := store.RevokePageAccess(r.Context(), r.PathValue("grantID"), actorID, time.Now()); err != nil {
+	if err := store.RevokeUserPageAccess(r.Context(), r.PathValue("userID"), r.PathValue("grantID"), actorID, time.Now()); err != nil {
 		return err
 	}
 	w.WriteHeader(http.StatusNoContent)

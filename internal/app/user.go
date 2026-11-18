@@ -59,14 +59,11 @@ func (l lazyUserStore) ListAudit(ctx context.Context, targetUserID string) ([]co
 func (l lazyUserStore) Grant(ctx context.Context, spec coreuser.GrantSpec, now time.Time) error {
 	return l.repo().Grant(ctx, spec, now)
 }
-func (l lazyUserStore) RevokeGrant(ctx context.Context, grantID, revokedBy string, now time.Time) error {
-	return l.repo().RevokeGrant(ctx, grantID, revokedBy, now)
+func (l lazyUserStore) RevokeUserGrant(ctx context.Context, userID, grantID, revokedBy string, now time.Time) error {
+	return l.repo().RevokeUserGrant(ctx, userID, grantID, revokedBy, now)
 }
 func (l lazyUserStore) IsSuperadmin(ctx context.Context, userID string) (bool, error) {
 	return l.repo().IsSuperadmin(ctx, userID)
-}
-func (l lazyUserStore) GrantOwner(ctx context.Context, grantID string) (string, error) {
-	return l.repo().GrantOwner(ctx, grantID)
 }
 
 // lazyAuthorizer wraps [lazyUserStore] in [coreuser.Authorizer], the

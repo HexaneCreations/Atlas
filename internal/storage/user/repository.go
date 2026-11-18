@@ -398,25 +398,6 @@ func (r *Repository) IsSuperadmin(ctx context.Context, userID string) (bool, err
 	return exists, nil
 }
 
-// GrantOwner returns the user id that grantID belongs to, or "" when no
-// active grant has that id. The "" case is not an error: [Repository.RevokeGrant]
-// already treats an unknown or already-revoked grant as a caller-intent
-// no-op, so the handler's superadmin guard simply has nothing to protect.
-func (r *Repository) GrantOwner(ctx context.Context, grantID string) (string, error) {
-	const op = "user.Repository.GrantOwner"
-	var userID string
-	err := r.pool.QueryRow(ctx,
-		`SELECT user_id FROM user_node_roles WHERE id = $1 AND revoked_at IS NULL`, grantID).Scan(&userID)
-	switch {
-	case err == nil:
-		return userID, nil
-	case err == pgx.ErrNoRows:
-		return "", nil
-	default:
-		return "", errs.Wrap(err, errs.CodeUnavailable, "could not look up the role grant's owner").WithOp(op)
-	}
-}
-
 // isActiveFleetWideAdmin reports whether userID currently holds an active,
 // unrevoked fleet-wide admin grant.
 func isActiveFleetWideAdmin(ctx context.Context, tx pgx.Tx, userID string) (bool, error) {
@@ -646,8 +627,25 @@ func (r *Repository) Grant(ctx context.Context, spec coreuser.GrantSpec, now tim
 // not an error — the caller's intent holds either way — and writes no
 // audit entry, the same idempotency [Repository.DisableUser] documents.
 func (r *Repository) RevokeGrant(ctx context.Context, grantID, revokedBy string, now time.Time) error {
-	const op = "user.Repository.RevokeGrant"
+	return r.revokeGrant(ctx, nil, grantID, revokedBy, now, "user.Repository.RevokeGrant")
+}
 
+// RevokeUserGrant is [Repository.RevokeGrant] scoped to one user: a grantID
+// that belongs to anyone other than userID is treated exactly like an
+// unknown id — nothing changes and no error is returned — so a caller
+// addressing /users/{userID}/grants/{grantID} can never reach another
+// user's grant through a mismatched path.
+func (r *Repository) RevokeUserGrant(ctx context.Context, userID, grantID, revokedBy string, now time.Time) error {
+	const op = "user.Repository.RevokeUserGrant"
+	if userID == "" {
+		return errs.New(errs.CodeInvalidArgument, "a revoke must name the user the grant belongs to").WithOp(op)
+	}
+	return r.revokeGrant(ctx, &userID, grantID, revokedBy, now, op)
+}
+
+// revokeGrant is the shared body of RevokeGrant and RevokeUserGrant; a nil
+// ownerID leaves the lookup unscoped (the CLI's trust-root path).
+func (r *Repository) revokeGrant(ctx context.Context, ownerID *string, grantID, revokedBy string, now time.Time, op string) error {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return errs.Wrap(err, errs.CodeUnavailable, "could not begin the revoke").WithOp(op)
@@ -658,8 +656,8 @@ func (r *Repository) RevokeGrant(ctx context.Context, grantID, revokedBy string,
 	var nodeID *string
 	err = tx.QueryRow(ctx, `
 		SELECT user_id, role_name, node_id FROM user_node_roles
-		WHERE id = $1 AND revoked_at IS NULL
-		FOR UPDATE`, grantID).Scan(&userID, &roleName, &nodeID)
+		WHERE id = $1 AND revoked_at IS NULL AND ($2::text IS NULL OR user_id = $2)
+		FOR UPDATE`, grantID, ownerID).Scan(&userID, &roleName, &nodeID)
 	switch {
 	case err == pgx.ErrNoRows:
 		return nil

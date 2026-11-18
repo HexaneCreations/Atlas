@@ -26,15 +26,12 @@ type UserAdmin interface {
 	ResetPassword(ctx context.Context, userID, actorUserID string, now time.Time) (string, error)
 	ListAudit(ctx context.Context, targetUserID string) ([]user.AuditEntry, error)
 	Grant(ctx context.Context, spec user.GrantSpec, now time.Time) error
-	RevokeGrant(ctx context.Context, grantID, revokedBy string, now time.Time) error
+	// RevokeUserGrant revokes grantID only when it belongs to userID; any
+	// other id, including another user's, is a silent no-op.
+	RevokeUserGrant(ctx context.Context, userID, grantID, revokedBy string, now time.Time) error
 	// IsSuperadmin reports whether userID currently holds the protected
 	// fleet-wide superadmin grant — see [Handler.guardSuperadminTarget].
 	IsSuperadmin(ctx context.Context, userID string) (bool, error)
-	// GrantOwner returns the user id a role grant belongs to, or "" when no
-	// active grant has that id. Lets RevokeRole run the superadmin guard,
-	// which is keyed on the target user, against a grant identified only by
-	// its own id.
-	GrantOwner(ctx context.Context, grantID string) (string, error)
 }
 
 // GrantResponse is one role grant as the admin Users page sees it.
@@ -102,20 +99,51 @@ func (h *Handler) actor(r *http.Request, op string) (string, error) {
 	return principal.UserID, nil
 }
 
-// guardSuperadminTarget refuses a target-specific user-management action when
-// the caller is not the superadmin and the target is. It gates every
-// per-user action in this file — GrantRole, RevokeRole, DisableUser,
-// EnableUser, ResetPassword, ForceLogout, ListUserAudit — and nothing else:
-// ListUsers is deliberately left ungated, so the superadmin's row stays
-// visible to any admin, and only actions on it are refused.
+// protectTarget wraps every route that acts on the user named by its
+// {userID} path segment (see [Handler.Mount]) in [Handler.guardSuperadminTarget].
+// It is the single enforcement point for that rule: the wrapped handlers do
+// not repeat the check, and TestEveryUserTargetRouteIsProtected fails for a
+// {userID} route registered without it. Id-addressed revokes are additionally
+// scoped to the path user in storage, so a grant id cannot reach a different
+// user than the one this guard checked.
 //
-// It runs after requirePermission and actor resolution, so an
-// unauthenticated or unauthorized caller still gets 401/403 first and never
-// learns which account is the superadmin. It never fires for a superadmin
-// actor, never fires when the target is not the superadmin, and treats an
-// actor acting on their own account as trivially allowed (moot for the real
-// superadmin, since the grant endpoint cannot create a second one). Admin-
-// vs-admin actions are entirely unaffected — the guard's precondition is
+// requirePermission runs first, so an unauthenticated or unauthorized caller
+// still gets 401/403 before anything about the target is consulted. Fails
+// closed (501) when user management is not wired in, since the target's
+// superadmin status cannot then be checked.
+func (h *Handler) protectTarget(next httpx.Handler) httpx.Handler {
+	return func(w http.ResponseWriter, r *http.Request) error {
+		const op = "v1.Handler.protectTarget"
+		if err := h.requirePermission(r, user.PermissionUserManage, pageauthz.PageUsers); err != nil {
+			return err
+		}
+		store, err := h.userAdmin(op)
+		if err != nil {
+			return err
+		}
+		actorID, err := h.actor(r, op)
+		if err != nil {
+			return err
+		}
+		if err := h.guardSuperadminTarget(r.Context(), store, actorID, r.PathValue("userID")); err != nil {
+			return err
+		}
+		return next(w, r)
+	}
+}
+
+// guardSuperadminTarget refuses a target-specific user-management action when
+// the caller is not a superadmin and the target is. Applied to every
+// {userID} route through [Handler.protectTarget] — role grants, account
+// actions, the audit read, and every page-access write — except the
+// read-only GET /users/{userID}/page-access. ListUsers is deliberately left
+// ungated, so the superadmin's row stays visible to any admin, and only
+// actions on it are refused.
+//
+// It never fires for a superadmin actor — one superadmin acting on another
+// is allowed — never fires when the target is not a superadmin, and treats
+// an actor acting on their own account as trivially allowed. Admin-vs-admin
+// actions are entirely unaffected — the guard's precondition is
 // specifically "target holds superadmin".
 func (h *Handler) guardSuperadminTarget(ctx context.Context, store UserAdmin, actorID, targetID string) error {
 	if targetID == "" || actorID == targetID {
@@ -257,9 +285,6 @@ func (h *Handler) GrantRole(w http.ResponseWriter, r *http.Request) error {
 	if err := spec.Validate(); err != nil {
 		return err
 	}
-	if err := h.guardSuperadminTarget(r.Context(), store, actorID, spec.UserID); err != nil {
-		return err
-	}
 	if err := store.Grant(r.Context(), spec, time.Now()); err != nil {
 		return err
 	}
@@ -270,7 +295,8 @@ func (h *Handler) GrantRole(w http.ResponseWriter, r *http.Request) error {
 // RevokeRole revokes one specific role grant, identified by its own id
 // rather than by (user, role, scope) — a user may hold several grants at
 // once, and the admin Users page's revoke picker names the exact one to
-// remove.
+// remove. The id must belong to the path user; any other id is a no-op 204,
+// indistinguishable from an unknown one.
 func (h *Handler) RevokeRole(w http.ResponseWriter, r *http.Request) error {
 	const op = "v1.Handler.RevokeRole"
 	if err := h.requirePermission(r, user.PermissionUserManage, pageauthz.PageUsers); err != nil {
@@ -285,15 +311,7 @@ func (h *Handler) RevokeRole(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 
-	grantID := r.PathValue("grantID")
-	ownerID, err := store.GrantOwner(r.Context(), grantID)
-	if err != nil {
-		return err
-	}
-	if err := h.guardSuperadminTarget(r.Context(), store, actorID, ownerID); err != nil {
-		return err
-	}
-	if err := store.RevokeGrant(r.Context(), grantID, actorID, time.Now()); err != nil {
+	if err := store.RevokeUserGrant(r.Context(), r.PathValue("userID"), r.PathValue("grantID"), actorID, time.Now()); err != nil {
 		return err
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -323,9 +341,6 @@ func (h *Handler) DisableUser(w http.ResponseWriter, r *http.Request) error {
 	if targetID == actorID {
 		return errs.New(errs.CodeInvalidArgument, "you cannot disable your own account").WithOp(op)
 	}
-	if err := h.guardSuperadminTarget(r.Context(), store, actorID, targetID); err != nil {
-		return err
-	}
 	if err := store.DisableUser(r.Context(), targetID, actorID, time.Now()); err != nil {
 		return err
 	}
@@ -349,9 +364,6 @@ func (h *Handler) EnableUser(w http.ResponseWriter, r *http.Request) error {
 	}
 
 	targetID := r.PathValue("userID")
-	if err := h.guardSuperadminTarget(r.Context(), store, actorID, targetID); err != nil {
-		return err
-	}
 	if err := store.EnableUser(r.Context(), targetID, actorID, time.Now()); err != nil {
 		return err
 	}
@@ -381,9 +393,6 @@ func (h *Handler) ResetPassword(w http.ResponseWriter, r *http.Request) error {
 	}
 
 	targetID := r.PathValue("userID")
-	if err := h.guardSuperadminTarget(r.Context(), store, actorID, targetID); err != nil {
-		return err
-	}
 	plaintext, err := store.ResetPassword(r.Context(), targetID, actorID, time.Now())
 	if err != nil {
 		return err
@@ -406,10 +415,6 @@ func (h *Handler) ForceLogout(w http.ResponseWriter, r *http.Request) error {
 	if h.deps.Sessions == nil {
 		return errs.New(errs.CodeNotImplemented, "user management is not enabled").WithOp(op)
 	}
-	store, err := h.userAdmin(op)
-	if err != nil {
-		return err
-	}
 	actorID, err := h.actor(r, op)
 	if err != nil {
 		return err
@@ -418,9 +423,6 @@ func (h *Handler) ForceLogout(w http.ResponseWriter, r *http.Request) error {
 	targetID := r.PathValue("userID")
 	if targetID == actorID {
 		return errs.New(errs.CodeInvalidArgument, "you cannot force-logout your own account").WithOp(op)
-	}
-	if err := h.guardSuperadminTarget(r.Context(), store, actorID, targetID); err != nil {
-		return err
 	}
 	if err := h.deps.Sessions.RevokeAllSessions(r.Context(), targetID, actorID, time.Now()); err != nil {
 		return err
@@ -458,16 +460,8 @@ func (h *Handler) ListUserAudit(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	actorID, err := h.actor(r, op)
-	if err != nil {
-		return err
-	}
-	targetID := r.PathValue("userID")
-	if err := h.guardSuperadminTarget(r.Context(), store, actorID, targetID); err != nil {
-		return err
-	}
 
-	entries, err := store.ListAudit(r.Context(), targetID)
+	entries, err := store.ListAudit(r.Context(), r.PathValue("userID"))
 	if err != nil {
 		return err
 	}

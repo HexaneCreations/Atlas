@@ -183,13 +183,26 @@ func (r *Repository) AssignRoleAccess(ctx context.Context, spec pageauthz.RoleAc
 // unknown or already-revoked assignment is not an error, the same
 // idempotency [Repository.RemovePageFromRoleAccess] documents.
 func (r *Repository) RevokeRoleAccessAssignment(ctx context.Context, assignmentID, revokedBy string, now time.Time) error {
-	const op = "pageauthz.Repository.RevokeRoleAccessAssignment"
+	return r.revokeRoleAccessAssignment(ctx, nil, assignmentID, revokedBy, now, "pageauthz.Repository.RevokeRoleAccessAssignment")
+}
 
+// RevokeUserRoleAccessAssignment is [Repository.RevokeRoleAccessAssignment]
+// scoped to one user: an id belonging to anyone other than userID behaves
+// exactly like an unknown id — nothing changes and no error is returned.
+func (r *Repository) RevokeUserRoleAccessAssignment(ctx context.Context, userID, assignmentID, revokedBy string, now time.Time) error {
+	const op = "pageauthz.Repository.RevokeUserRoleAccessAssignment"
+	if userID == "" {
+		return errs.New(errs.CodeInvalidArgument, "a revoke must name the user the role bundle assignment belongs to").WithOp(op)
+	}
+	return r.revokeRoleAccessAssignment(ctx, &userID, assignmentID, revokedBy, now, op)
+}
+
+func (r *Repository) revokeRoleAccessAssignment(ctx context.Context, ownerID *string, assignmentID, revokedBy string, now time.Time, op string) error {
 	const q = `
 		WITH updated AS (
 			UPDATE user_role_access
 			SET revoked_at = $2, revoked_by = NULLIF($3, '')
-			WHERE id = $1 AND revoked_at IS NULL
+			WHERE id = $1 AND revoked_at IS NULL AND ($6::text IS NULL OR user_id = $6)
 			RETURNING user_id, role_access_name, node_id
 		)
 		INSERT INTO user_audit_log (id, actor_user_id, target_user_id, action, detail, created_at)
@@ -198,7 +211,7 @@ func (r *Repository) RevokeRoleAccessAssignment(ctx context.Context, assignmentI
 		       $2
 		FROM updated`
 
-	if _, err := r.pool.Exec(ctx, q, assignmentID, now, revokedBy, id.New(), pageauthz.AuditActionRevokeRoleAccess); err != nil {
+	if _, err := r.pool.Exec(ctx, q, assignmentID, now, revokedBy, id.New(), pageauthz.AuditActionRevokeRoleAccess, ownerID); err != nil {
 		return errs.Wrap(err, errs.CodeUnavailable, "could not revoke the role bundle assignment").WithOp(op)
 	}
 	return nil
@@ -302,13 +315,26 @@ func (r *Repository) GrantPageAccess(ctx context.Context, spec pageauthz.PageGra
 // already-revoked grant is not an error, the same idempotency
 // [Repository.RevokeRoleAccessAssignment] documents.
 func (r *Repository) RevokePageAccess(ctx context.Context, grantID, revokedBy string, now time.Time) error {
-	const op = "pageauthz.Repository.RevokePageAccess"
+	return r.revokePageAccess(ctx, nil, grantID, revokedBy, now, "pageauthz.Repository.RevokePageAccess")
+}
 
+// RevokeUserPageAccess is [Repository.RevokePageAccess] scoped to one user:
+// an id belonging to anyone other than userID behaves exactly like an
+// unknown id — nothing changes and no error is returned.
+func (r *Repository) RevokeUserPageAccess(ctx context.Context, userID, grantID, revokedBy string, now time.Time) error {
+	const op = "pageauthz.Repository.RevokeUserPageAccess"
+	if userID == "" {
+		return errs.New(errs.CodeInvalidArgument, "a revoke must name the user the page grant belongs to").WithOp(op)
+	}
+	return r.revokePageAccess(ctx, &userID, grantID, revokedBy, now, op)
+}
+
+func (r *Repository) revokePageAccess(ctx context.Context, ownerID *string, grantID, revokedBy string, now time.Time, op string) error {
 	const q = `
 		WITH updated AS (
 			UPDATE user_page_access
 			SET revoked_at = $2, revoked_by = NULLIF($3, '')
-			WHERE id = $1 AND revoked_at IS NULL
+			WHERE id = $1 AND revoked_at IS NULL AND ($6::text IS NULL OR user_id = $6)
 			RETURNING user_id, page_key, node_id
 		)
 		INSERT INTO user_audit_log (id, actor_user_id, target_user_id, action, detail, created_at)
@@ -317,7 +343,7 @@ func (r *Repository) RevokePageAccess(ctx context.Context, grantID, revokedBy st
 		       $2
 		FROM updated`
 
-	if _, err := r.pool.Exec(ctx, q, grantID, now, revokedBy, id.New(), pageauthz.AuditActionRevokePageAccess); err != nil {
+	if _, err := r.pool.Exec(ctx, q, grantID, now, revokedBy, id.New(), pageauthz.AuditActionRevokePageAccess, ownerID); err != nil {
 		return errs.Wrap(err, errs.CodeUnavailable, "could not revoke the page grant").WithOp(op)
 	}
 	return nil

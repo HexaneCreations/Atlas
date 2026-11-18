@@ -52,8 +52,8 @@ func (l lazyPageAdmin) ListRoleAccessDefinitions(ctx context.Context) ([]corepag
 func (l lazyPageAdmin) AssignRoleAccess(ctx context.Context, spec corepageauthz.RoleAccessAssignmentSpec, now time.Time) error {
 	return l.repo().AssignRoleAccess(ctx, spec, now)
 }
-func (l lazyPageAdmin) RevokeRoleAccessAssignment(ctx context.Context, assignmentID, revokedBy string, now time.Time) error {
-	return l.repo().RevokeRoleAccessAssignment(ctx, assignmentID, revokedBy, now)
+func (l lazyPageAdmin) RevokeUserRoleAccessAssignment(ctx context.Context, userID, assignmentID, revokedBy string, now time.Time) error {
+	return l.repo().RevokeUserRoleAccessAssignment(ctx, userID, assignmentID, revokedBy, now)
 }
 func (l lazyPageAdmin) ListRoleAccessAssignments(ctx context.Context, userID string) ([]corepageauthz.RoleAccessAssignment, error) {
 	return l.repo().ListRoleAccessAssignments(ctx, userID)
@@ -61,8 +61,8 @@ func (l lazyPageAdmin) ListRoleAccessAssignments(ctx context.Context, userID str
 func (l lazyPageAdmin) GrantPageAccess(ctx context.Context, spec corepageauthz.PageGrantSpec, now time.Time) error {
 	return l.repo().GrantPageAccess(ctx, spec, now)
 }
-func (l lazyPageAdmin) RevokePageAccess(ctx context.Context, grantID, revokedBy string, now time.Time) error {
-	return l.repo().RevokePageAccess(ctx, grantID, revokedBy, now)
+func (l lazyPageAdmin) RevokeUserPageAccess(ctx context.Context, userID, grantID, revokedBy string, now time.Time) error {
+	return l.repo().RevokeUserPageAccess(ctx, userID, grantID, revokedBy, now)
 }
 func (l lazyPageAdmin) ListPageAccessGrants(ctx context.Context, userID string) ([]corepageauthz.PageGrant, error) {
 	return l.repo().ListPageAccessGrants(ctx, userID)

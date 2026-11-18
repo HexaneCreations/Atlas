@@ -870,44 +870,56 @@ func TestIsSuperadminIgnoresANodeScopedGrant(t *testing.T) {
 	}
 }
 
-// GrantOwner resolves a grant id back to its user, and returns "" (not an
-// error) for an unknown or already-revoked id — the same caller-intent
-// no-op RevokeGrant itself applies.
-func TestGrantOwnerResolvesActiveGrantsOnly(t *testing.T) {
+// RevokeUserGrant only reaches a grant owned by the named user: another
+// user's grant id behaves exactly like an unknown one (nil, nothing revoked,
+// no audit row), and the owner's own id revokes as RevokeGrant does.
+func TestRevokeUserGrantIsScopedToTheNamedUser(t *testing.T) {
 	repo := newRepository(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
-	u := createTestUser(t, repo, "victor-owner")
-	grantFleetAdmin(t, repo, u.ID, now)
+	owner := createTestUser(t, repo, "victor-owner")
+	other := createTestUser(t, repo, "wendy-other")
+	grantFleetAdmin(t, repo, owner.ID, now)
+	grantFleetAdmin(t, repo, other.ID, now)
 
-	grants, err := repo.ListGrants(ctx, u.ID)
+	grants, err := repo.ListGrants(ctx, owner.ID)
 	if err != nil {
 		t.Fatalf("ListGrants: %v", err)
 	}
 	gid := grants[0].ID
+	auditBefore := auditCount(t, repo, owner.ID)
 
-	owner, err := repo.GrantOwner(ctx, gid)
+	if err := repo.RevokeUserGrant(ctx, other.ID, gid, "operator", now); err != nil {
+		t.Fatalf("RevokeUserGrant(mismatched owner) = %v, want nil (same as an unknown id)", err)
+	}
+	if err := repo.RevokeUserGrant(ctx, other.ID, "no-such-grant-id", "operator", now); err != nil {
+		t.Fatalf("RevokeUserGrant(unknown id) = %v, want nil", err)
+	}
+	if ok, err := repo.HasPermission(ctx, owner.ID, "", coreuser.PermissionUserManage); err != nil || !ok {
+		t.Fatalf("owner lost user.manage through a mismatched revoke: ok=%v err=%v", ok, err)
+	}
+	if got := auditCount(t, repo, owner.ID); got != auditBefore {
+		t.Errorf("audit rows for owner %d -> %d after a mismatched revoke", auditBefore, got)
+	}
+
+	if err := repo.RevokeUserGrant(ctx, owner.ID, gid, "operator", now); err != nil {
+		t.Fatalf("RevokeUserGrant(owner): %v", err)
+	}
+	if ok, err := repo.HasPermission(ctx, owner.ID, "", coreuser.PermissionUserManage); err != nil || ok {
+		t.Errorf("owner still holds user.manage after a matching revoke: ok=%v err=%v", ok, err)
+	}
+	if err := repo.RevokeUserGrant(ctx, "", gid, "operator", now); errs.CodeOf(err) != errs.CodeInvalidArgument {
+		t.Errorf("RevokeUserGrant(empty user) = %v, want CodeInvalidArgument", err)
+	}
+}
+
+func auditCount(t *testing.T, repo *user.Repository, userID string) int {
+	t.Helper()
+	entries, err := repo.ListAudit(context.Background(), userID)
 	if err != nil {
-		t.Fatalf("GrantOwner: %v", err)
+		t.Fatalf("ListAudit: %v", err)
 	}
-	if owner != u.ID {
-		t.Errorf("GrantOwner = %q, want %q", owner, u.ID)
-	}
-
-	if owner, err := repo.GrantOwner(ctx, "no-such-grant-id"); err != nil || owner != "" {
-		t.Errorf("GrantOwner(unknown) = %q, %v; want \"\", nil", owner, err)
-	}
-
-	// A second fleet admin so the revoke below is not blocked by the
-	// last-admin guard.
-	second := createTestUser(t, repo, "wendy-owner")
-	grantFleetAdmin(t, repo, second.ID, now)
-	if err := repo.RevokeGrant(ctx, gid, "operator", now); err != nil {
-		t.Fatalf("RevokeGrant: %v", err)
-	}
-	if owner, err := repo.GrantOwner(ctx, gid); err != nil || owner != "" {
-		t.Errorf("GrantOwner(revoked) = %q, %v; want \"\", nil", owner, err)
-	}
+	return len(entries)
 }
 
 // Point 6 of the superadmin feature request, confirmed against real SQL: the

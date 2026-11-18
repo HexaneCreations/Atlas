@@ -146,25 +146,15 @@ func (f *fakeUserAdmin) IsSuperadmin(_ context.Context, userID string) (bool, er
 	return false, nil
 }
 
-func (f *fakeUserAdmin) GrantOwner(_ context.Context, grantID string) (string, error) {
+func (f *fakeUserAdmin) RevokeUserGrant(_ context.Context, userID, grantID, _ string, now time.Time) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	g, ok := f.grants[grantID]
-	if !ok || g.RevokedAt != nil {
-		return "", nil
+	if !ok || g.UserID != userID {
+		return nil
 	}
-	return g.UserID, nil
-}
-
-func (f *fakeUserAdmin) RevokeGrant(_ context.Context, grantID, _ string, now time.Time) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
 	if grantID == f.lastAdminGrantID {
 		return user.ErrLastAdminGrant
-	}
-	g, ok := f.grants[grantID]
-	if !ok {
-		return nil
 	}
 	g.RevokedAt = &now
 	f.grants[grantID] = g
