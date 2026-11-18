@@ -881,8 +881,8 @@ function UserDetailPanel({
             </p>
           ) : protectedTarget ? (
             <p className="rounded-lg border border-border bg-surface-hover/40 px-3 py-2 text-xs text-text-muted lg:col-span-2">
-              This is the superadmin account. {PROTECTED_SUPERADMIN_MESSAGE} — role and account actions
-              are disabled here.
+              This is a superadmin account. {PROTECTED_SUPERADMIN_MESSAGE} — role, page-access, bundle and
+              account actions are disabled here.
             </p>
           ) : null}
 
@@ -943,10 +943,23 @@ function UserDetailPanel({
             hint="Pages this user can access, and for which scope."
             actions={
               <>
-                <Button variant="secondary" size="sm" onClick={onGrantAllPages}>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={onGrantAllPages}
+                  disabled={protectedTarget}
+                  title={protectedTarget ? PROTECTED_SUPERADMIN_MESSAGE : undefined}
+                >
                   Grant all pages for a node
                 </Button>
-                <Button variant="primary" size="sm" icon={Plus} onClick={onGrantPage}>
+                <Button
+                  variant="primary"
+                  size="sm"
+                  icon={Plus}
+                  onClick={onGrantPage}
+                  disabled={protectedTarget}
+                  title={protectedTarget ? PROTECTED_SUPERADMIN_MESSAGE : undefined}
+                >
                   Grant page access
                 </Button>
               </>
@@ -965,7 +978,7 @@ function UserDetailPanel({
                   {directPages.map((a) => {
                     const meta = a.page ? PAGE_META[a.page] : undefined;
                     const Icon = meta?.icon ?? FileKey;
-                    const guard = revokeGuard({ isSelf });
+                    const guard = revokeGuard({ isSelf, protectedSuperadmin: protectedTarget });
                     return (
                       <tr key={a.id} className="border-t border-border/60">
                         <td className="py-2 pr-3">
@@ -1004,7 +1017,14 @@ function UserDetailPanel({
               title="Role-Access Bundles"
               hint="Bundles are preset collections of page access grants."
               actions={
-                <Button variant="primary" size="sm" icon={Plus} onClick={onAssignBundle}>
+                <Button
+                  variant="primary"
+                  size="sm"
+                  icon={Plus}
+                  onClick={onAssignBundle}
+                  disabled={protectedTarget}
+                  title={protectedTarget ? PROTECTED_SUPERADMIN_MESSAGE : undefined}
+                >
                   Assign bundle
                 </Button>
               }
@@ -1016,7 +1036,7 @@ function UserDetailPanel({
               ) : (
                 <AccessTable head={["Bundle", "Scope", "Granted by", "Granted at", ""]}>
                   {roleAccess.map((a) => {
-                    const guard = revokeGuard({ isSelf });
+                    const guard = revokeGuard({ isSelf, protectedSuperadmin: protectedTarget });
                     return (
                       <tr key={a.id} className="border-t border-border/60">
                         <td className="py-2 pr-3 font-medium text-text">{a.role_access}</td>

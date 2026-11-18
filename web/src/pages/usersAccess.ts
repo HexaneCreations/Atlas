@@ -20,7 +20,7 @@ export const LAST_ADMIN_REVOKE_MESSAGE = "Can't revoke — this is the last user
 /** Shown on any per-user action blocked because the target holds the
  *  protected `superadmin` role and the signed-in user does not. Mirrors the
  *  backend's guardSuperadminTarget 403. */
-export const PROTECTED_SUPERADMIN_MESSAGE = "Only a superadmin can act on the superadmin account";
+export const PROTECTED_SUPERADMIN_MESSAGE = "Superadmin accounts can only be changed by a superadmin";
 
 export interface RevokeGuard {
   disabled: boolean;
@@ -31,8 +31,9 @@ export interface RevokeGuard {
  * Whether a Revoke control in the user detail panel must be disabled, and the
  * reason to surface on hover.
  *
- * `protectedSuperadmin` applies to every action against the superadmin's
- * account by a non-superadmin — it is the most absolute block and wins.
+ * `protectedSuperadmin` applies to every action against a superadmin's
+ * account by a non-superadmin — role grants, page grants and bundle
+ * assignments alike — and is the most absolute block, so it wins.
  * `lastAdmin` applies to role grants only; `isSelf` applies to every access
  * axis — role grants, direct page grants, and bundle assignments alike.
  */

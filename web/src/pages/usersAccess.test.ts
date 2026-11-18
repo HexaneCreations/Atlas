@@ -64,6 +64,12 @@ describe("revokeGuard", () => {
       reason: PROTECTED_SUPERADMIN_MESSAGE,
     });
   });
+
+  it("matches the backend's ErrProtectedSuperadmin wording", () => {
+    expect(PROTECTED_SUPERADMIN_MESSAGE.toLowerCase()).toBe(
+      "superadmin accounts can only be changed by a superadmin",
+    );
+  });
 });
 
 describe("holdsSuperadmin", () => {
