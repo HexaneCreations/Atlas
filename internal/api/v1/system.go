@@ -173,10 +173,10 @@ type SLOStore interface {
 type NotificationStore interface {
 	ListChannels(ctx context.Context) ([]notification.Channel, error)
 	GetChannel(ctx context.Context, id string) (notification.Channel, error)
-	CreateChannel(ctx context.Context, c notification.Channel) (notification.Channel, error)
-	UpdateChannel(ctx context.Context, c notification.Channel) (notification.Channel, error)
+	CreateChannel(ctx context.Context, in notification.ChannelInput) (notification.Channel, error)
+	UpdateChannel(ctx context.Context, id string, in notification.ChannelInput) (notification.Channel, error)
 	DeleteChannel(ctx context.Context, id string) error
-	ListDeliveries(ctx context.Context, filter notification.DeliveryFilter) ([]notification.Delivery, error)
+	ListDeliveries(ctx context.Context, filter notification.DeliveryFilter) (notification.DeliveryPage, error)
 }
 
 // EventStore is the durable event log the API reads from. Satisfied by

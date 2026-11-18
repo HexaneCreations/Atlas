@@ -38,9 +38,9 @@ func debugLogger(buf *syncBuffer) *slog.Logger {
 
 var notificationEndpoints = []struct{ method, path, body string }{
 	{http.MethodGet, "/api/v1/notifications/channels", ""},
-	{http.MethodPost, "/api/v1/notifications/channels", `{"name":"it-nokey","type":"webhook","webhook_url":"https://example.invalid/hook"}`},
+	{http.MethodPost, "/api/v1/notifications/channels", `{"name":"it-nokey","type":"teams"}`},
 	{http.MethodGet, "/api/v1/notifications/channels/missing", ""},
-	{http.MethodPut, "/api/v1/notifications/channels/missing", `{"name":"it-nokey","type":"webhook","webhook_url":"https://example.invalid/hook"}`},
+	{http.MethodPut, "/api/v1/notifications/channels/missing", `{"name":"it-nokey","type":"teams"}`},
 	{http.MethodDelete, "/api/v1/notifications/channels/missing", ""},
 	{http.MethodGet, "/api/v1/notifications/deliveries", ""},
 }
@@ -72,8 +72,8 @@ func TestNotificationsAreDisabledWithoutAnEncryptionKey(t *testing.T) {
 	if n := strings.Count(out, "notifications are disabled: ATLAS_NOTIFICATIONS_ENCRYPTION_KEY is not set"); n != 1 {
 		t.Errorf("disabled warning logged %d times, want 1", n)
 	}
-	if strings.Contains(out, "notification dispatcher ready") {
-		t.Error("the dispatcher started without an encryption key")
+	if strings.Contains(out, "notifications ready") {
+		t.Error("notifications reported ready without an encryption key")
 	}
 }
 
@@ -95,8 +95,8 @@ func TestNotificationsEncryptionKeyIsNeverLogged(t *testing.T) {
 	}
 
 	out := logs.String()
-	if !strings.Contains(out, "notification dispatcher ready") || !strings.Contains(out, `"encryption_key_id"`) {
-		t.Error("the dispatcher did not start, or did not log its key id")
+	if !strings.Contains(out, "notifications ready") || !strings.Contains(out, `"encryption_key_id"`) {
+		t.Error("notifications did not report ready, or did not log the key id")
 	}
 	if strings.Contains(out, testNotificationsKey) {
 		t.Fatal("the encryption key appeared in the server's logs")

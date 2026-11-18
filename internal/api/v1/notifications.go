@@ -13,49 +13,57 @@ import (
 	"github.com/hexane/atlas/internal/platform/httpx"
 )
 
-// NotificationChannelRequest is the body of a create or update request. A
-// webhook secret is write-only: it is accepted here but never present on
-// [NotificationChannelResponse] — see that type's doc.
+// NotificationChannelRequest is the body of a create or update request.
+// Secret is write-only: it is accepted here, stored encrypted, and never
+// returned — responses carry only secret_configured. Omitting it on update
+// keeps the stored secret.
 type NotificationChannelRequest struct {
-	Name          string `json:"name"`
-	Type          string `json:"type"`
-	Enabled       *bool  `json:"enabled,omitempty"`
-	WebhookURL    string `json:"webhook_url,omitempty"`
-	WebhookSecret string `json:"webhook_secret,omitempty"`
+	Name        string         `json:"name"`
+	Type        string         `json:"type"`
+	Enabled     *bool          `json:"enabled,omitempty"`
+	MinSeverity string         `json:"min_severity,omitempty"`
+	Config      map[string]any `json:"config,omitempty"`
+	Secret      *string        `json:"secret,omitempty"`
 }
 
-func (req NotificationChannelRequest) toChannel(id string) notification.Channel {
+func (req NotificationChannelRequest) toInput() notification.ChannelInput {
 	enabled := true
 	if req.Enabled != nil {
 		enabled = *req.Enabled
 	}
-	return notification.Channel{
-		ID: id, Name: req.Name, Type: notification.ChannelType(req.Type), Enabled: enabled,
-		Webhook: notification.WebhookConfig{URL: req.WebhookURL, Secret: req.WebhookSecret},
+	minSeverity := notification.SeverityWarning
+	if req.MinSeverity != "" {
+		minSeverity = notification.Severity(req.MinSeverity)
+	}
+	return notification.ChannelInput{
+		Name: req.Name, Type: notification.ChannelType(req.Type), Enabled: enabled,
+		MinSeverity: minSeverity, Config: req.Config, Secret: req.Secret,
 	}
 }
 
-// NotificationChannelResponse is one notification channel.
-//
-// It deliberately has no secret field. A webhook signing secret is
-// write-only, the same convention enrollment tokens use (see
-// [github.com/hexane/atlas/internal/core/fleet.GeneratedToken]): accepted
-// on create/update, never echoed back. See
+// NotificationChannelResponse is one notification channel. It never carries
+// the secret, only whether one is configured — see
 // [TestNotificationChannelResponseHasNoSecretField].
 type NotificationChannelResponse struct {
-	ID         string    `json:"id"`
-	Name       string    `json:"name"`
-	Type       string    `json:"type"`
-	Enabled    bool      `json:"enabled"`
-	WebhookURL string    `json:"webhook_url,omitempty"`
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	ID               string         `json:"id"`
+	Name             string         `json:"name"`
+	Type             string         `json:"type"`
+	Enabled          bool           `json:"enabled"`
+	MinSeverity      string         `json:"min_severity"`
+	Config           map[string]any `json:"config"`
+	SecretConfigured bool           `json:"secret_configured"`
+	CreatedAt        time.Time      `json:"created_at"`
+	UpdatedAt        time.Time      `json:"updated_at"`
 }
 
 func presentChannel(c notification.Channel) NotificationChannelResponse {
+	config := c.Config
+	if config == nil {
+		config = map[string]any{}
+	}
 	return NotificationChannelResponse{
-		ID: c.ID, Name: c.Name, Type: string(c.Type), Enabled: c.Enabled,
-		WebhookURL: c.Webhook.URL, CreatedAt: c.CreatedAt, UpdatedAt: c.UpdatedAt,
+		ID: c.ID, Name: c.Name, Type: string(c.Type), Enabled: c.Enabled, MinSeverity: string(c.MinSeverity),
+		Config: config, SecretConfigured: c.SecretConfigured, CreatedAt: c.CreatedAt, UpdatedAt: c.UpdatedAt,
 	}
 }
 
@@ -130,12 +138,12 @@ func (h *Handler) CreateNotificationChannel(w http.ResponseWriter, r *http.Reque
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		return errs.New(errs.CodeInvalidArgument, "invalid request body").WithOp(op)
 	}
-	channel := req.toChannel("")
-	if err := channel.Validate(); err != nil {
+	in := req.toInput()
+	if err := in.Validate(); err != nil {
 		return err
 	}
 
-	created, err := store.CreateChannel(r.Context(), channel)
+	created, err := store.CreateChannel(r.Context(), in)
 	if err != nil {
 		return err
 	}
@@ -158,12 +166,12 @@ func (h *Handler) UpdateNotificationChannel(w http.ResponseWriter, r *http.Reque
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		return errs.New(errs.CodeInvalidArgument, "invalid request body").WithOp(op)
 	}
-	channel := req.toChannel(r.PathValue("channelID"))
-	if err := channel.Validate(); err != nil {
+	in := req.toInput()
+	if err := in.Validate(); err != nil {
 		return err
 	}
 
-	updated, err := store.UpdateChannel(r.Context(), channel)
+	updated, err := store.UpdateChannel(r.Context(), r.PathValue("channelID"), in)
 	if err != nil {
 		return err
 	}
@@ -193,21 +201,24 @@ func (h *Handler) DeleteNotificationChannel(w http.ResponseWriter, r *http.Reque
 // NotificationDeliveryResponse is one delivery attempt's status — the
 // observability surface for whether a notification actually went out.
 type NotificationDeliveryResponse struct {
-	ID            string    `json:"id"`
-	EventID       string    `json:"event_id"`
-	ChannelID     string    `json:"channel_id"`
-	Trigger       string    `json:"trigger"`
-	NodeID        string    `json:"node_id,omitempty"`
-	Severity      string    `json:"severity,omitempty"`
-	Title         string    `json:"title,omitempty"`
-	Message       string    `json:"message,omitempty"`
-	EventTime     time.Time `json:"event_time"`
-	Status        string    `json:"status"`
-	Attempts      int       `json:"attempts"`
-	NextAttemptAt time.Time `json:"next_attempt_at,omitzero"`
-	LastError     string    `json:"last_error,omitempty"`
-	CreatedAt     time.Time `json:"created_at"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	ID            string     `json:"id"`
+	EventID       string     `json:"event_id"`
+	ChannelID     string     `json:"channel_id"`
+	ChannelType   string     `json:"channel_type"`
+	Kind          string     `json:"kind"`
+	Trigger       string     `json:"trigger"`
+	NodeID        string     `json:"node_id,omitempty"`
+	Subject       string     `json:"subject,omitempty"`
+	Severity      string     `json:"severity,omitempty"`
+	Title         string     `json:"title,omitempty"`
+	Message       string     `json:"message,omitempty"`
+	Status        string     `json:"status"`
+	Attempts      int        `json:"attempts"`
+	NextAttemptAt time.Time  `json:"next_attempt_at,omitzero"`
+	LastError     string     `json:"last_error,omitempty"`
+	DeliveredAt   *time.Time `json:"delivered_at,omitempty"`
+	CreatedAt     time.Time  `json:"created_at"`
+	UpdatedAt     time.Time  `json:"updated_at"`
 }
 
 // ListNotificationDeliveriesResponse is a page of the delivery log.
@@ -241,17 +252,18 @@ func (h *Handler) ListNotificationDeliveries(w http.ResponseWriter, r *http.Requ
 		filter.Limit = n
 	}
 
-	deliveries, err := store.ListDeliveries(r.Context(), filter)
+	page, err := store.ListDeliveries(r.Context(), filter)
 	if err != nil {
 		return err
 	}
-	out := make([]NotificationDeliveryResponse, 0, len(deliveries))
-	for _, d := range deliveries {
+	out := make([]NotificationDeliveryResponse, 0, len(page.Deliveries))
+	for _, d := range page.Deliveries {
 		out = append(out, NotificationDeliveryResponse{
-			ID: d.ID, EventID: d.EventID, ChannelID: d.ChannelID, Trigger: string(d.Trigger),
-			NodeID: d.NodeID, Severity: d.Severity, Title: d.Title, Message: d.Message, EventTime: d.EventTime,
-			Status: string(d.Status), Attempts: d.Attempts, NextAttemptAt: d.NextAttemptAt, LastError: d.LastError,
-			CreatedAt: d.CreatedAt, UpdatedAt: d.UpdatedAt,
+			ID: d.ID, EventID: d.EventID, ChannelID: d.ChannelID, ChannelType: string(d.ChannelType),
+			Kind: string(d.Kind), Trigger: string(d.Trigger), NodeID: d.NodeID, Subject: d.Subject,
+			Severity: string(d.Severity), Title: d.Title, Message: d.Message, Status: string(d.Status),
+			Attempts: d.Attempts, NextAttemptAt: d.NextAttemptAt, LastError: d.LastError,
+			DeliveredAt: d.DeliveredAt, CreatedAt: d.CreatedAt, UpdatedAt: d.UpdatedAt,
 		})
 	}
 	httpx.JSON(w, r, http.StatusOK, ListNotificationDeliveriesResponse{Deliveries: out, Total: len(out)})

@@ -77,7 +77,7 @@ func TestNotificationEndpointsAreSuperadminOnlyAgainstTheRealSeed(t *testing.T) 
 
 			if !c.allow {
 				resp, err := c.client.Post(base+"/api/v1/notifications/channels", "application/json",
-					strings.NewReader(`{"name":"it-refused","type":"webhook","webhook_url":"https://example.invalid/hook"}`))
+					strings.NewReader(`{"name":"it-refused","type":"teams"}`))
 				if err != nil {
 					t.Fatalf("POST channel: %v", err)
 				}

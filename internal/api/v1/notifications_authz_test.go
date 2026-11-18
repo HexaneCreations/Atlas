@@ -51,7 +51,7 @@ func notificationActions() []struct {
 	guardAction
 	ok int
 } {
-	const body = `{"name":"ops","type":"webhook","enabled":true,"webhook_url":"https://example.invalid/hook"}`
+	const body = `{"name":"ops","type":"teams","enabled":true}`
 	return []struct {
 		guardAction
 		ok int
@@ -68,8 +68,7 @@ func notificationActions() []struct {
 func seededNotificationStore() *fakeNotificationStore {
 	store := newFakeNotificationStore()
 	store.channels["chan-1"] = notification.Channel{
-		ID: "chan-1", Name: "ops", Type: notification.ChannelWebhook, Enabled: true,
-		Webhook: notification.WebhookConfig{URL: "https://example.invalid/hook"},
+		ID: "chan-1", Name: "ops", Type: notification.ChannelTeams, Enabled: true, MinSeverity: notification.SeverityWarning,
 	}
 	return store
 }

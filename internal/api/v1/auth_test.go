@@ -17,6 +17,7 @@ import (
 
 	"github.com/hexane/atlas/internal/api"
 	v1 "github.com/hexane/atlas/internal/api/v1"
+	"github.com/hexane/atlas/internal/core/notification"
 	"github.com/hexane/atlas/internal/core/user"
 	"github.com/hexane/atlas/internal/platform/config"
 	"github.com/hexane/atlas/internal/platform/errs"
@@ -632,7 +633,7 @@ func newWriteEndpointTestServer(t *testing.T, seedUser user.User, authz v1.Autho
 	return srv
 }
 
-const validChannelBody = `{"name":"ops-webhook","type":"webhook","webhook_url":"https://example.com/hook"}`
+const validChannelBody = `{"name":"ops-teams","type":"teams","config":{"label":"ops"}}`
 
 // The representative case: registering a notification channel — the
 // concrete risk named in review — requires authentication at all.
@@ -700,8 +701,8 @@ func TestCreateNotificationChannelSucceedsWhenGranted(t *testing.T) {
 		t.Fatalf("store received %d channels, want 1", len(notifications.channels))
 	}
 	for _, c := range notifications.channels {
-		if c.Webhook.URL != "https://example.com/hook" {
-			t.Errorf("stored channel = %+v, want webhook url https://example.com/hook", c)
+		if c.Name != "ops-teams" || c.Type != notification.ChannelTeams || c.Config["label"] != "ops" {
+			t.Errorf("stored channel = %+v, want the teams channel ops-teams", c)
 		}
 	}
 }

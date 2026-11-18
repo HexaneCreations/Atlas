@@ -1,49 +1,98 @@
-// Package notification is the PostgreSQL-backed implementation of
-// [github.com/hexane/atlas/internal/core/notification.ChannelStore] and
-// [github.com/hexane/atlas/internal/core/notification.DeliveryStore].
+// Package notification is the PostgreSQL store for notification channels,
+// rules, evaluator state and deliveries (see
+// internal/core/notification and migrations/0022_notification_schema.sql).
 package notification
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
-	"time"
 
 	corenotification "github.com/hexane/atlas/internal/core/notification"
 	"github.com/hexane/atlas/internal/platform/errs"
 	"github.com/hexane/atlas/internal/platform/id"
+	"github.com/hexane/atlas/internal/platform/secretbox"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const (
-	defaultDeliveryListLimit = 100
-	maxDeliveryListLimit     = 500
-)
-
-// Repository reads and writes notification channels and deliveries.
-type Repository struct{ pool *pgxpool.Pool }
+// Repository reads and writes the notification tables. Channel secrets are
+// sealed with key, bound to the channel id; a nil key refuses every secret
+// operation rather than storing plaintext.
+type Repository struct {
+	pool *pgxpool.Pool
+	key  *secretbox.Key
+}
 
 // NewRepository builds a repository over a started pool.
-func NewRepository(pool *pgxpool.Pool) *Repository { return &Repository{pool: pool} }
+func NewRepository(pool *pgxpool.Pool, key *secretbox.Key) *Repository {
+	return &Repository{pool: pool, key: key}
+}
 
-const channelColumns = `id, name, type, enabled, webhook_url, webhook_secret, created_at, updated_at`
+const channelColumns = `id, name, type, enabled, min_severity, config, secret_ciphertext IS NOT NULL, created_at, updated_at`
 
 func scanChannel(row pgx.Row) (corenotification.Channel, error) {
 	var c corenotification.Channel
-	var typ string
-	err := row.Scan(&c.ID, &c.Name, &typ, &c.Enabled, &c.Webhook.URL, &c.Webhook.Secret, &c.CreatedAt, &c.UpdatedAt)
-	if err != nil {
+	var typ, minSeverity string
+	var config []byte
+	if err := row.Scan(&c.ID, &c.Name, &typ, &c.Enabled, &minSeverity, &config,
+		&c.SecretConfigured, &c.CreatedAt, &c.UpdatedAt); err != nil {
 		return corenotification.Channel{}, err
 	}
 	c.Type = corenotification.ChannelType(typ)
+	c.MinSeverity = corenotification.Severity(minSeverity)
+	if err := json.Unmarshal(config, &c.Config); err != nil {
+		return corenotification.Channel{}, fmt.Errorf("decode channel config: %w", err)
+	}
 	return c, nil
 }
 
-// ListChannels returns every channel, newest first.
+func encodeConfig(config map[string]any) ([]byte, error) {
+	if config == nil {
+		return []byte("{}"), nil
+	}
+	return json.Marshal(config)
+}
+
+// seal encrypts secret for channelID. The error never carries the secret.
+func (r *Repository) seal(op, channelID, secret string) (secretbox.Sealed, error) {
+	if r.key == nil {
+		return secretbox.Sealed{}, errs.New(errs.CodeUnavailable,
+			"notifications are disabled: no encryption key is configured").WithOp(op)
+	}
+	sealed, err := r.key.Seal([]byte(secret), []byte(channelID))
+	if err != nil {
+		return secretbox.Sealed{}, errs.New(errs.CodeInternal, "could not encrypt the channel secret").WithOp(op)
+	}
+	return sealed, nil
+}
+
+// pgCode is err's PostgreSQL SQLSTATE, or "".
+func pgCode(err error) string {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.Code
+	}
+	return ""
+}
+
+func isUniqueViolation(err error) bool { return pgCode(err) == "23505" }
+
+func channelWriteError(err error, op, verb string) error {
+	if isUniqueViolation(err) {
+		return errs.New(errs.CodeAlreadyExists, "a notification channel with this name already exists").WithOp(op)
+	}
+	return errs.Wrap(err, errs.CodeUnavailable, "could not %s the notification channel", verb).WithOp(op)
+}
+
+// ListChannels returns every channel, newest first. Secrets are reported
+// only as configured or not.
 func (r *Repository) ListChannels(ctx context.Context) ([]corenotification.Channel, error) {
 	const op = "notification.Repository.ListChannels"
 
-	rows, err := r.pool.Query(ctx, `SELECT `+channelColumns+` FROM notification_channels ORDER BY created_at DESC`)
+	rows, err := r.pool.Query(ctx, `SELECT `+channelColumns+` FROM notification_channels ORDER BY created_at DESC, id DESC`)
 	if err != nil {
 		return nil, errs.Wrap(err, errs.CodeUnavailable, "could not list notification channels").WithOp(op)
 	}
@@ -63,14 +112,13 @@ func (r *Repository) ListChannels(ctx context.Context) ([]corenotification.Chann
 	return channels, nil
 }
 
-// GetChannel returns one channel by id.
+// GetChannel returns one channel by id, without its secret.
 func (r *Repository) GetChannel(ctx context.Context, channelID string) (corenotification.Channel, error) {
 	const op = "notification.Repository.GetChannel"
 
-	row := r.pool.QueryRow(ctx, `SELECT `+channelColumns+` FROM notification_channels WHERE id = $1`, channelID)
-	c, err := scanChannel(row)
+	c, err := scanChannel(r.pool.QueryRow(ctx, `SELECT `+channelColumns+` FROM notification_channels WHERE id = $1`, channelID))
 	if err != nil {
-		if err == pgx.ErrNoRows {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return corenotification.Channel{}, errs.New(errs.CodeNotFound, "notification channel not found").WithOp(op).WithDetail("id", channelID)
 		}
 		return corenotification.Channel{}, errs.Wrap(err, errs.CodeUnavailable, "could not read the notification channel").WithOp(op)
@@ -78,43 +126,79 @@ func (r *Repository) GetChannel(ctx context.Context, channelID string) (corenoti
 	return c, nil
 }
 
-// CreateChannel persists a new channel, assigning it an id.
-func (r *Repository) CreateChannel(ctx context.Context, c corenotification.Channel) (corenotification.Channel, error) {
+// CreateChannel persists a new channel, assigning its id and sealing its
+// secret, if any, to that id.
+func (r *Repository) CreateChannel(ctx context.Context, in corenotification.ChannelInput) (corenotification.Channel, error) {
 	const op = "notification.Repository.CreateChannel"
+	if err := in.Validate(); err != nil {
+		return corenotification.Channel{}, err
+	}
+	config, err := encodeConfig(in.Config)
+	if err != nil {
+		return corenotification.Channel{}, errs.Wrap(err, errs.CodeInvalidArgument, "the channel config is not valid JSON").WithOp(op)
+	}
 
-	c.ID = id.New()
-	now := time.Now()
-	c.CreatedAt, c.UpdatedAt = now, now
+	channelID := id.New()
+	var ciphertext []byte
+	var keyID *string
+	if in.Secret != nil {
+		sealed, err := r.seal(op, channelID, *in.Secret)
+		if err != nil {
+			return corenotification.Channel{}, err
+		}
+		ciphertext, keyID = sealed.Ciphertext, &sealed.KeyID
+	}
 
 	const q = `
-		INSERT INTO notification_channels (id, name, type, enabled, webhook_url, webhook_secret, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`
-
-	_, err := r.pool.Exec(ctx, q, c.ID, c.Name, string(c.Type), c.Enabled, c.Webhook.URL, c.Webhook.Secret, c.CreatedAt, c.UpdatedAt)
+		INSERT INTO notification_channels (id, name, type, enabled, min_severity, config, secret_ciphertext, secret_key_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		RETURNING ` + channelColumns
+	c, err := scanChannel(r.pool.QueryRow(ctx, q, channelID, in.Name, string(in.Type), in.Enabled,
+		string(in.MinSeverity), config, ciphertext, keyID))
 	if err != nil {
-		return corenotification.Channel{}, errs.Wrap(err, errs.CodeUnavailable, "could not create the notification channel").WithOp(op)
+		return corenotification.Channel{}, channelWriteError(err, op, "create")
 	}
 	return c, nil
 }
 
-// UpdateChannel replaces an existing channel's fields.
-func (r *Repository) UpdateChannel(ctx context.Context, c corenotification.Channel) (corenotification.Channel, error) {
+// UpdateChannel replaces a channel's settings. A nil in.Secret keeps the
+// stored secret; a non-nil one replaces it, sealed to the same id.
+func (r *Repository) UpdateChannel(ctx context.Context, channelID string, in corenotification.ChannelInput) (corenotification.Channel, error) {
 	const op = "notification.Repository.UpdateChannel"
+	if err := in.Validate(); err != nil {
+		return corenotification.Channel{}, err
+	}
+	config, err := encodeConfig(in.Config)
+	if err != nil {
+		return corenotification.Channel{}, errs.Wrap(err, errs.CodeInvalidArgument, "the channel config is not valid JSON").WithOp(op)
+	}
 
-	c.UpdatedAt = time.Now()
+	replaceSecret := in.Secret != nil
+	var ciphertext []byte
+	var keyID *string
+	if replaceSecret {
+		sealed, err := r.seal(op, channelID, *in.Secret)
+		if err != nil {
+			return corenotification.Channel{}, err
+		}
+		ciphertext, keyID = sealed.Ciphertext, &sealed.KeyID
+	}
 
 	const q = `
 		UPDATE notification_channels SET
-			name = $2, type = $3, enabled = $4, webhook_url = $5, webhook_secret = $6, updated_at = $7
+			name = $2, type = $3, enabled = $4, min_severity = $5, config = $6,
+			secret_ciphertext = CASE WHEN $7 THEN $8 ELSE secret_ciphertext END,
+			secret_key_id     = CASE WHEN $7 THEN $9 ELSE secret_key_id END,
+			updated_at = now()
 		WHERE id = $1
-		RETURNING created_at`
-
-	row := r.pool.QueryRow(ctx, q, c.ID, c.Name, string(c.Type), c.Enabled, c.Webhook.URL, c.Webhook.Secret, c.UpdatedAt)
-	if err := row.Scan(&c.CreatedAt); err != nil {
-		if err == pgx.ErrNoRows {
-			return corenotification.Channel{}, errs.New(errs.CodeNotFound, "notification channel not found").WithOp(op).WithDetail("id", c.ID)
+		RETURNING ` + channelColumns
+	c, err := scanChannel(r.pool.QueryRow(ctx, q, channelID, in.Name, string(in.Type), in.Enabled,
+		string(in.MinSeverity), config, replaceSecret, ciphertext, keyID))
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return corenotification.Channel{}, errs.New(errs.CodeNotFound, "notification channel not found").WithOp(op).WithDetail("id", channelID)
 		}
-		return corenotification.Channel{}, errs.Wrap(err, errs.CodeUnavailable, "could not update the notification channel").WithOp(op)
+		return corenotification.Channel{}, channelWriteError(err, op, "update")
 	}
 	return c, nil
 }
@@ -133,170 +217,37 @@ func (r *Repository) DeleteChannel(ctx context.Context, channelID string) error 
 	return nil
 }
 
-const deliveryColumns = `id, event_id, channel_id, trigger, node_id, severity, title, message,
-	event_time, status, attempts, next_attempt_at, last_error, created_at, updated_at`
+// ChannelSecret returns a channel's decrypted secret. Only the dispatcher
+// calls this; nothing that serves a reader does. A secret sealed under a
+// different key, or altered, is [corenotification.ErrSecretUnreadable]
+// (also matching secretbox.ErrKeyMismatch or ErrDecrypt); no error carries
+// secret material.
+func (r *Repository) ChannelSecret(ctx context.Context, channelID string) (string, error) {
+	const op = "notification.Repository.ChannelSecret"
+	if r.key == nil {
+		return "", errs.New(errs.CodeUnavailable, "notifications are disabled: no encryption key is configured").WithOp(op)
+	}
 
-func scanDelivery(row pgx.Row) (corenotification.Delivery, error) {
-	var d corenotification.Delivery
-	var trigger, status string
-	err := row.Scan(&d.ID, &d.EventID, &d.ChannelID, &trigger, &d.NodeID, &d.Severity, &d.Title, &d.Message,
-		&d.EventTime, &status, &d.Attempts, &d.NextAttemptAt, &d.LastError, &d.CreatedAt, &d.UpdatedAt)
+	var ciphertext []byte
+	var keyID *string
+	err := r.pool.QueryRow(ctx,
+		`SELECT secret_ciphertext, secret_key_id FROM notification_channels WHERE id = $1`, channelID).Scan(&ciphertext, &keyID)
 	if err != nil {
-		return corenotification.Delivery{}, err
-	}
-	d.Trigger = corenotification.Trigger(trigger)
-	d.Status = corenotification.Status(status)
-	return d, nil
-}
-
-// Enqueue inserts one pending delivery per channel for event. Idempotent on
-// (event_id, channel_id): offering the same event to the same channel twice
-// leaves the first delivery untouched.
-func (r *Repository) Enqueue(ctx context.Context, event corenotification.Event, channels []corenotification.Channel) error {
-	const op = "notification.Repository.Enqueue"
-	if len(channels) == 0 {
-		return nil
-	}
-
-	const q = `
-		INSERT INTO notification_deliveries
-			(id, event_id, channel_id, trigger, node_id, severity, title, message, event_time, status, next_attempt_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-		ON CONFLICT (event_id, channel_id) DO NOTHING`
-
-	now := time.Now()
-	batch := &pgx.Batch{}
-	for _, c := range channels {
-		batch.Queue(q, id.New(), event.ID, c.ID, string(event.Trigger), event.NodeID, event.Severity,
-			event.Title, event.Message, event.Time, string(corenotification.StatusPending), now)
-	}
-
-	br := r.pool.SendBatch(ctx, batch)
-	defer br.Close()
-	for range channels {
-		if _, err := br.Exec(); err != nil {
-			return errs.Wrap(err, errs.CodeUnavailable, "could not enqueue a notification delivery").WithOp(op)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", errs.New(errs.CodeNotFound, "notification channel not found").WithOp(op).WithDetail("id", channelID)
 		}
+		return "", errs.Wrap(err, errs.CodeUnavailable, "could not read the notification channel secret").WithOp(op)
 	}
-	return nil
-}
+	if ciphertext == nil || keyID == nil {
+		return "", errs.New(errs.CodeFailedPrecondition, "the notification channel has no secret configured").
+			WithOp(op).WithDetail("id", channelID)
+	}
 
-// DueDeliveries returns pending deliveries at or past their next attempt
-// time, oldest first.
-func (r *Repository) DueDeliveries(ctx context.Context, now time.Time, limit int) ([]corenotification.Delivery, error) {
-	const op = "notification.Repository.DueDeliveries"
-
-	const q = `
-		SELECT ` + deliveryColumns + ` FROM notification_deliveries
-		WHERE status = 'pending' AND next_attempt_at <= $1
-		ORDER BY next_attempt_at
-		LIMIT $2`
-
-	rows, err := r.pool.Query(ctx, q, now, limit)
+	plaintext, err := r.key.Open(secretbox.Sealed{KeyID: *keyID, Ciphertext: ciphertext}, []byte(channelID))
 	if err != nil {
-		return nil, errs.Wrap(err, errs.CodeUnavailable, "could not list due notification deliveries").WithOp(op)
+		return "", errs.Wrap(fmt.Errorf("%w: %w", corenotification.ErrSecretUnreadable, err),
+			errs.CodeFailedPrecondition, "could not decrypt the channel secret").
+			WithOp(op).WithDetail("id", channelID).WithDetail("stored_key_id", *keyID)
 	}
-	defer rows.Close()
-
-	deliveries := []corenotification.Delivery{}
-	for rows.Next() {
-		d, err := scanDelivery(rows)
-		if err != nil {
-			return nil, errs.Wrap(err, errs.CodeInternal, "could not read a notification delivery").WithOp(op)
-		}
-		deliveries = append(deliveries, d)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, errs.Wrap(err, errs.CodeUnavailable, "could not list due notification deliveries").WithOp(op)
-	}
-	return deliveries, nil
+	return string(plaintext), nil
 }
-
-// MarkDelivered records a successful delivery.
-func (r *Repository) MarkDelivered(ctx context.Context, deliveryID string, at time.Time) error {
-	const op = "notification.Repository.MarkDelivered"
-
-	const q = `UPDATE notification_deliveries SET status = $2, updated_at = $3 WHERE id = $1`
-	if _, err := r.pool.Exec(ctx, q, deliveryID, string(corenotification.StatusDelivered), at); err != nil {
-		return errs.Wrap(err, errs.CodeUnavailable, "could not mark the notification delivered").WithOp(op)
-	}
-	return nil
-}
-
-// MarkRetry records a failed attempt that has not yet exhausted its
-// retries.
-func (r *Repository) MarkRetry(ctx context.Context, deliveryID string, attempts int, next time.Time, lastErr string) error {
-	const op = "notification.Repository.MarkRetry"
-
-	const q = `
-		UPDATE notification_deliveries
-		SET attempts = $2, next_attempt_at = $3, last_error = $4, updated_at = now()
-		WHERE id = $1`
-	if _, err := r.pool.Exec(ctx, q, deliveryID, attempts, next, lastErr); err != nil {
-		return errs.Wrap(err, errs.CodeUnavailable, "could not record the notification retry").WithOp(op)
-	}
-	return nil
-}
-
-// MarkExhausted records a failed attempt that has used its last retry.
-func (r *Repository) MarkExhausted(ctx context.Context, deliveryID string, attempts int, lastErr string) error {
-	const op = "notification.Repository.MarkExhausted"
-
-	const q = `
-		UPDATE notification_deliveries
-		SET status = $2, attempts = $3, last_error = $4, updated_at = now()
-		WHERE id = $1`
-	if _, err := r.pool.Exec(ctx, q, deliveryID, string(corenotification.StatusFailed), attempts, lastErr); err != nil {
-		return errs.Wrap(err, errs.CodeUnavailable, "could not record the notification failure").WithOp(op)
-	}
-	return nil
-}
-
-// ListDeliveries returns recent deliveries matching filter, newest first.
-func (r *Repository) ListDeliveries(ctx context.Context, filter corenotification.DeliveryFilter) ([]corenotification.Delivery, error) {
-	const op = "notification.Repository.ListDeliveries"
-
-	limit := filter.Limit
-	if limit <= 0 || limit > maxDeliveryListLimit {
-		limit = defaultDeliveryListLimit
-	}
-
-	q := `SELECT ` + deliveryColumns + ` FROM notification_deliveries WHERE true`
-	var args []any
-	arg := func(v any) string {
-		args = append(args, v)
-		return fmt.Sprintf("$%d", len(args))
-	}
-
-	if filter.ChannelID != "" {
-		q += " AND channel_id = " + arg(filter.ChannelID)
-	}
-	if filter.Status != "" {
-		q += " AND status = " + arg(string(filter.Status))
-	}
-	q += " ORDER BY created_at DESC LIMIT " + arg(limit)
-
-	rows, err := r.pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, errs.Wrap(err, errs.CodeUnavailable, "could not list notification deliveries").WithOp(op)
-	}
-	defer rows.Close()
-
-	deliveries := []corenotification.Delivery{}
-	for rows.Next() {
-		d, err := scanDelivery(rows)
-		if err != nil {
-			return nil, errs.Wrap(err, errs.CodeInternal, "could not read a notification delivery").WithOp(op)
-		}
-		deliveries = append(deliveries, d)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, errs.Wrap(err, errs.CodeUnavailable, "could not list notification deliveries").WithOp(op)
-	}
-	return deliveries, nil
-}
-
-var (
-	_ corenotification.ChannelStore  = (*Repository)(nil)
-	_ corenotification.DeliveryStore = (*Repository)(nil)
-)

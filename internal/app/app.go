@@ -105,17 +105,15 @@ func New(cfg *config.Config, logger *slog.Logger) (*App, error) {
 		if err != nil {
 			return nil, errs.New(errs.CodeInvalidArgument, "notifications.encryption_key is invalid").WithOp(op)
 		}
-		notificationStore = lazyNotificationStore{pool: pool}
+		notificationStore = lazyNotificationStore{pool: pool, key: notificationKey}
 	}
 
 	incidentPipe := newIncidentPipeline(logger, pool)
 	notificationPipe := newNotificationPipeline(logger, pool, notificationKey)
-	// Alert transitions reach both the incident correlator and the
-	// notification dispatcher. Neither depends on the other — the same
-	// "independent consumers of one hook" shape as onEvent below.
+	// Alert transitions reach the incident correlator only. They no longer
+	// produce notifications: the notification evaluator replaces that path.
 	onTransition := func(ctx context.Context, entry corealert.HistoryEntry) {
 		incidentPipe.HandleAlertTransition(ctx, entry)
-		notificationPipe.HandleAlertTransition(ctx, entry)
 	}
 	alertPipe := newAlertPipeline(logger, pool, onTransition)
 	// Events reach both engines: the alert engine matches event rules, the
