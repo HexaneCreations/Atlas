@@ -420,8 +420,8 @@ jobs:
   #
   # No repository clone lives on the production server: this job checks out
   # the tag on the RUNNER and copies only docker-compose.prod.yml over —
-  # /root/atlas/.env.prod and secrets/atlas_db_password.txt are never
-  # git-tracked there, generated fresh by this job every deploy instead.
+  # /root/atlas/.env.prod and secrets/*.txt are never git-tracked there,
+  # written by this job every deploy instead.
   #
   # The GitHub "production" Environment is the single source of truth for
   # the whole production configuration: every non-secret ATLAS_* value is a
@@ -465,10 +465,18 @@ jobs:
 
       - name: Configure and deploy
         uses: appleboy/ssh-action@v1.0.3
+        env:
+          # Created ONCE (openssl rand -base64 32) and stored as a production
+          # Environment secret. This job only ever copies it to the server;
+          # it never generates one, so a deploy cannot rotate it and strand
+          # every stored channel secret. Passed through the environment
+          # rather than spliced into the script text.
+          ATLAS_NOTIFICATIONS_ENCRYPTION_KEY: ${{ secrets.NOTIFICATIONS_ENCRYPTION_KEY }}
         with:
           host: ${{ secrets.PROD_SERVER_HOST }}
           username: ${{ secrets.PROD_SERVER_USER }}
           key: ${{ secrets.PROD_SSH_PRIVATE_KEY }}
+          envs: ATLAS_NOTIFICATIONS_ENCRYPTION_KEY
           script: |
             set -euo pipefail
             cd /root/atlas
@@ -513,6 +521,24 @@ jobs:
             # own ATLAS_DATABASE_PASSWORD_FILE (baked into docker-compose.
             # prod.yml) points here.
             printf '%s' "${{ secrets.ATLAS_DATABASE_PASSWORD }}" > secrets/atlas_db_password.txt
+
+            # The notifications encryption key, copied verbatim from the
+            # production Environment secret. Fails the deploy — never
+            # generates a replacement — when the secret is missing or is not
+            # 32 bytes of base64, so a misconfigured secret cannot silently
+            # start atlas-server with notifications disabled or with a new
+            # key. Neither check prints the key.
+            if [ -z "${ATLAS_NOTIFICATIONS_ENCRYPTION_KEY:-}" ]; then
+              echo "the NOTIFICATIONS_ENCRYPTION_KEY production secret is not set" >&2
+              exit 1
+            fi
+            KEY_BYTES=$(printf '%s' "$ATLAS_NOTIFICATIONS_ENCRYPTION_KEY" | base64 -d 2>/dev/null | wc -c) || KEY_BYTES=0
+            if [ "$KEY_BYTES" -ne 32 ]; then
+              echo "the NOTIFICATIONS_ENCRYPTION_KEY production secret must be 32 bytes, base64-encoded" >&2
+              exit 1
+            fi
+            printf '%s' "$ATLAS_NOTIFICATIONS_ENCRYPTION_KEY" > secrets/atlas_notifications_key.txt
+            unset ATLAS_NOTIFICATIONS_ENCRYPTION_KEY KEY_BYTES
 
             # github.repository_owner, not a hardcoded name — GHCR accepts
             # any username paired with a valid token, so this only needs to
@@ -576,6 +602,16 @@ jobs:
             ACTUAL_OWNER=$(stat -c '%u:%g' secrets/atlas_db_password.txt)
             if [ "$ACTUAL_OWNER" != "$ATLAS_UID:$POSTGRES_GID" ]; then
               echo "secrets/atlas_db_password.txt is owned by $ACTUAL_OWNER, expected $ATLAS_UID:$POSTGRES_GID" >&2
+              exit 1
+            fi
+
+            # Only atlas-server mounts the notifications key, so only its
+            # UID can read it.
+            chown "$ATLAS_UID:$ATLAS_GID" secrets/atlas_notifications_key.txt
+            chmod 0400 secrets/atlas_notifications_key.txt
+            ACTUAL_OWNER=$(stat -c '%u:%g:%a' secrets/atlas_notifications_key.txt)
+            if [ "$ACTUAL_OWNER" != "$ATLAS_UID:$ATLAS_GID:400" ]; then
+              echo "secrets/atlas_notifications_key.txt is $ACTUAL_OWNER, expected $ATLAS_UID:$ATLAS_GID:400" >&2
               exit 1
             fi
 

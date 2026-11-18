@@ -160,11 +160,17 @@ services:
       - ${ATLAS_ENV_FILE:-.env.prod}
     secrets:
       - atlas_db_password
+      - atlas_notifications_key
     environment:
-      # The one value that must point at *this* stack rather than being a
-      # free-form setting: the file path Compose actually mounts the secret
-      # at. Everything else Atlas needs comes from .env.prod via env_file.
+      # The values that must point at *this* stack rather than being
+      # free-form settings: the file paths Compose actually mounts the
+      # secrets at. Everything else Atlas needs comes from .env.prod via
+      # env_file.
       ATLAS_DATABASE_PASSWORD_FILE: /run/secrets/atlas_db_password
+      # Encrypts notification channel secrets at rest. atlas-server only —
+      # postgres never mounts it. Missing or empty disables notifications
+      # (channel endpoints answer 503); it is never generated here.
+      ATLAS_NOTIFICATIONS_ENCRYPTION_KEY_FILE: /run/secrets/atlas_notifications_key
     networks:
       - atlas-internal
     # Not published: atlas-ui is the public entry point and reaches this
@@ -279,3 +285,9 @@ secrets:
   # the report for how to create this file; it must never be committed.
   atlas_db_password:
     file: ${ATLAS_DB_PASSWORD_FILE:-./secrets/atlas_db_password.txt}
+  # 32 random bytes, base64. Created once and kept as the production
+  # Environment secret NOTIFICATIONS_ENCRYPTION_KEY; the deploy job
+  # writes that same value here every deploy and never generates a new one.
+  # Changing it makes every stored channel secret undecryptable.
+  atlas_notifications_key:
+    file: ${ATLAS_NOTIFICATIONS_KEY_FILE:-./secrets/atlas_notifications_key.txt}
