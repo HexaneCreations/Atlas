@@ -213,7 +213,7 @@ func (f *fleetPipeline) Start(ctx context.Context) error {
 	}
 
 	f.wg.Add(1)
-	go f.pruneEnvelopesLoop(fleetRepo)
+	go f.pruneLoop(fleetRepo, metricRepo)
 
 	f.logger.InfoContext(ctx, "fleet listener ready", slog.String("addr", server.Addr()))
 	return nil
@@ -415,7 +415,9 @@ func (f *fleetPipeline) Stop(ctx context.Context) error {
 	return server.Stop(ctx)
 }
 
-func (f *fleetPipeline) pruneEnvelopesLoop(repo *storagefleet.Repository) {
+// pruneLoop applies application-driven retention to the plain (non-hyper)
+// tables the ingest path writes: ingested_envelopes and metric_latest.
+func (f *fleetPipeline) pruneLoop(repo *storagefleet.Repository, metricRepo *metric.Repository) {
 	defer f.wg.Done()
 	ticker := time.NewTicker(time.Hour)
 	defer ticker.Stop()
@@ -427,6 +429,9 @@ func (f *fleetPipeline) pruneEnvelopesLoop(repo *storagefleet.Repository) {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			if err := repo.PruneIngestedEnvelopes(ctx, time.Now().Add(-envelopeRetention)); err != nil {
 				f.logger.ErrorContext(ctx, "could not prune ingested_envelopes", slog.String("error", err.Error()))
+			}
+			if _, err := metricRepo.PruneLatest(ctx, time.Now().Add(-metric.LatestRetention)); err != nil {
+				f.logger.ErrorContext(ctx, "could not prune metric_latest", slog.String("error", err.Error()))
 			}
 			cancel()
 		}

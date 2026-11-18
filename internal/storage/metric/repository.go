@@ -93,6 +93,10 @@ func (r *Repository) InsertBatch(ctx context.Context, env transport.Envelope, ba
 			WithOp(op).WithDetail("collector_id", batch.CollectorID)
 	}
 
+	if err := upsertLatest(ctx, tx, env.Origin.NodeID, batch); err != nil {
+		return err
+	}
+
 	if err := tx.Commit(ctx); err != nil {
 		return errs.Wrap(err, errs.CodeUnavailable, "could not commit metric samples").WithOp(op)
 	}

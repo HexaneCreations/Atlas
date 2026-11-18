@@ -177,10 +177,10 @@ type LatestValue struct {
 // Latest returns the most recent value of every series on a node.
 //
 // This backs the overview page, where the question is "what is happening now"
-// rather than "what happened over time". DISTINCT ON is the direct expression
-// of that in PostgreSQL, and the lookback window keeps it reading only the
-// newest chunk instead of scanning history for series that have stopped
-// reporting.
+// rather than "what happened over time". It reads metric_latest, which holds
+// one row per (metric, collector_id, labels) series, so no DISTINCT ON over
+// history is needed; the lookback window still hides series that have
+// stopped reporting.
 func (r *Repository) Latest(ctx context.Context, nodeID string, within time.Duration) ([]LatestValue, error) {
 	const op = "metric.Repository.Latest"
 
@@ -189,11 +189,10 @@ func (r *Repository) Latest(ctx context.Context, nodeID string, within time.Dura
 	}
 
 	const q = `
-		SELECT DISTINCT ON (metric, collector_id, labels)
-		       metric, collector_id, unit, kind, labels, value, time
-		FROM metric_samples
+		SELECT metric, collector_id, unit, kind, labels, value, time
+		FROM metric_latest
 		WHERE node_id = $1 AND time > now() - $2::interval
-		ORDER BY metric, collector_id, labels, time DESC`
+		ORDER BY metric, collector_id, labels`
 
 	rows, err := r.pool.Query(ctx, q, nodeID, within)
 	if err != nil {
@@ -244,10 +243,12 @@ func (r *Repository) LatestForMetric(ctx context.Context, metric string, within 
 		within = 5 * time.Minute
 	}
 
+	// DISTINCT ON stays: metric_latest is keyed per collector, and this read
+	// has always collapsed the same series across collectors to its newest.
 	const q = `
 		SELECT DISTINCT ON (node_id, labels)
 		       node_id, labels, value, time
-		FROM metric_samples
+		FROM metric_latest
 		WHERE metric = $1 AND time > now() - $2::interval
 		ORDER BY node_id, labels, time DESC`
 

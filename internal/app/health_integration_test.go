@@ -44,9 +44,7 @@ func seedHealthScoreFixture(t *testing.T, pool *pgxpool.Pool, nodeID string) {
 	exec(`INSERT INTO alert_states (rule_id, node_id, series_key, state, value, updated_at)
 		VALUES ($1, $2, '', 'firing', 95, $3)`, ruleID, nodeID, now)
 
-	exec(`INSERT INTO metric_samples (time, node_id, collector_id, metric, value, unit, kind, labels)
-		VALUES ($1, $2, 'test', $3, 95, 'percent', 'gauge', '{}'::jsonb)`,
-		now, nodeID, "healthscore.test.cpu."+nodeID)
+	seedMetricSample(t, pool, now, nodeID, "healthscore.test.cpu."+nodeID, 95, "percent", "{}")
 
 	incidentID := "healthtest-incident-" + nodeID
 	exec(`INSERT INTO incidents (id, title, status, severity, opened_at, updated_at)

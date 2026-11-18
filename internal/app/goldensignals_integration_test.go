@@ -46,9 +46,7 @@ func TestGoldenSignalsHonestlyReportsLatencyUnavailableAndMeasuresTheRest(t *tes
 	}
 	sample := func(metric string, value float64, labels string) {
 		t.Helper()
-		exec(`INSERT INTO metric_samples (time, node_id, collector_id, metric, value, unit, kind, labels)
-			VALUES ($1, $2, 'test', $3, $4, 'na', 'gauge', $5::jsonb)`,
-			now, nodeID, metric, value, labels)
+		seedMetricSample(t, seedPool, now, nodeID, metric, value, "na", labels)
 	}
 
 	exec(`INSERT INTO nodes (node_id, hostname, cpu_cores, last_seen_at) VALUES ($1, $1, $2, $3)`, nodeID, 8, now)
