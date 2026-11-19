@@ -153,6 +153,9 @@ func (f *fakeUserAdmin) RevokeUserGrant(_ context.Context, userID, grantID, _ st
 	if !ok || g.UserID != userID {
 		return nil
 	}
+	if g.Role == user.RoleSuperadmin {
+		return user.ErrSuperadminNotRevocable
+	}
 	if grantID == f.lastAdminGrantID {
 		return user.ErrLastAdminGrant
 	}

@@ -10,7 +10,6 @@ package app_test
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"os"
 	"slices"
@@ -53,7 +52,6 @@ func TestNotificationEndpointsAreSuperadminOnlyAgainstTheRealSeed(t *testing.T) 
 		allow  bool
 	}{
 		{"fleet-wide superadmin", authenticatedTestClient(t, base, "superadmin"), true},
-		{"node-scoped superadmin", scopedTestClient(t, base, "superadmin", fmt.Sprintf("notif-node-%d", time.Now().UnixNano()), false), false},
 		{"admin", authenticatedTestClient(t, base, "admin"), false},
 		{"admin with full-access bundle", fullAccessAdmin, false},
 		{"operator", authenticatedTestClient(t, base, "operator"), false},

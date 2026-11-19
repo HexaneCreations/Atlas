@@ -179,6 +179,31 @@ var ErrLastAdminGrant = errs.New(errs.CodeFailedPrecondition,
 var ErrSuperadminNotGrantable = errs.New(errs.CodeInvalidArgument,
 	"the superadmin role cannot be granted through this endpoint")
 
+// ErrSuperadminExists is returned when a superadmin grant is requested while
+// another user already holds the one active superadmin grant (enforced by
+// migrations/0022_single_superadmin.sql). Replacing the holder is the CLI's
+// `user transfer-superadmin`, never a second grant.
+var ErrSuperadminExists = errs.New(errs.CodeFailedPrecondition,
+	"a superadmin already exists; use `atlas-server user transfer-superadmin` to replace them")
+
+// ErrSuperadminMustBeFleetWide is returned for a node-scoped superadmin
+// grant: the protected tier is a fleet concept (only fleet-wide grants count
+// as superadmin), so a node-scoped one could only ever be a mistake.
+var ErrSuperadminMustBeFleetWide = errs.New(errs.CodeInvalidArgument,
+	"the superadmin role can only be granted fleet-wide")
+
+// ErrSuperadminNotRevocable is returned by the API's revoke-role path for a
+// superadmin grant, from every caller including the superadmin. Losing the
+// only superadmin through a misclick has no API-side recovery; the CLI's
+// transfer-superadmin is the one way to replace it.
+var ErrSuperadminNotRevocable = errs.New(errs.CodeInvalidArgument,
+	"the superadmin role cannot be revoked through the API; use `atlas-server user transfer-superadmin`")
+
+// ErrSuperadminNotDisableable is returned by the API's disable path for the
+// superadmin's account, from every caller including the superadmin.
+var ErrSuperadminNotDisableable = errs.New(errs.CodeInvalidArgument,
+	"the superadmin account cannot be disabled through the API; use `atlas-server user transfer-superadmin` first")
+
 // ErrProtectedSuperadmin is returned when a non-superadmin actor attempts a
 // target-specific user-management action — grant or revoke a role, disable,
 // enable, reset password, force logout, view audit, or change page access

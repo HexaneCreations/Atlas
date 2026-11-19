@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"time"
 
+	corepageauthz "github.com/hexane/atlas/internal/core/pageauthz"
 	coreuser "github.com/hexane/atlas/internal/core/user"
 	"github.com/hexane/atlas/internal/platform/errs"
 	"github.com/hexane/atlas/internal/platform/id"
@@ -398,6 +399,131 @@ func (r *Repository) IsSuperadmin(ctx context.Context, userID string) (bool, err
 	return exists, nil
 }
 
+// fullAccessBundle is the page bundle migrations/0016_page_access_bootstrap.sql
+// seeds and migrations/0019_superadmin_role.sql expects the superadmin to hold.
+const fullAccessBundle = "full-access"
+
+// SuperadminTransfer reports what [Repository.TransferSuperadmin] changed.
+type SuperadminTransfer struct {
+	// PreviousUserID is the user whose superadmin grant was revoked; "" when
+	// there was no superadmin.
+	PreviousUserID string
+	// FullAccessAssigned is true when the new superadmin was given the
+	// fleet-wide full-access bundle by this call.
+	FullAccessAssigned bool
+	// FullAccessMissing is true when the full-access bundle no longer exists,
+	// so the new superadmin's page access must be granted separately.
+	FullAccessMissing bool
+}
+
+// TransferSuperadmin moves the one active superadmin grant to toUserID in a
+// single transaction: it revokes the current holder's grant (if any), grants
+// toUserID fleet-wide superadmin, and assigns the fleet-wide full-access
+// bundle when toUserID lacks it, auditing each change as actorUserID.
+//
+// fromUserID must name the current holder, or be empty when there is none —
+// a confirmation, so a typo cannot silently unseat the wrong account. The
+// new holder must exist and be enabled. The previous holder keeps every
+// other grant they hold. This is the CLI's trust-root path; no API route
+// calls it.
+func (r *Repository) TransferSuperadmin(ctx context.Context, toUserID, fromUserID, actorUserID string, now time.Time) (SuperadminTransfer, error) {
+	const op = "user.Repository.TransferSuperadmin"
+	if toUserID == "" {
+		return SuperadminTransfer{}, errs.New(errs.CodeInvalidArgument, "a transfer must name the new superadmin").WithOp(op)
+	}
+
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return SuperadminTransfer{}, errs.Wrap(err, errs.CodeUnavailable, "could not begin the transfer").WithOp(op)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var currentGrantID, currentUserID string
+	err = tx.QueryRow(ctx, `
+		SELECT id, user_id FROM user_node_roles
+		WHERE role_name = $1 AND revoked_at IS NULL
+		FOR UPDATE`, coreuser.RoleSuperadmin).Scan(&currentGrantID, &currentUserID)
+	switch {
+	case err == pgx.ErrNoRows:
+	case err != nil:
+		return SuperadminTransfer{}, errs.Wrap(err, errs.CodeUnavailable, "could not look up the current superadmin").WithOp(op)
+	}
+
+	switch {
+	case currentUserID == "" && fromUserID != "":
+		return SuperadminTransfer{}, errs.New(errs.CodeFailedPrecondition,
+			"there is no current superadmin, but --confirm-from-user-id named %q", fromUserID).WithOp(op)
+	case currentUserID != "" && fromUserID != currentUserID:
+		return SuperadminTransfer{}, errs.New(errs.CodeFailedPrecondition,
+			"the current superadmin is %s; pass it as --confirm-from-user-id to replace them", currentUserID).WithOp(op)
+	case currentUserID == toUserID:
+		return SuperadminTransfer{}, errs.New(errs.CodeFailedPrecondition, "user %s is already the superadmin", toUserID).WithOp(op)
+	}
+
+	var disabledAt *time.Time
+	err = tx.QueryRow(ctx, `SELECT disabled_at FROM users WHERE id = $1 FOR UPDATE`, toUserID).Scan(&disabledAt)
+	switch {
+	case err == pgx.ErrNoRows:
+		return SuperadminTransfer{}, errs.New(errs.CodeNotFound, "no such user").WithOp(op)
+	case err != nil:
+		return SuperadminTransfer{}, errs.Wrap(err, errs.CodeUnavailable, "could not look up the new superadmin").WithOp(op)
+	case disabledAt != nil:
+		return SuperadminTransfer{}, errs.New(errs.CodeFailedPrecondition, "user %s is disabled; enable them first", toUserID).WithOp(op)
+	}
+
+	grantDetail := map[string]any{"role": coreuser.RoleSuperadmin, "fleet_wide": true, "via": "transfer_superadmin"}
+	if currentGrantID != "" {
+		if _, err := tx.Exec(ctx, `
+			UPDATE user_node_roles SET revoked_at = $2, revoked_by = NULLIF($3, '') WHERE id = $1`,
+			currentGrantID, now, actorUserID); err != nil {
+			return SuperadminTransfer{}, errs.Wrap(err, errs.CodeUnavailable, "could not revoke the current superadmin").WithOp(op)
+		}
+		if err := insertAudit(ctx, tx, actorUserID, currentUserID, coreuser.AuditActionRevokeRole, grantDetail, now); err != nil {
+			return SuperadminTransfer{}, err
+		}
+	}
+
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO user_node_roles (id, user_id, node_id, role_name, granted_at, granted_by)
+		VALUES ($1, $2, NULL, $3, $4, NULLIF($5, ''))`,
+		id.New(), toUserID, coreuser.RoleSuperadmin, now, actorUserID); err != nil {
+		return SuperadminTransfer{}, errs.Wrap(err, errs.CodeUnavailable, "could not grant the new superadmin").WithOp(op)
+	}
+	if err := insertAudit(ctx, tx, actorUserID, toUserID, coreuser.AuditActionGrantRole, grantDetail, now); err != nil {
+		return SuperadminTransfer{}, err
+	}
+
+	out := SuperadminTransfer{PreviousUserID: currentUserID}
+	var bundleExists bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM role_access WHERE name = $1)`, fullAccessBundle).Scan(&bundleExists); err != nil {
+		return SuperadminTransfer{}, errs.Wrap(err, errs.CodeUnavailable, "could not look up the full-access bundle").WithOp(op)
+	}
+	if !bundleExists {
+		out.FullAccessMissing = true
+	} else {
+		tag, err := tx.Exec(ctx, `
+			INSERT INTO user_role_access (id, user_id, role_access_name, node_id, granted_at, granted_by)
+			VALUES ($1, $2, $3, NULL, $4, NULLIF($5, ''))
+			ON CONFLICT (user_id, role_access_name, COALESCE(node_id, '')) WHERE revoked_at IS NULL DO NOTHING`,
+			id.New(), toUserID, fullAccessBundle, now, actorUserID)
+		if err != nil {
+			return SuperadminTransfer{}, errs.Wrap(err, errs.CodeUnavailable, "could not assign the full-access bundle").WithOp(op)
+		}
+		if tag.RowsAffected() == 1 {
+			out.FullAccessAssigned = true
+			if err := insertAudit(ctx, tx, actorUserID, toUserID, corepageauthz.AuditActionAssignRoleAccess,
+				map[string]any{"role_access": fullAccessBundle, "fleet_wide": true, "via": "transfer_superadmin"}, now); err != nil {
+				return SuperadminTransfer{}, err
+			}
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return SuperadminTransfer{}, errs.Wrap(err, errs.CodeUnavailable, "could not commit the transfer").WithOp(op)
+	}
+	return out, nil
+}
+
 // isActiveFleetWideAdmin reports whether userID currently holds an active,
 // unrevoked fleet-wide admin grant.
 func isActiveFleetWideAdmin(ctx context.Context, tx pgx.Tx, userID string) (bool, error) {
@@ -584,8 +710,17 @@ func (r *Repository) HasPermission(ctx context.Context, userID, nodeID string, p
 // re-run of the same `user grant` command does not create a second row, and
 // (via the RETURNING-gated audit insert below) does not write a second
 // audit entry either.
+//
+// A superadmin grant must be fleet-wide ([coreuser.ErrSuperadminMustBeFleetWide])
+// and is refused while another user holds the active one
+// ([coreuser.ErrSuperadminExists], backed by idx_user_node_roles_one_superadmin);
+// re-granting it to the current holder stays an idempotent no-op.
 func (r *Repository) Grant(ctx context.Context, spec coreuser.GrantSpec, now time.Time) error {
 	const op = "user.Repository.Grant"
+
+	if spec.Role == coreuser.RoleSuperadmin && !spec.FleetWide {
+		return coreuser.ErrSuperadminMustBeFleetWide
+	}
 
 	var nodeID any
 	if !spec.FleetWide {
@@ -616,6 +751,9 @@ func (r *Repository) Grant(ctx context.Context, spec coreuser.GrantSpec, now tim
 		id.New(), spec.UserID, nodeID, spec.Role, now, spec.GrantedBy,
 		id.New(), coreuser.AuditActionGrantRole, payload,
 	); err != nil {
+		if isUniqueViolation(err) && spec.Role == coreuser.RoleSuperadmin {
+			return coreuser.ErrSuperadminExists
+		}
 		return errs.Wrap(err, errs.CodeUnavailable, "could not record the role grant").WithOp(op)
 	}
 	return nil
@@ -634,7 +772,8 @@ func (r *Repository) RevokeGrant(ctx context.Context, grantID, revokedBy string,
 // that belongs to anyone other than userID is treated exactly like an
 // unknown id — nothing changes and no error is returned — so a caller
 // addressing /users/{userID}/grants/{grantID} can never reach another
-// user's grant through a mismatched path.
+// user's grant through a mismatched path. A superadmin grant is refused
+// with [coreuser.ErrSuperadminNotRevocable].
 func (r *Repository) RevokeUserGrant(ctx context.Context, userID, grantID, revokedBy string, now time.Time) error {
 	const op = "user.Repository.RevokeUserGrant"
 	if userID == "" {
@@ -663,6 +802,12 @@ func (r *Repository) revokeGrant(ctx context.Context, ownerID *string, grantID, 
 		return nil
 	case err != nil:
 		return errs.Wrap(err, errs.CodeUnavailable, "could not look up the role grant").WithOp(op)
+	}
+
+	// The user-scoped (API) path never revokes a superadmin grant, for any
+	// caller; only the CLI's unscoped path can.
+	if ownerID != nil && roleName == coreuser.RoleSuperadmin {
+		return coreuser.ErrSuperadminNotRevocable
 	}
 
 	if roleName == coreuser.RoleAdmin && nodeID == nil {

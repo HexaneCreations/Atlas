@@ -98,23 +98,51 @@ func routePattern(e ast.Expr) (string, bool) {
 	return "", false
 }
 
-// Superadmin acting on another superadmin is allowed today — the guard
-// returns early when the actor is a superadmin, whoever the target is
-// (guardSuperadminTarget's actorSuper branch). Pinned so a change is
-// deliberate; the Postgres-backed equivalent is in internal/app.
+// The guard itself still lets a superadmin act on another superadmin — it
+// returns early when the actor is a superadmin (guardSuperadminTarget's
+// actorSuper branch). Since migrations/0022_single_superadmin.sql a second
+// superadmin cannot exist in Postgres, so this pins the guard logic only:
+// every action passes the guard, and only the two superadmin-specific
+// refusals (revoke the superadmin grant, disable the superadmin) answer 400,
+// from the guard-passing caller too.
 func TestSuperadminCanActOnAnotherSuperadmin(t *testing.T) {
 	t.Parallel()
 
+	refused := map[string]bool{"revoke role": true, "disable": true}
 	for _, a := range targetActions(superadminUserID, superadminGrant) {
 		t.Run(a.name, func(t *testing.T) {
 			base, admin, client := newSuperadminGuardServer(t, true)
-			if code := do(t, client, base, a); code >= 400 {
-				t.Errorf("status = %d, want success — a superadmin may act on another superadmin today", code)
+			code := do(t, client, base, a)
+			if refused[a.name] {
+				if code != http.StatusBadRequest {
+					t.Errorf("status = %d, want 400 — the API never revokes or disables a superadmin", code)
+				}
+				if admin.grants[superadminGrant].RevokedAt != nil || admin.users[superadminUserID].Disabled() {
+					t.Error("the superadmin changed despite the refusal")
+				}
+				return
 			}
-			if a.method == http.MethodDelete && admin.grants[superadminGrant].RevokedAt == nil {
-				t.Error("the other superadmin's grant was not revoked")
+			if code >= 400 {
+				t.Errorf("status = %d, want success — the guard lets a superadmin through", code)
 			}
 		})
+	}
+}
+
+// The superadmin cannot revoke their own superadmin grant through the API —
+// protectTarget lets an actor act on themselves, so this is the refusal that
+// stops it.
+func TestSuperadminCannotRevokeTheirOwnSuperadminGrant(t *testing.T) {
+	t.Parallel()
+
+	base, admin, client := newSuperadminGuardServer(t, true)
+	actorID := admin.grants["g-actor"].UserID
+	code := do(t, client, base, guardAction{method: http.MethodDelete, path: "/users/" + actorID + "/grants/g-actor"})
+	if code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 (user.ErrSuperadminNotRevocable)", code)
+	}
+	if admin.grants["g-actor"].RevokedAt != nil {
+		t.Error("the superadmin's own grant was revoked")
 	}
 }
 

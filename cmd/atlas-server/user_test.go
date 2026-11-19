@@ -29,3 +29,10 @@ func TestValidateGrantScopeRejectsBoth(t *testing.T) {
 		t.Error("validateGrantScope(node-1, true) succeeded, want an error — a grant cannot be both scoped and fleet-wide")
 	}
 }
+
+func TestTransferSuperadminRequiresATarget(t *testing.T) {
+	err := userTransferSuperadmin("unused.yaml", nil)
+	if err == nil || err.Error() != "--to-user-id is required" {
+		t.Errorf("userTransferSuperadmin(no flags) = %v, want the --to-user-id error before any config or database access", err)
+	}
+}

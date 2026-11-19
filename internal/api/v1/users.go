@@ -341,6 +341,11 @@ func (h *Handler) DisableUser(w http.ResponseWriter, r *http.Request) error {
 	if targetID == actorID {
 		return errs.New(errs.CodeInvalidArgument, "you cannot disable your own account").WithOp(op)
 	}
+	if super, err := store.IsSuperadmin(r.Context(), targetID); err != nil {
+		return err
+	} else if super {
+		return user.ErrSuperadminNotDisableable
+	}
 	if err := store.DisableUser(r.Context(), targetID, actorID, time.Now()); err != nil {
 		return err
 	}

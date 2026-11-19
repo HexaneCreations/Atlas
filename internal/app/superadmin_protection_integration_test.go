@@ -2,8 +2,9 @@
 
 // The superadmin protection rule against real Postgres, through the real
 // HTTP chain: an admin can never change anything of a superadmin (roles,
-// page access, bundles, password, sessions, audit), while admin-on-admin,
-// superadmin-on-admin and superadmin-on-superadmin keep working. Every
+// page access, bundles, password, sessions, audit), while admin-on-admin and
+// superadmin-on-admin keep working, and the API never revokes or disables
+// the superadmin, whoever asks. Every
 // refusal is checked for "no change" by re-reading every table the action
 // could touch, including user_audit_log row counts.
 package app_test
@@ -80,6 +81,9 @@ func (f *protectionFixture) createUser(label string, grants []roleGrant, pages [
 		f.t.Fatalf("ByUsername: %v", err)
 	}
 	for _, g := range grants {
+		if g.role == coreuser.RoleSuperadmin {
+			releaseSuperadminSlot(f.t, f.pool)
+		}
 		spec := coreuser.GrantSpec{UserID: u.ID, Role: g.role, NodeID: g.nodeID, FleetWide: g.nodeID == "", GrantedBy: "integration-test"}
 		if err := f.users.Grant(ctx, spec, time.Now()); err != nil {
 			f.t.Fatalf("Grant(%s): %v", g.role, err)
@@ -336,9 +340,11 @@ func TestAdminCannotChangeASuperadmin(t *testing.T) {
 	}
 }
 
-// The guard's precondition is "target holds superadmin": admin-on-admin,
-// superadmin-on-admin, and (pinned, today's behaviour) superadmin-on-
-// another-superadmin all succeed and actually change the target.
+// The guard's precondition is "target holds superadmin": admin-on-admin and
+// superadmin-on-admin succeed and actually change the target. There is no
+// superadmin-on-another-superadmin pair: migrations/0022_single_superadmin.sql
+// makes a second superadmin impossible (the guard-logic pin lives in
+// internal/api/v1's TestSuperadminCanActOnAnotherSuperadmin).
 func TestProtectionLeavesOtherPairsWorking(t *testing.T) {
 	f := newProtectionFixture(t)
 	admin, adminID := f.actor("fleet-admin", roleGrant{role: coreuser.RoleAdmin})
@@ -352,7 +358,6 @@ func TestProtectionLeavesOtherPairsWorking(t *testing.T) {
 	}{
 		{"admin on admin", admin, adminID, false},
 		{"superadmin on admin", super, superID, false},
-		{"superadmin on another superadmin", super, superID, true},
 	}
 	for _, p := range pairs {
 		for _, a := range protectedActions() {
@@ -418,6 +423,40 @@ func TestRevokeWithAnotherUsersIDBehavesLikeUnknownID(t *testing.T) {
 			}
 			if after := f.state(plain.id, adminID); after != plainBefore {
 				t.Errorf("path user changed:\nbefore %+v\nafter  %+v", plainBefore, after)
+			}
+		})
+	}
+}
+
+// The API never revokes the superadmin grant or disables the superadmin's
+// account — not even at the superadmin's own request, which protectTarget
+// would otherwise let through as a self-action. Nothing changes.
+func TestTheAPINeverRevokesOrDisablesTheSuperadmin(t *testing.T) {
+	f := newProtectionFixture(t)
+	super, superID := f.actor("superadmin", roleGrant{role: coreuser.RoleSuperadmin})
+	var grantID string
+	if err := f.pool.QueryRow(context.Background(), `
+		SELECT id FROM user_node_roles WHERE user_id = $1 AND role_name = 'superadmin' AND revoked_at IS NULL`,
+		superID).Scan(&grantID); err != nil {
+		t.Fatalf("lookup superadmin grant: %v", err)
+	}
+
+	for _, c := range []struct {
+		name, method, path, message string
+	}{
+		{"revoke own superadmin grant", http.MethodDelete, "/users/" + superID + "/grants/" + grantID,
+			"the superadmin role cannot be revoked through the API"},
+		{"disable own account", http.MethodPost, "/users/" + superID + "/disable",
+			"you cannot disable your own account"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			before := f.state(superID, superID)
+			code, body := f.do(super, c.method, c.path, "")
+			if code != http.StatusBadRequest || !strings.Contains(body, c.message) {
+				t.Errorf("status = %d, body %s; want 400 containing %q", code, body, c.message)
+			}
+			if after := f.state(superID, superID); after != before {
+				t.Errorf("superadmin changed despite the refusal:\nbefore %+v\nafter  %+v", before, after)
 			}
 		})
 	}

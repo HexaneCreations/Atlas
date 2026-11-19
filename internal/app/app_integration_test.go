@@ -192,6 +192,9 @@ func authenticatedTestClient(t *testing.T, base, role string) *http.Client {
 	if err != nil {
 		t.Fatalf("ByUsername: %v", err)
 	}
+	if role == coreuser.RoleSuperadmin {
+		releaseSuperadminSlot(t, pool)
+	}
 	grant := coreuser.GrantSpec{UserID: u.ID, FleetWide: true, Role: role, GrantedBy: "integration-test"}
 	if err := repo.Grant(context.Background(), grant, time.Now()); err != nil {
 		t.Fatalf("Grant: %v", err)
@@ -225,6 +228,20 @@ func authenticatedTestClient(t *testing.T, base, role string) *http.Client {
 	}
 
 	return client
+}
+
+// releaseSuperadminSlot revokes every active superadmin grant so a fixture
+// can grant a fresh one. migrations/0022_single_superadmin.sql allows exactly
+// one, and this package's tests share one persistent database across tests
+// and reruns; they run sequentially, so the holder a fixture replaces is
+// always one an earlier test left behind.
+func releaseSuperadminSlot(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	if _, err := pool.Exec(context.Background(), `
+		UPDATE user_node_roles SET revoked_at = now(), revoked_by = 'integration-test'
+		WHERE role_name = 'superadmin' AND revoked_at IS NULL`); err != nil {
+		t.Fatalf("release the superadmin slot: %v", err)
+	}
 }
 
 func getJSON(t *testing.T, url string) (int, map[string]any) {

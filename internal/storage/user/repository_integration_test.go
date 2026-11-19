@@ -12,6 +12,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"slices"
 	"testing"
 	"time"
 
@@ -28,6 +29,14 @@ import (
 const testDatabaseURLEnv = "ATLAS_TEST_DATABASE_URL"
 
 func newRepository(t *testing.T) *user.Repository {
+	t.Helper()
+	repo, _ := newRepositoryWithPool(t)
+	return repo
+}
+
+// newRepositoryWithPool is [newRepository] plus the pool, for tests that
+// set up state with direct SQL.
+func newRepositoryWithPool(t *testing.T) (*user.Repository, *pgxpool.Pool) {
 	t.Helper()
 
 	dsn := os.Getenv(testDatabaseURLEnv)
@@ -80,7 +89,7 @@ func newRepository(t *testing.T) *user.Repository {
 		t.Fatalf("apply migrations: %v", err)
 	}
 
-	return user.NewRepository(pool.DB())
+	return user.NewRepository(pool.DB()), pool.DB()
 }
 
 func createTestUser(t *testing.T, repo *user.Repository, username string) coreuser.User {
@@ -847,26 +856,101 @@ func TestSuperadminGrantRoundTripsAndHoldsEveryAdminPermission(t *testing.T) {
 	}
 }
 
-// A node-scoped superadmin grant (which the manual bootstrap never creates,
-// but nothing at the storage layer forbids) does not satisfy IsSuperadmin —
-// the protected tier is a fleet concept, the same shape as the last-admin
-// guard's isActiveFleetWideAdmin.
-func TestIsSuperadminIgnoresANodeScopedGrant(t *testing.T) {
-	repo := newRepository(t)
+// A node-scoped superadmin grant is refused before it reaches the database,
+// and the CHECK constraint from migrations/0022_single_superadmin.sql backs
+// that up against a direct INSERT.
+func TestGrantRefusesANodeScopedSuperadmin(t *testing.T) {
+	repo, pool := newRepositoryWithPool(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
 	u := createTestUser(t, repo, "uma-node-super")
+
 	spec := coreuser.GrantSpec{UserID: u.ID, NodeID: "node-1", Role: coreuser.RoleSuperadmin, GrantedBy: "test"}
-	if err := repo.Grant(ctx, spec, now); err != nil {
-		t.Fatalf("Grant(superadmin, node-scoped): %v", err)
+	if err := repo.Grant(ctx, spec, now); !errs.Is(err, coreuser.ErrSuperadminMustBeFleetWide) {
+		t.Fatalf("Grant(superadmin, node-scoped) = %v, want ErrSuperadminMustBeFleetWide", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO user_node_roles (id, user_id, node_id, role_name) VALUES ('raw-scoped', $1, 'node-1', 'superadmin')`, u.ID); err == nil {
+		t.Error("a direct node-scoped superadmin INSERT succeeded; the CHECK constraint must refuse it")
+	}
+	if is, err := repo.IsSuperadmin(ctx, u.ID); err != nil || is {
+		t.Errorf("IsSuperadmin = %v, %v; want false, nil", is, err)
+	}
+}
+
+// Exactly one active superadmin grant: a second user is refused with
+// ErrSuperadminExists, re-granting the holder is an idempotent no-op, a
+// disabled holder still holds the slot, and a revoked grant frees it.
+func TestGrantAllowsOnlyOneActiveSuperadmin(t *testing.T) {
+	repo, pool := newRepositoryWithPool(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	holder := createTestUser(t, repo, "holly-holder")
+	other := createTestUser(t, repo, "otto-other")
+	grantFleetSuperadmin(t, repo, holder.ID, now)
+
+	second := coreuser.GrantSpec{UserID: other.ID, FleetWide: true, Role: coreuser.RoleSuperadmin, GrantedBy: "test"}
+	if err := repo.Grant(ctx, second, now); !errs.Is(err, coreuser.ErrSuperadminExists) {
+		t.Fatalf("Grant(second superadmin) = %v, want ErrSuperadminExists", err)
+	}
+	if is, _ := repo.IsSuperadmin(ctx, other.ID); is {
+		t.Fatal("the refused user became a superadmin")
 	}
 
-	is, err := repo.IsSuperadmin(ctx, u.ID)
-	if err != nil {
-		t.Fatalf("IsSuperadmin: %v", err)
+	auditBefore := auditCount(t, repo, holder.ID)
+	grantFleetSuperadmin(t, repo, holder.ID, now)
+	if got := auditCount(t, repo, holder.ID); got != auditBefore {
+		t.Errorf("re-grant to the holder wrote %d audit rows, want 0", got-auditBefore)
 	}
-	if is {
-		t.Error("IsSuperadmin true for a node-scoped grant; it must require fleet-wide")
+
+	if _, err := pool.Exec(ctx, `UPDATE users SET disabled_at = now() WHERE id = $1`, holder.ID); err != nil {
+		t.Fatalf("disable holder: %v", err)
+	}
+	if err := repo.Grant(ctx, second, now); !errs.Is(err, coreuser.ErrSuperadminExists) {
+		t.Fatalf("Grant(second superadmin, holder disabled) = %v, want ErrSuperadminExists — a disabled holder keeps the slot", err)
+	}
+
+	if _, err := pool.Exec(ctx, `
+		UPDATE user_node_roles SET revoked_at = now() WHERE user_id = $1 AND role_name = 'superadmin'`, holder.ID); err != nil {
+		t.Fatalf("revoke holder: %v", err)
+	}
+	if err := repo.Grant(ctx, second, now); err != nil {
+		t.Fatalf("Grant(superadmin) after the holder's grant was revoked: %v", err)
+	}
+	if is, _ := repo.IsSuperadmin(ctx, other.ID); !is {
+		t.Error("the new grant did not make the user a superadmin")
+	}
+}
+
+// The API's user-scoped revoke never removes a superadmin grant, whoever
+// calls it; the CLI's unscoped RevokeGrant still can.
+func TestRevokeUserGrantRefusesASuperadminGrant(t *testing.T) {
+	repo := newRepository(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	u := createTestUser(t, repo, "sam-super")
+	grantFleetSuperadmin(t, repo, u.ID, now)
+	grants, err := repo.ListGrants(ctx, u.ID)
+	if err != nil || len(grants) != 1 {
+		t.Fatalf("ListGrants = %v, %v; want one grant", grants, err)
+	}
+	auditBefore := auditCount(t, repo, u.ID)
+
+	if err := repo.RevokeUserGrant(ctx, u.ID, grants[0].ID, u.ID, now); !errs.Is(err, coreuser.ErrSuperadminNotRevocable) {
+		t.Fatalf("RevokeUserGrant(superadmin) = %v, want ErrSuperadminNotRevocable", err)
+	}
+	if is, _ := repo.IsSuperadmin(ctx, u.ID); !is {
+		t.Fatal("the superadmin grant was revoked through the user-scoped path")
+	}
+	if got := auditCount(t, repo, u.ID); got != auditBefore {
+		t.Errorf("a refused revoke wrote %d audit rows", got-auditBefore)
+	}
+
+	if err := repo.RevokeGrant(ctx, grants[0].ID, "operator", now); err != nil {
+		t.Fatalf("RevokeGrant(superadmin, CLI path): %v", err)
+	}
+	if is, _ := repo.IsSuperadmin(ctx, u.ID); is {
+		t.Error("the CLI path did not revoke the superadmin grant")
 	}
 }
 
@@ -980,16 +1064,132 @@ func TestNotificationsManageIsHeldByFleetWideSuperadminOnly(t *testing.T) {
 		}
 	}
 
-	scoped := createTestUser(t, repo, "notif-node-super")
-	spec := coreuser.GrantSpec{UserID: scoped.ID, NodeID: "node-1", Role: coreuser.RoleSuperadmin, GrantedBy: "test"}
+	// A node-scoped grant of any role holding the permission would be the
+	// fleet-wide-only check's failure case; superadmin can no longer be
+	// node-scoped at all (TestGrantRefusesANodeScopedSuperadmin), so the
+	// check is exercised with a node-scoped admin, which lacks it anyway.
+	scoped := createTestUser(t, repo, "notif-node-admin")
+	spec := coreuser.GrantSpec{UserID: scoped.ID, NodeID: "node-1", Role: coreuser.RoleAdmin, GrantedBy: "test"}
 	if err := repo.Grant(ctx, spec, now); err != nil {
-		t.Fatalf("Grant(superadmin, node-scoped): %v", err)
+		t.Fatalf("Grant(admin, node-scoped): %v", err)
 	}
 	ok, err := repo.HasPermission(ctx, scoped.ID, "", coreuser.PermissionNotificationsManage)
 	if err != nil {
-		t.Fatalf("HasPermission(node-scoped superadmin): %v", err)
+		t.Fatalf("HasPermission(node-scoped admin): %v", err)
 	}
 	if ok {
-		t.Error("a node-scoped superadmin grant satisfied a fleet-wide-only check")
+		t.Error("a node-scoped grant satisfied a fleet-wide-only check")
+	}
+}
+
+func auditActions(t *testing.T, repo *user.Repository, userID string) []string {
+	t.Helper()
+	entries, err := repo.ListAudit(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("ListAudit: %v", err)
+	}
+	out := make([]string, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, e.Action)
+	}
+	slices.Sort(out)
+	return out
+}
+
+// TransferSuperadmin moves the one grant atomically: bootstrap when there is
+// none, replace when --confirm-from-user-id names the holder, and refuse
+// (changing nothing) on a wrong or missing confirmation, the holder itself,
+// or a disabled or unknown target.
+func TestTransferSuperadmin(t *testing.T) {
+	repo, pool := newRepositoryWithPool(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	first := createTestUser(t, repo, "fran-first")
+	second := createTestUser(t, repo, "seb-second")
+	grantFleetAdmin(t, repo, first.ID, now)
+
+	if _, err := repo.TransferSuperadmin(ctx, first.ID, second.ID, "operator", now); errs.CodeOf(err) != errs.CodeFailedPrecondition {
+		t.Fatalf("transfer naming a holder when there is none = %v, want FailedPrecondition", err)
+	}
+
+	res, err := repo.TransferSuperadmin(ctx, first.ID, "", "operator", now)
+	if err != nil {
+		t.Fatalf("bootstrap transfer: %v", err)
+	}
+	if res.PreviousUserID != "" || !res.FullAccessAssigned || res.FullAccessMissing {
+		t.Errorf("bootstrap result = %+v, want no previous holder and full-access assigned", res)
+	}
+	if is, _ := repo.IsSuperadmin(ctx, first.ID); !is {
+		t.Fatal("bootstrap transfer did not make the user a superadmin")
+	}
+	if got, want := auditActions(t, repo, first.ID), []string{"assign_role_access", "grant_role", "grant_role"}; !slices.Equal(got, want) {
+		t.Errorf("audit for first = %v, want %v (admin grant + superadmin grant + bundle)", got, want)
+	}
+
+	snapshot := func() string {
+		var s string
+		if err := pool.QueryRow(ctx, `
+			SELECT coalesce(string_agg(id || ':' || user_id || ':' || coalesce(revoked_at::text, ''), ',' ORDER BY id), '')
+			FROM user_node_roles WHERE role_name = 'superadmin'`).Scan(&s); err != nil {
+			t.Fatalf("snapshot: %v", err)
+		}
+		var n int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM user_audit_log`).Scan(&n); err != nil {
+			t.Fatalf("audit count: %v", err)
+		}
+		return fmt.Sprintf("%s|%d", s, n)
+	}
+	disabled := createTestUser(t, repo, "dora-disabled")
+	if _, err := pool.Exec(ctx, `UPDATE users SET disabled_at = now() WHERE id = $1`, disabled.ID); err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+	refusals := []struct {
+		name     string
+		to, from string
+		code     errs.Code
+	}{
+		{"missing confirmation", second.ID, "", errs.CodeFailedPrecondition},
+		{"wrong confirmation", second.ID, second.ID, errs.CodeFailedPrecondition},
+		{"already the holder", first.ID, first.ID, errs.CodeFailedPrecondition},
+		{"disabled target", disabled.ID, first.ID, errs.CodeFailedPrecondition},
+		{"unknown target", "no-such-user", first.ID, errs.CodeNotFound},
+		{"empty target", "", first.ID, errs.CodeInvalidArgument},
+	}
+	for _, r := range refusals {
+		before := snapshot()
+		if _, err := repo.TransferSuperadmin(ctx, r.to, r.from, "operator", now); errs.CodeOf(err) != r.code {
+			t.Errorf("%s: err = %v, want %s", r.name, err, r.code)
+		}
+		if after := snapshot(); after != before {
+			t.Errorf("%s: state changed despite the refusal:\nbefore %s\nafter  %s", r.name, before, after)
+		}
+	}
+
+	res, err = repo.TransferSuperadmin(ctx, second.ID, first.ID, "operator", now)
+	if err != nil {
+		t.Fatalf("transfer: %v", err)
+	}
+	if res.PreviousUserID != first.ID || !res.FullAccessAssigned {
+		t.Errorf("transfer result = %+v, want previous %s and full-access assigned", res, first.ID)
+	}
+	if is, _ := repo.IsSuperadmin(ctx, first.ID); is {
+		t.Error("the previous holder is still a superadmin")
+	}
+	if is, _ := repo.IsSuperadmin(ctx, second.ID); !is {
+		t.Error("the new holder is not a superadmin")
+	}
+	if ok, _ := repo.HasPermission(ctx, first.ID, "", coreuser.PermissionUserManage); !ok {
+		t.Error("the previous holder lost their admin grant; only the superadmin grant may move")
+	}
+	if got := auditActions(t, repo, first.ID); !slices.Contains(got, "revoke_role") {
+		t.Errorf("audit for first = %v, want a revoke_role entry", got)
+	}
+
+	res, err = repo.TransferSuperadmin(ctx, first.ID, second.ID, "operator", now)
+	if err != nil {
+		t.Fatalf("transfer back: %v", err)
+	}
+	if res.FullAccessAssigned {
+		t.Error("full-access reassigned to a user who already holds it")
 	}
 }

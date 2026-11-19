@@ -23,7 +23,7 @@ import (
 // `atlas-server grant` (agent_operation_grants).
 func userCommand(configPath string, args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: atlas-server user <create|list|grant|revoke-grant|grants|disable|enable|reset-password|force-logout> [flags]")
+		return fmt.Errorf("usage: atlas-server user <create|list|grant|revoke-grant|grants|disable|enable|reset-password|force-logout|transfer-superadmin> [flags]")
 	}
 	switch args[0] {
 	case "create":
@@ -44,8 +44,10 @@ func userCommand(configPath string, args []string) error {
 		return userResetPassword(configPath, args[1:])
 	case "force-logout":
 		return userForceLogout(configPath, args[1:])
+	case "transfer-superadmin":
+		return userTransferSuperadmin(configPath, args[1:])
 	default:
-		return fmt.Errorf("unknown user command %q; want create, list, grant, revoke-grant, grants, disable, enable, reset-password or force-logout", args[0])
+		return fmt.Errorf("unknown user command %q; want create, list, grant, revoke-grant, grants, disable, enable, reset-password, force-logout or transfer-superadmin", args[0])
 	}
 }
 
@@ -305,5 +307,40 @@ func userGrants(configPath string, args []string) error {
 			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", g.ID, node, g.Role, g.GrantedAt.Format(time.RFC3339), revoked)
 		}
 		return w.Flush()
+	})
+}
+
+// userTransferSuperadmin moves the one superadmin grant to another user. The
+// CLI is the only path that can do this: the API neither grants, revokes,
+// nor disables a superadmin.
+func userTransferSuperadmin(configPath string, args []string) error {
+	flags := flag.NewFlagSet("atlas-server user transfer-superadmin", flag.ContinueOnError)
+	toUserID := flags.String("to-user-id", "", "the user id to make the superadmin (required; see `user list`)")
+	fromUserID := flags.String("confirm-from-user-id", "",
+		"the current superadmin's user id, required when one exists; omit only when there is no superadmin")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if *toUserID == "" {
+		return fmt.Errorf("--to-user-id is required")
+	}
+
+	return withUserRepository(configPath, func(ctx context.Context, repo *storageuser.Repository) error {
+		res, err := repo.TransferSuperadmin(ctx, *toUserID, *fromUserID, cliActor, time.Now())
+		if err != nil {
+			return err
+		}
+		if res.PreviousUserID == "" {
+			fmt.Printf("user %s is now the superadmin (there was none before)\n", *toUserID)
+		} else {
+			fmt.Printf("user %s is now the superadmin; revoked superadmin from user %s (their other grants are unchanged)\n", *toUserID, res.PreviousUserID)
+		}
+		switch {
+		case res.FullAccessAssigned:
+			fmt.Println("assigned the fleet-wide full-access page bundle")
+		case res.FullAccessMissing:
+			fmt.Println("warning: the full-access page bundle no longer exists; grant page access separately")
+		}
+		return nil
 	})
 }
