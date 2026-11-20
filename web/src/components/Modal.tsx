@@ -21,7 +21,7 @@ export function Modal({
   title: string;
   onClose: () => void;
   children: React.ReactNode;
-  width?: "sm" | "md";
+  width?: "sm" | "md" | "lg";
 }) {
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -41,7 +41,7 @@ export function Modal({
         aria-modal="true"
         aria-label={title}
         onClick={(e) => { e.stopPropagation(); }}
-        className={`w-full ${width === "md" ? "max-w-md" : "max-w-sm"} rounded-xl border border-border bg-surface p-5 shadow-2xl`}
+        className={`scroll-thin max-h-[90vh] w-full overflow-y-auto ${width === "lg" ? "max-w-3xl" : width === "md" ? "max-w-md" : "max-w-sm"} rounded-xl border border-border bg-surface p-5 shadow-2xl`}
       >
         <div className="mb-4 flex items-start justify-between gap-3">
           <h2 className="text-card-title font-semibold text-text">{title}</h2>

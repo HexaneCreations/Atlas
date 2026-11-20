@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   Ban,
@@ -10,8 +10,6 @@ import {
   LogOut,
   MoreHorizontal,
   PlayCircle,
-  Plus,
-  ShieldMinus,
   ShieldPlus,
   UserPlus,
   X,
@@ -20,13 +18,10 @@ import {
 import { ApiError } from "../api/client";
 import { emptyArray } from "../api/empty";
 import {
-  useAssignRoleAccess,
   useCreateUser,
   useDisableUser,
   useEnableUser,
   useForceLogout,
-  useGrantPageAccess,
-  useGrantRole,
   useNodes,
   usePageAccessByUser,
   useResetPassword,
@@ -44,7 +39,6 @@ import type {
   ListUserPageAccessResponse,
   Page,
   PageAccessAssignment,
-  Role,
   UserAccount,
 } from "../api/types";
 import { useAuth } from "../auth/AuthContext";
@@ -61,9 +55,9 @@ import { NAV_PAGES } from "../shell/pages";
 import { emptyArt, errorArt } from "../lib/assets";
 import { formatDateTime } from "../format";
 import { PROTECTED_SUPERADMIN_MESSAGE, effectivePages, holdsSuperadmin, revokeGuard } from "./usersAccess";
-
-/** Every role a grant may name — see internal/core/user.KnownRoles. */
-const ROLES: Role[] = ["viewer", "operator", "admin"];
+import { EMPTY_ACCESS, diff, editorReducer, initialEditorState, problems, toBody } from "./accessEditor";
+import { AccessGrid, AccessTab, ChangeList } from "./users/AccessEditor";
+import { RoleGrantsTable } from "./users/RoleGrants";
 
 /** Every gateable page — see internal/core/pageauthz.KnownPages. */
 const PAGES: Page[] = [
@@ -77,14 +71,6 @@ const PAGES: Page[] = [
   "disks",
   "users",
 ];
-
-/** Pages with no per-node concept: a grant naming one must be fleet-wide.
- *  Mirrors internal/core/pageauthz.FleetOnlyPages. */
-const FLEET_ONLY_PAGES = new Set<Page>(["overview", "nodes", "users"]);
-
-/** The six pages "Grant all pages for a node" fires — every page that can be
- *  node-scoped. */
-const NODE_SCOPED_PAGES: Page[] = PAGES.filter((p) => !FLEET_ONLY_PAGES.has(p));
 
 /** page key → route path, to borrow the label and icon NAV_PAGES already
  *  defines (web/src/shell/pages.ts, the same source pageauthz.Page mirrors). */
@@ -198,7 +184,6 @@ export function UsersPage() {
   const [panelTab, setPanelTab] = useState<PanelTab>("overview");
 
   const createUser = useCreateUser();
-  const grantRole = useGrantRole();
   const revokeRole = useRevokeRole();
   const disableUser = useDisableUser();
   const enableUser = useEnableUser();
@@ -266,14 +251,28 @@ export function UsersPage() {
     if (selectedUserID && !selectedUser) setSelectedUserID(null);
   }, [selectedUserID, selectedUser]);
 
+  // The Access tab reports whether it holds an unsaved draft; leaving it
+  // (another user, another tab, closing the panel) asks first.
+  const accessDirty = useRef(false);
+  const onAccessDirty = useCallback((dirty: boolean) => { accessDirty.current = dirty; }, []);
+  function confirmLeave(): boolean {
+    if (!accessDirty.current) return true;
+    const ok = window.confirm("You have unsaved access changes. Discard them?");
+    if (ok) accessDirty.current = false;
+    return ok;
+  }
+
   // A row-body click toggles that user's panel; the "..." menu's "View
-  // activity" always opens it on the Activity Log tab.
+  // activity" always opens it on the Activity Log tab, "Edit access" on the
+  // Access tab.
   function togglePanel(id: string) {
+    if (!confirmLeave()) return;
     setPanelTab("overview");
     setSelectedUserID((cur) => (cur === id ? null : id));
   }
-  function openActivity(id: string) {
-    setPanelTab("activity");
+  function openTab(id: string, tab: PanelTab) {
+    if (!confirmLeave()) return;
+    setPanelTab(tab);
     setSelectedUserID(id);
   }
 
@@ -364,8 +363,7 @@ export function UsersPage() {
                     isOnlyFleetAdmin={enabledFleetAdmins.has(u.id) && enabledFleetAdmins.size <= 1}
                     protectedTarget={isProtectedTarget(u)}
                     onSelect={() => { togglePanel(u.id); }}
-                    onGrant={() => { setModal({ kind: "grant", target: u }); }}
-                    onRevokePick={() => { setModal({ kind: "revokePick", target: u }); }}
+                    onEditAccess={() => { openTab(u.id, "access"); }}
                     onDisable={() => { setModal({ kind: "disable", target: u }); }}
                     onEnable={() => {
                       enableUser.mutate(u.id, {
@@ -375,7 +373,7 @@ export function UsersPage() {
                     }}
                     onResetPassword={() => { setModal({ kind: "resetConfirm", target: u }); }}
                     onForceLogout={() => { setModal({ kind: "forceLogout", target: u }); }}
-                    onViewActivity={() => { openActivity(u.id); }}
+                    onViewActivity={() => { openTab(u.id, "activity"); }}
                   />
                 ))}
               </tbody>
@@ -392,15 +390,12 @@ export function UsersPage() {
           nodeNames={nodeNames}
           showBundles={hasBundles}
           tab={panelTab}
-          onTab={setPanelTab}
-          onClose={() => { setSelectedUserID(null); }}
+          onTab={(t) => { if (t === panelTab || confirmLeave()) setPanelTab(t); }}
+          onClose={() => { if (confirmLeave()) setSelectedUserID(null); }}
           isRevokeBlocked={isRevokeBlocked}
-          onGrantRole={() => { setModal({ kind: "grant", target: selectedUser }); }}
+          onAccessDirty={onAccessDirty}
           onRevokeRole={(grant) => { setModal({ kind: "revokeConfirm", target: selectedUser, grant }); }}
-          onGrantPage={() => { setModal({ kind: "grantPage", target: selectedUser }); }}
-          onGrantAllPages={() => { setModal({ kind: "grantAllPages", target: selectedUser }); }}
           onRevokePage={(assignment) => { setModal({ kind: "revokePage", target: selectedUser, assignment }); }}
-          onAssignBundle={() => { setModal({ kind: "assignBundle", target: selectedUser }); }}
           onRevokeBundle={(assignment) => { setModal({ kind: "revokeBundle", target: selectedUser, assignment }); }}
         />
       ) : null}
@@ -417,19 +412,10 @@ export function UsersPage() {
           user={modal.user}
           password={modal.password}
           onClose={() => { setModal(null); }}
-          onGrantNow={() => { setModal({ kind: "grant", target: modal.user }); }}
-        />
-      ) : null}
-      {modal?.kind === "grant" ? (
-        <GrantRoleModal target={modal.target} grantRole={grantRole} onClose={() => { setModal(null); }} />
-      ) : null}
-      {modal?.kind === "revokePick" ? (
-        <RevokePickModal
-          target={modal.target}
-          nodeNames={nodeNames}
-          isBlocked={isRevokeBlocked}
-          onClose={() => { setModal(null); }}
-          onPick={(grant) => { setModal({ kind: "revokeConfirm", target: modal.target, grant }); }}
+          onEditAccess={() => {
+            setModal(null);
+            openTab(modal.user.id, "access");
+          }}
         />
       ) : null}
       {modal?.kind === "revokeConfirm" ? (
@@ -463,19 +449,6 @@ export function UsersPage() {
       {modal?.kind === "forceLogout" ? (
         <ForceLogoutConfirmModal target={modal.target} forceLogout={forceLogout} onClose={() => { setModal(null); }} />
       ) : null}
-      {modal?.kind === "grantPage" ? (
-        <GrantPageAccessModal target={modal.target} onClose={() => { setModal(null); }} />
-      ) : null}
-      {modal?.kind === "grantAllPages" ? (
-        <GrantAllPagesModal target={modal.target} nodeNames={nodeNames} onClose={() => { setModal(null); }} />
-      ) : null}
-      {modal?.kind === "assignBundle" ? (
-        <AssignBundleModal
-          target={modal.target}
-          definitions={bundleDefs.data?.role_access ?? emptyArray()}
-          onClose={() => { setModal(null); }}
-        />
-      ) : null}
       {modal?.kind === "revokePage" ? (
         <RevokePageAccessConfirmModal
           target={modal.target}
@@ -496,21 +469,16 @@ export function UsersPage() {
   );
 }
 
-type PanelTab = "overview" | "activity";
+type PanelTab = "overview" | "access" | "activity";
 
 type ModalState =
   | { kind: "create" }
   | { kind: "created"; user: UserAccount; password: string }
-  | { kind: "grant"; target: UserAccount }
-  | { kind: "revokePick"; target: UserAccount }
   | { kind: "revokeConfirm"; target: UserAccount; grant: Grant }
   | { kind: "disable"; target: UserAccount }
   | { kind: "resetConfirm"; target: UserAccount }
   | { kind: "resetReveal"; target: UserAccount; password: string }
   | { kind: "forceLogout"; target: UserAccount }
-  | { kind: "grantPage"; target: UserAccount }
-  | { kind: "grantAllPages"; target: UserAccount }
-  | { kind: "assignBundle"; target: UserAccount }
   | { kind: "revokePage"; target: UserAccount; assignment: PageAccessAssignment }
   | { kind: "revokeBundle"; target: UserAccount; assignment: PageAccessAssignment };
 
@@ -569,8 +537,7 @@ function UserRow({
   isOnlyFleetAdmin,
   protectedTarget,
   onSelect,
-  onGrant,
-  onRevokePick,
+  onEditAccess,
   onDisable,
   onEnable,
   onResetPassword,
@@ -587,8 +554,7 @@ function UserRow({
   isOnlyFleetAdmin: boolean;
   protectedTarget: boolean;
   onSelect: () => void;
-  onGrant: () => void;
-  onRevokePick: () => void;
+  onEditAccess: () => void;
   onDisable: () => void;
   onEnable: () => void;
   onResetPassword: () => void;
@@ -598,14 +564,7 @@ function UserRow({
   const grants = u.grants ?? [];
 
   const rawItems: RowMenuItem[] = [
-    { label: "Grant role", icon: ShieldPlus, onClick: onGrant },
-    {
-      label: "Revoke role",
-      icon: ShieldMinus,
-      onClick: onRevokePick,
-      disabled: grants.length === 0,
-      disabledReason: grants.length === 0 ? "No active grants to revoke" : undefined,
-    },
+    { label: "Edit access", icon: ShieldPlus, onClick: onEditAccess },
     u.disabled
       ? { label: "Enable user", icon: PlayCircle, onClick: onEnable }
       : {
@@ -636,7 +595,9 @@ function UserRow({
   // (guardSuperadminTarget) for a non-superadmin. Disable them all here so
   // the menu never offers a control that would 403.
   const items: RowMenuItem[] = protectedTarget
-    ? rawItems.map((it) => ({ ...it, disabled: true, disabledReason: PROTECTED_SUPERADMIN_MESSAGE }))
+    ? rawItems.map((it) =>
+        it.onClick === onEditAccess ? it : { ...it, disabled: true, disabledReason: PROTECTED_SUPERADMIN_MESSAGE },
+      )
     : rawItems;
 
   return (
@@ -809,12 +770,9 @@ function UserDetailPanel({
   onTab,
   onClose,
   isRevokeBlocked,
-  onGrantRole,
+  onAccessDirty,
   onRevokeRole,
-  onGrantPage,
-  onGrantAllPages,
   onRevokePage,
-  onAssignBundle,
   onRevokeBundle,
 }: {
   user: UserAccount;
@@ -826,12 +784,9 @@ function UserDetailPanel({
   onTab: (t: PanelTab) => void;
   onClose: () => void;
   isRevokeBlocked: (g: Grant) => boolean;
-  onGrantRole: () => void;
+  onAccessDirty: (dirty: boolean) => void;
   onRevokeRole: (g: Grant) => void;
-  onGrantPage: () => void;
-  onGrantAllPages: () => void;
   onRevokePage: (a: PageAccessAssignment) => void;
-  onAssignBundle: () => void;
   onRevokeBundle: (a: PageAccessAssignment) => void;
 }) {
   const pageAccess = useUserPageAccess(user.id);
@@ -867,6 +822,9 @@ function UserDetailPanel({
         <TabButton active={tab === "overview"} onClick={() => { onTab("overview"); }}>
           Overview
         </TabButton>
+        <TabButton active={tab === "access"} onClick={() => { onTab("access"); }}>
+          Access
+        </TabButton>
         <TabButton active={tab === "activity"} onClick={() => { onTab("activity"); }}>
           Activity Log
         </TabButton>
@@ -890,49 +848,22 @@ function UserDetailPanel({
           <Section
             n={1}
             title="Roles"
-            hint="Roles define the level of access in Atlas."
+            hint="Roles define the level of access in Atlas. Change them on the Access tab."
             actions={
-              <Button
-                variant="primary"
-                size="sm"
-                icon={Plus}
-                onClick={onGrantRole}
-                disabled={protectedTarget}
-                title={protectedTarget ? PROTECTED_SUPERADMIN_MESSAGE : undefined}
-              >
-                Grant role
+              <Button variant="secondary" size="sm" onClick={() => { onTab("access"); }}>
+                Edit access
               </Button>
             }
           >
             {grants.length === 0 ? (
               <EmptyRow>No roles granted to this user.</EmptyRow>
             ) : (
-              <AccessTable head={["Role", "Granted by", "Granted at", ""]}>
-                {grants.map((g) => {
-                  const guard = revokeGuard({ isSelf, lastAdmin: isRevokeBlocked(g), protectedSuperadmin: protectedTarget });
-                  return (
-                    <tr key={g.id} className="border-t border-border/60">
-                      <td className="py-2 pr-3">
-                        <span className="font-medium text-text">{g.role}</span>
-                        <span className="text-text-muted"> · {scopeLabel(g, nodeNames)}</span>
-                      </td>
-                      <td className="py-2 pr-3 text-xs text-text-muted">{g.granted_by ?? "—"}</td>
-                      <td className="py-2 pr-3 text-xs text-text-muted">{formatDateTime(g.granted_at)}</td>
-                      <td className="py-2 text-right">
-                        <button
-                          type="button"
-                          disabled={guard.disabled}
-                          title={guard.reason ?? "Revoke"}
-                          onClick={() => { onRevokeRole(g); }}
-                          className="rounded px-2 py-1 text-xs font-medium text-danger hover:bg-danger/10 disabled:cursor-not-allowed disabled:opacity-40"
-                        >
-                          Revoke
-                        </button>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </AccessTable>
+              <RoleGrantsTable
+                grants={grants}
+                scopeLabel={(g) => scopeLabel(g, nodeNames)}
+                guardFor={(g) => revokeGuard({ isSelf, lastAdmin: isRevokeBlocked(g), protectedSuperadmin: protectedTarget })}
+                onRevoke={onRevokeRole}
+              />
             )}
           </Section>
 
@@ -940,30 +871,7 @@ function UserDetailPanel({
           <Section
             n={2}
             title="Page Access"
-            hint="Pages this user can access, and for which scope."
-            actions={
-              <>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  onClick={onGrantAllPages}
-                  disabled={protectedTarget}
-                  title={protectedTarget ? PROTECTED_SUPERADMIN_MESSAGE : undefined}
-                >
-                  Grant all pages for a node
-                </Button>
-                <Button
-                  variant="primary"
-                  size="sm"
-                  icon={Plus}
-                  onClick={onGrantPage}
-                  disabled={protectedTarget}
-                  title={protectedTarget ? PROTECTED_SUPERADMIN_MESSAGE : undefined}
-                >
-                  Grant page access
-                </Button>
-              </>
-            }
+            hint="Pages this user can access, and for which scope. Grant pages on the Access tab."
           >
             <SectionState
               isPending={pageAccess.isPending}
@@ -1015,19 +923,7 @@ function UserDetailPanel({
             <Section
               n={3}
               title="Role-Access Bundles"
-              hint="Bundles are preset collections of page access grants."
-              actions={
-                <Button
-                  variant="primary"
-                  size="sm"
-                  icon={Plus}
-                  onClick={onAssignBundle}
-                  disabled={protectedTarget}
-                  title={protectedTarget ? PROTECTED_SUPERADMIN_MESSAGE : undefined}
-                >
-                  Assign bundle
-                </Button>
-              }
+              hint="Bundles are preset collections of page access grants. Their pages show locked on the Access tab."
             >
               {pageAccess.isPending ? (
                 <SectionState isPending error={null} onRetry={() => void pageAccess.refetch()} />
@@ -1088,6 +984,21 @@ function UserDetailPanel({
               </ul>
             )}
           </Section>
+        </div>
+      ) : tab === "access" ? (
+        <div className="p-4">
+          <AccessTab
+            userID={user.id}
+            readOnly={isSelf || holdsSuperadmin(grants)}
+            readOnlyReason={
+              isSelf
+                ? "You cannot change your own access — ask another admin."
+                : holdsSuperadmin(grants)
+                  ? `This is a superadmin account. ${PROTECTED_SUPERADMIN_MESSAGE}; the editor is read-only here, and the superadmin role itself is managed only by the CLI's transfer-superadmin.`
+                  : undefined
+            }
+            onDirtyChange={onAccessDirty}
+          />
         </div>
       ) : (
         <ActivityLog userID={user.id} audit={audit} />
@@ -1256,64 +1167,6 @@ function ErrorLine({ error }: { error: string | null }) {
   return <p className="mt-3 text-sm text-danger">{error}</p>;
 }
 
-/** The fleet-wide / specific-node picker every grant modal shares. No default
- *  between the two — an admin picks one, the same rule the server enforces. */
-function ScopeFields({
-  scope,
-  setScope,
-  nodeID,
-  setNodeID,
-  nodes,
-  fleetOnly,
-  fleetOnlyReason,
-}: {
-  scope: "fleet-wide" | "node" | null;
-  setScope: (s: "fleet-wide" | "node") => void;
-  nodeID: string;
-  setNodeID: (id: string) => void;
-  nodes: { node_id: string; hostname: string }[];
-  fleetOnly?: boolean;
-  fleetOnlyReason?: string;
-}) {
-  return (
-    <fieldset className="flex flex-col gap-2">
-      <legend className="mb-1 text-sm text-text">Scope</legend>
-      {fleetOnly ? (
-        <p className="text-xs text-text-muted">{fleetOnlyReason ?? "This choice is fleet-wide only."}</p>
-      ) : null}
-      <label className="flex items-center gap-2 text-sm text-text">
-        <input type="radio" name="scope" checked={scope === "fleet-wide"} onChange={() => { setScope("fleet-wide"); }} />
-        Fleet-wide
-      </label>
-      <label className={`flex items-center gap-2 text-sm ${fleetOnly ? "text-text-subtle" : "text-text"}`}>
-        <input
-          type="radio"
-          name="scope"
-          disabled={fleetOnly}
-          checked={scope === "node"}
-          onChange={() => { setScope("node"); }}
-        />
-        Specific node
-      </label>
-      {scope === "node" && !fleetOnly ? (
-        <select
-          value={nodeID}
-          onChange={(e) => { setNodeID(e.target.value); }}
-          aria-label="Node"
-          className="ml-6 rounded-lg border border-border bg-bg px-3 py-2 text-sm text-text outline-none focus-visible:ring-2 focus-visible:ring-primary"
-        >
-          <option value="" disabled>Select node</option>
-          {nodes.map((n) => (
-            <option key={n.node_id} value={n.node_id}>
-              {n.hostname && n.hostname !== n.node_id ? `${n.node_id} (${n.hostname})` : n.node_id}
-            </option>
-          ))}
-        </select>
-      ) : null}
-    </fieldset>
-  );
-}
-
 function CreateUserModal({
   createUser,
   onClose,
@@ -1326,12 +1179,22 @@ function CreateUserModal({
   const [username, setUsername] = useState("");
   const [email, setEmail] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [withAccess, setWithAccess] = useState(false);
+  const [editor, dispatch] = useReducer(editorReducer, EMPTY_ACCESS, initialEditorState);
+  const nodes = useNodes();
+  const changes = diff(editor.server, editor.draft);
+  const issues = problems(editor.draft);
+  const sendAccess = withAccess && changes.length > 0;
 
   function submit(e: { preventDefault: () => void }) {
     e.preventDefault();
     setError(null);
     createUser.mutate(
-      { username: username.trim(), ...(email.trim() ? { email: email.trim() } : {}) },
+      {
+        username: username.trim(),
+        ...(email.trim() ? { email: email.trim() } : {}),
+        ...(sendAccess ? { access: toBody(editor.draft) } : {}),
+      },
       {
         onSuccess: (res) => { onCreated(res.user, res.password); },
         onError: (err) => { setError(messageFor(err)); },
@@ -1340,7 +1203,7 @@ function CreateUserModal({
   }
 
   return (
-    <Modal title="Create user" onClose={onClose}>
+    <Modal title="Create user" onClose={onClose} width={withAccess ? "lg" : "sm"}>
       <form onSubmit={submit} className="flex flex-col gap-3">
         <label className="flex flex-col gap-1.5 text-sm text-text">
           Username
@@ -1361,10 +1224,31 @@ function CreateUserModal({
             className="rounded-lg border border-border bg-bg px-3 py-2 text-sm text-text outline-none focus-visible:ring-2 focus-visible:ring-primary"
           />
         </label>
+        <label className="flex items-center gap-2 text-sm text-text">
+          <input type="checkbox" checked={withAccess} onChange={(e) => { setWithAccess(e.target.checked); }} />
+          Set access now <span className="text-text-muted">(optional — by default the user has no access)</span>
+        </label>
+        {withAccess ? (
+          <>
+            <AccessGrid
+              server={editor.server}
+              draft={editor.draft}
+              nodes={nodes.data?.nodes ?? []}
+              readOnly={false}
+              onEdit={(edit) => { dispatch({ type: "edit", edit }); }}
+            />
+            <ChangeList changes={changes} />
+            {issues.length > 0 ? (
+              <ul className="text-xs text-danger">
+                {issues.map((m) => <li key={m}>{m}</li>)}
+              </ul>
+            ) : null}
+          </>
+        ) : null}
         <ErrorLine error={error} />
         <ModalActions>
           <Button type="button" variant="secondary" onClick={onClose}>Cancel</Button>
-          <Button type="submit" variant="primary" disabled={createUser.isPending}>
+          <Button type="submit" variant="primary" disabled={createUser.isPending || (sendAccess && issues.length > 0)}>
             {createUser.isPending ? "Creating…" : "Create user"}
           </Button>
         </ModalActions>
@@ -1399,12 +1283,12 @@ function CreatedUserModal({
   user,
   password,
   onClose,
-  onGrantNow,
+  onEditAccess,
 }: {
   user: UserAccount;
   password: string;
   onClose: () => void;
-  onGrantNow: () => void;
+  onEditAccess: () => void;
 }) {
   return (
     <Modal title="User created" onClose={onClose}>
@@ -1415,140 +1299,7 @@ function CreatedUserModal({
       <p className="mt-2 text-xs text-warning">This password will not be shown again.</p>
       <ModalActions>
         <Button variant="secondary" onClick={onClose}>Done</Button>
-        <Button variant="primary" onClick={onGrantNow}>Grant role now</Button>
-      </ModalActions>
-    </Modal>
-  );
-}
-
-function GrantRoleModal({
-  target,
-  grantRole,
-  onClose,
-}: {
-  target: UserAccount;
-  grantRole: ReturnType<typeof useGrantRole>;
-  onClose: () => void;
-}) {
-  const nodes = useNodes();
-  const { push } = useToast();
-  const [role, setRole] = useState<Role | "">("");
-  const [scope, setScope] = useState<"fleet-wide" | "node" | null>(null);
-  const [nodeID, setNodeID] = useState("");
-  const [error, setError] = useState<string | null>(null);
-
-  function submit(e: { preventDefault: () => void }) {
-    e.preventDefault();
-    setError(null);
-    if (!role) {
-      setError("Choose a role.");
-      return;
-    }
-    if (scope === null) {
-      setError("Choose fleet-wide or a specific node — there is no default.");
-      return;
-    }
-    if (scope === "node" && !nodeID) {
-      setError("Choose a node.");
-      return;
-    }
-
-    grantRole.mutate(
-      { userID: target.id, body: { role, ...(scope === "fleet-wide" ? { fleet_wide: true } : { node_id: nodeID }) } },
-      {
-        onSuccess: () => {
-          push({ tone: "success", title: `Granted ${role} to ${target.username}` });
-          onClose();
-        },
-        onError: (err) => { setError(messageFor(err)); },
-      },
-    );
-  }
-
-  return (
-    <Modal title="Grant role" onClose={onClose}>
-      <form onSubmit={submit} className="flex flex-col gap-4">
-        <p className="text-sm text-text-muted">
-          Grant a role to <span className="font-medium text-text">{target.username}</span>.
-        </p>
-
-        <label className="flex flex-col gap-1.5 text-sm text-text">
-          Role
-          <select
-            value={role}
-            onChange={(e) => { setRole(e.target.value as Role); }}
-            className="rounded-lg border border-border bg-bg px-3 py-2 text-sm text-text outline-none focus-visible:ring-2 focus-visible:ring-primary"
-          >
-            <option value="" disabled>Select role</option>
-            {ROLES.map((r) => (
-              <option key={r} value={r}>{r}</option>
-            ))}
-          </select>
-        </label>
-
-        <ScopeFields
-          scope={scope}
-          setScope={setScope}
-          nodeID={nodeID}
-          setNodeID={setNodeID}
-          nodes={nodes.data?.nodes ?? []}
-        />
-
-        <ErrorLine error={error} />
-        <ModalActions>
-          <Button type="button" variant="secondary" onClick={onClose}>Cancel</Button>
-          <Button type="submit" variant="primary" disabled={grantRole.isPending}>
-            {grantRole.isPending ? "Granting…" : "Grant"}
-          </Button>
-        </ModalActions>
-      </form>
-    </Modal>
-  );
-}
-
-function RevokePickModal({
-  target,
-  nodeNames,
-  isBlocked,
-  onClose,
-  onPick,
-}: {
-  target: UserAccount;
-  nodeNames: Map<string, string>;
-  isBlocked: (g: Grant) => boolean;
-  onClose: () => void;
-  onPick: (g: Grant) => void;
-}) {
-  const grants = target.grants ?? [];
-  return (
-    <Modal title="Revoke role" onClose={onClose}>
-      <p className="mb-3 text-sm text-text-muted">
-        Choose which grant to remove from <span className="font-medium text-text">{target.username}</span>.
-      </p>
-      <ul className="flex flex-col gap-1.5">
-        {grants.map((g) => {
-          const blocked = isBlocked(g);
-          return (
-            <li key={g.id}>
-              <button
-                type="button"
-                disabled={blocked}
-                title={blocked ? "Can't remove — this is the last user with admin access" : undefined}
-                onClick={() => { onPick(g); }}
-                className="flex w-full items-center justify-between rounded-lg border border-border px-3 py-2 text-left text-sm hover:bg-surface-hover disabled:cursor-not-allowed disabled:opacity-40"
-              >
-                <span>
-                  <span className="font-medium text-text">{g.role}</span>{" "}
-                  <span className="text-text-muted">· {scopeLabel(g, nodeNames)}</span>
-                </span>
-                <span className="text-xs text-text-subtle">{formatDateTime(g.granted_at)}</span>
-              </button>
-            </li>
-          );
-        })}
-      </ul>
-      <ModalActions>
-        <Button variant="secondary" onClick={onClose}>Cancel</Button>
+        <Button variant="primary" onClick={onEditAccess}>Edit access</Button>
       </ModalActions>
     </Modal>
   );
@@ -1740,308 +1491,6 @@ function ForceLogoutConfirmModal({
           {forceLogout.isPending ? "Logging out…" : "Force logout"}
         </Button>
       </ModalActions>
-    </Modal>
-  );
-}
-
-function GrantPageAccessModal({ target, onClose }: { target: UserAccount; onClose: () => void }) {
-  const nodes = useNodes();
-  const grant = useGrantPageAccess();
-  const { push } = useToast();
-  const [page, setPage] = useState<Page | "">("");
-  const [scope, setScope] = useState<"fleet-wide" | "node" | null>(null);
-  const [nodeID, setNodeID] = useState("");
-  const [error, setError] = useState<string | null>(null);
-
-  const fleetOnly = page !== "" && FLEET_ONLY_PAGES.has(page);
-  const effectiveScope = fleetOnly ? "fleet-wide" : scope;
-
-  function submit(e: { preventDefault: () => void }) {
-    e.preventDefault();
-    setError(null);
-    if (!page) {
-      setError("Choose a page.");
-      return;
-    }
-    if (effectiveScope === null) {
-      setError("Choose fleet-wide or a specific node — there is no default.");
-      return;
-    }
-    if (effectiveScope === "node" && !nodeID) {
-      setError("Choose a node.");
-      return;
-    }
-    grant.mutate(
-      {
-        userID: target.id,
-        body: { page, ...(effectiveScope === "fleet-wide" ? { fleet_wide: true } : { node_id: nodeID }) },
-      },
-      {
-        onSuccess: () => {
-          push({ tone: "success", title: `Granted ${PAGE_META[page].label} access to ${target.username}` });
-          onClose();
-        },
-        onError: (err) => { setError(messageFor(err)); },
-      },
-    );
-  }
-
-  return (
-    <Modal title="Grant page access" onClose={onClose}>
-      <form onSubmit={submit} className="flex flex-col gap-4">
-        <p className="text-sm text-text-muted">
-          Give <span className="font-medium text-text">{target.username}</span> access to one page.
-        </p>
-        <label className="flex flex-col gap-1.5 text-sm text-text">
-          Page
-          <select
-            value={page}
-            onChange={(e) => { setPage(e.target.value as Page); }}
-            className="rounded-lg border border-border bg-bg px-3 py-2 text-sm text-text outline-none focus-visible:ring-2 focus-visible:ring-primary"
-          >
-            <option value="" disabled>Select page</option>
-            {PAGES.map((p) => (
-              <option key={p} value={p}>{PAGE_META[p].label}</option>
-            ))}
-          </select>
-        </label>
-
-        <ScopeFields
-          scope={effectiveScope}
-          setScope={setScope}
-          nodeID={nodeID}
-          setNodeID={setNodeID}
-          nodes={nodes.data?.nodes ?? []}
-          fleetOnly={fleetOnly}
-          fleetOnlyReason={`${page ? PAGE_META[page].label : "This page"} has no per-node scope — it is always fleet-wide.`}
-        />
-
-        <ErrorLine error={error} />
-        <ModalActions>
-          <Button type="button" variant="secondary" onClick={onClose}>Cancel</Button>
-          <Button type="submit" variant="primary" disabled={grant.isPending}>
-            {grant.isPending ? "Granting…" : "Grant"}
-          </Button>
-        </ModalActions>
-      </form>
-    </Modal>
-  );
-}
-
-interface PageResult {
-  page: Page;
-  ok: boolean;
-  note: string;
-}
-
-function GrantAllPagesModal({
-  target,
-  nodeNames,
-  onClose,
-}: {
-  target: UserAccount;
-  nodeNames: Map<string, string>;
-  onClose: () => void;
-}) {
-  const nodes = useNodes();
-  const grant = useGrantPageAccess();
-  const [nodeID, setNodeID] = useState("");
-  const [error, setError] = useState<string | null>(null);
-  const [running, setRunning] = useState(false);
-  const [results, setResults] = useState<PageResult[] | null>(null);
-
-  async function run(e: { preventDefault: () => void }) {
-    e.preventDefault();
-    setError(null);
-    if (!nodeID) {
-      setError("Choose a node.");
-      return;
-    }
-    setRunning(true);
-    const out: PageResult[] = [];
-    for (const page of NODE_SCOPED_PAGES) {
-      try {
-        await grant.mutateAsync({ userID: target.id, body: { page, node_id: nodeID } });
-        out.push({ page, ok: true, note: "granted" });
-      } catch (err) {
-        // A conflict means a bundle or an existing grant already covers this
-        // page for the node — not a failure of intent, but surfaced, not hidden.
-        const conflict = err instanceof ApiError && (err.code === "already_exists" || err.code === "failed_precondition");
-        out.push({ page, ok: conflict, note: conflict ? "already granted" : messageFor(err) });
-      }
-      setResults([...out]);
-    }
-    setRunning(false);
-  }
-
-  const hostname = nodeID ? nodeNames.get(nodeID) : undefined;
-  const nodeLabel = !nodeID ? "" : hostname && hostname !== nodeID ? `${nodeID} (${hostname})` : nodeID;
-  const done = results !== null && !running;
-  const failures = results?.filter((r) => !r.ok).length ?? 0;
-
-  return (
-    <Modal title="Grant all pages for a node" onClose={onClose} width="md">
-      <form onSubmit={(e) => { void run(e); }} className="flex flex-col gap-4">
-        <p className="text-sm text-text-muted">
-          Grant <span className="font-medium text-text">{target.username}</span> access to every node-scoped page
-          ({NODE_SCOPED_PAGES.map((p) => PAGE_META[p].label).join(", ")}) for one node. Overview, Nodes and Users are
-          fleet-wide only and are not included.
-        </p>
-        <label className="flex flex-col gap-1.5 text-sm text-text">
-          Node
-          <select
-            value={nodeID}
-            onChange={(e) => { setNodeID(e.target.value); setResults(null); }}
-            disabled={running}
-            className="rounded-lg border border-border bg-bg px-3 py-2 text-sm text-text outline-none focus-visible:ring-2 focus-visible:ring-primary"
-          >
-            <option value="" disabled>Select node</option>
-            {(nodes.data?.nodes ?? []).map((n) => (
-              <option key={n.node_id} value={n.node_id}>
-                {n.hostname && n.hostname !== n.node_id ? `${n.node_id} (${n.hostname})` : n.node_id}
-              </option>
-            ))}
-          </select>
-        </label>
-
-        {results ? (
-          <ul className="flex flex-col rounded-lg border border-border">
-            {NODE_SCOPED_PAGES.map((p) => {
-              const r = results.find((x) => x.page === p);
-              return (
-                <li
-                  key={p}
-                  className="flex items-center justify-between gap-3 border-b border-border/60 px-3 py-1.5 text-sm last:border-0"
-                >
-                  <span className="text-text">{PAGE_META[p].label}</span>
-                  {r ? (
-                    <span className={`text-xs ${r.ok ? "text-success" : "text-danger"}`}>
-                      {r.ok ? <Check size={12} className="mr-1 inline" /> : <X size={12} className="mr-1 inline" />}
-                      {r.note}
-                    </span>
-                  ) : (
-                    <span className="text-xs text-text-subtle">{running ? "…" : "pending"}</span>
-                  )}
-                </li>
-              );
-            })}
-          </ul>
-        ) : null}
-
-        {done ? (
-          <p className={`text-sm ${failures > 0 ? "text-warning" : "text-success"}`}>
-            {failures > 0
-              ? `${NODE_SCOPED_PAGES.length - failures} of ${NODE_SCOPED_PAGES.length} pages granted for ${nodeLabel} — ${failures} failed.`
-              : `All ${NODE_SCOPED_PAGES.length} pages granted for ${nodeLabel}.`}
-          </p>
-        ) : null}
-
-        <ErrorLine error={error} />
-        <ModalActions>
-          <Button type="button" variant="secondary" onClick={onClose}>
-            {done ? "Done" : "Cancel"}
-          </Button>
-          {!done ? (
-            <Button type="submit" variant="primary" disabled={running || !nodeID}>
-              {running ? "Granting…" : "Grant pages"}
-            </Button>
-          ) : null}
-        </ModalActions>
-      </form>
-    </Modal>
-  );
-}
-
-function AssignBundleModal({
-  target,
-  definitions,
-  onClose,
-}: {
-  target: UserAccount;
-  definitions: { name: string; pages: Page[] }[];
-  onClose: () => void;
-}) {
-  const nodes = useNodes();
-  const assign = useAssignRoleAccess();
-  const { push } = useToast();
-  const [name, setName] = useState("");
-  const [scope, setScope] = useState<"fleet-wide" | "node" | null>(null);
-  const [nodeID, setNodeID] = useState("");
-  const [error, setError] = useState<string | null>(null);
-
-  const selected = definitions.find((d) => d.name === name);
-
-  function submit(e: { preventDefault: () => void }) {
-    e.preventDefault();
-    setError(null);
-    if (!name) {
-      setError("Choose a bundle.");
-      return;
-    }
-    if (scope === null) {
-      setError("Choose fleet-wide or a specific node — there is no default.");
-      return;
-    }
-    if (scope === "node" && !nodeID) {
-      setError("Choose a node.");
-      return;
-    }
-    assign.mutate(
-      {
-        userID: target.id,
-        body: { role_access_name: name, ...(scope === "fleet-wide" ? { fleet_wide: true } : { node_id: nodeID }) },
-      },
-      {
-        onSuccess: () => {
-          push({ tone: "success", title: `Assigned ${name} to ${target.username}` });
-          onClose();
-        },
-        onError: (err) => { setError(messageFor(err)); },
-      },
-    );
-  }
-
-  return (
-    <Modal title="Assign bundle" onClose={onClose}>
-      <form onSubmit={submit} className="flex flex-col gap-4">
-        <p className="text-sm text-text-muted">
-          Assign a preset page bundle to <span className="font-medium text-text">{target.username}</span>.
-        </p>
-        <label className="flex flex-col gap-1.5 text-sm text-text">
-          Bundle
-          <select
-            value={name}
-            onChange={(e) => { setName(e.target.value); }}
-            className="rounded-lg border border-border bg-bg px-3 py-2 text-sm text-text outline-none focus-visible:ring-2 focus-visible:ring-primary"
-          >
-            <option value="" disabled>Select bundle</option>
-            {definitions.map((d) => (
-              <option key={d.name} value={d.name}>{d.name}</option>
-            ))}
-          </select>
-        </label>
-        {selected ? (
-          <p className="text-xs text-text-muted">
-            Pages: {selected.pages.map((p) => PAGE_META[p].label).join(", ") || "none"}
-          </p>
-        ) : null}
-
-        <ScopeFields
-          scope={scope}
-          setScope={setScope}
-          nodeID={nodeID}
-          setNodeID={setNodeID}
-          nodes={nodes.data?.nodes ?? []}
-        />
-
-        <ErrorLine error={error} />
-        <ModalActions>
-          <Button type="button" variant="secondary" onClick={onClose}>Cancel</Button>
-          <Button type="submit" variant="primary" disabled={assign.isPending}>
-            {assign.isPending ? "Assigning…" : "Assign"}
-          </Button>
-        </ModalActions>
-      </form>
     </Modal>
   );
 }

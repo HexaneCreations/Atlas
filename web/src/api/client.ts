@@ -12,7 +12,10 @@ import type {
   ListUserAuditResponse,
   ListUserPageAccessResponse,
   ListUsersResponse,
+  PutUserAccessRequest,
+  PutUserAccessResponse,
   ResetPasswordResponse,
+  UserAccessResponse,
 } from "./types";
 
 /**
@@ -244,6 +247,22 @@ export async function fetchUsers(signal?: AbortSignal): Promise<ListUsersRespons
 export async function createUser(body: CreateUserRequest): Promise<CreateUserResponse> {
   const response = await request("/users", { method: "POST", headers: JSON_HEADERS, body: JSON.stringify(body) });
   return (await response.json()) as CreateUserResponse;
+}
+
+/** One user's access as the access editor sees it, with the version a save
+ *  must send back. */
+export async function fetchUserAccess(userID: string, signal?: AbortSignal): Promise<UserAccessResponse> {
+  return apiGet<UserAccessResponse>(`/users/${encodeURIComponent(userID)}/access`, signal ? { signal } : {});
+}
+
+/** Replaces one user's editable access in a single transaction. */
+export async function putUserAccess(userID: string, body: PutUserAccessRequest): Promise<PutUserAccessResponse> {
+  const response = await request(`/users/${encodeURIComponent(userID)}/access`, {
+    method: "PUT",
+    headers: JSON_HEADERS,
+    body: JSON.stringify(body),
+  });
+  return (await response.json()) as PutUserAccessResponse;
 }
 
 /** Grants a role to a user, scoped to one node or fleet-wide. */

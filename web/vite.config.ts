@@ -46,11 +46,12 @@ export default defineConfig({
 
   // Vitest shares this config, so tests resolve the same aliases as the app.
   // The suite targets the pure model modules — the domain logic that decides
-  // what a page claims — rather than rendering components. Those functions
-  // have produced every correctness bug worth catching so far.
+  // what a page claims. The few component tests (*.test.tsx) render hook-free
+  // components to static markup in this same node environment; there is no
+  // DOM here.
   test: {
     environment: "node",
-    include: ["src/**/*.test.ts"],
+    include: ["src/**/*.test.ts", "src/**/*.test.tsx"],
   },
 
   build: {

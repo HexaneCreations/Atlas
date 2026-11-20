@@ -139,6 +139,90 @@ export interface ListUsersResponse {
 export interface CreateUserRequest {
   username: string;
   email?: string;
+  /** Initial access, applied in the same transaction as the insert; a
+   *  refused body creates no user. Omitted, the user starts with none. */
+  access?: AccessBody;
+}
+
+/** The roles an access-editor row may hold — never superadmin. */
+export type EditableRole = "viewer" | "operator" | "admin";
+
+/** One requested role or direct page grant. Exactly one of `node_id` and
+ *  `fleet_wide: true` — the server has no default between them. */
+export interface AccessRoleRow {
+  role: EditableRole;
+  node_id?: string;
+  fleet_wide: boolean;
+}
+
+export interface AccessPageRow {
+  page: Page;
+  node_id?: string;
+  fleet_wide: boolean;
+}
+
+/** A user's full editable access: every role and direct page grant they
+ *  should hold. Bundles and superadmin are not part of it. */
+export interface AccessBody {
+  roles: AccessRoleRow[];
+  pages: AccessPageRow[];
+}
+
+/** PUT /api/v1/users/{id}/access — replaces the editable access in full. */
+export interface PutUserAccessRequest extends AccessBody {
+  version: string;
+}
+
+export interface AccessRoleGrant {
+  id: string;
+  role: EditableRole;
+  node_id?: string;
+  fleet_wide: boolean;
+  granted_at: string;
+  granted_by?: string;
+}
+
+export interface AccessPageGrant {
+  id: string;
+  page: Page;
+  node_id?: string;
+  fleet_wide: boolean;
+  granted_at: string;
+  granted_by?: string;
+}
+
+/** A bundle assignment and the pages it covers. Read-only in the editor. */
+export interface AccessBundle {
+  id: string;
+  role_access: string;
+  node_id?: string;
+  fleet_wide: boolean;
+  pages: Page[];
+  granted_at: string;
+  granted_by?: string;
+}
+
+/** GET /api/v1/users/{id}/access. Superadmin grants are never included. */
+export interface UserAccessResponse {
+  version: string;
+  roles: AccessRoleGrant[];
+  pages: AccessPageGrant[];
+  bundles: AccessBundle[];
+}
+
+export interface AccessChange {
+  kind: "role" | "page";
+  /** Set on revokes: the row that was revoked. */
+  id?: string;
+  role?: EditableRole;
+  page?: Page;
+  node_id?: string;
+  fleet_wide: boolean;
+}
+
+export interface PutUserAccessResponse {
+  access: UserAccessResponse;
+  changes: { granted: AccessChange[]; revoked: AccessChange[] };
 }
 
 export interface CreateUserResponse {

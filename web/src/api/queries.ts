@@ -3,6 +3,8 @@ import {
   ApiError,
   apiGet,
   assignRoleAccess,
+  fetchUserAccess,
+  putUserAccess,
   createUser,
   disableUser,
   enableUser,
@@ -21,6 +23,8 @@ import {
 import { emptyArray } from "./empty";
 import { useSelectedNodeID } from "../lib/selectedNode";
 import type {
+  PutUserAccessRequest,
+  UserAccessResponse,
   CollectorsResponse,
   ContainerDetail,
   ContainerLogsResponse,
@@ -511,6 +515,7 @@ export const userKeys = {
   all: ["users"] as const,
   audit: (userID: string) => ["users", userID, "audit"] as const,
   pageAccess: (userID: string) => ["users", userID, "page-access"] as const,
+  access: (userID: string) => ["users", userID, "access"] as const,
 } as const;
 
 /** RoleAccess bundle definitions — one list, shared by every open user
@@ -547,6 +552,25 @@ export function useCreateUser() {
   const invalidate = useInvalidateUsers();
   return useMutation({
     mutationFn: (body: CreateUserRequest) => createUser(body),
+    onSuccess: invalidate,
+  });
+}
+
+/** One user's access for the access editor. */
+export function useUserAccess(userID: string | null) {
+  return useQuery({
+    queryKey: userKeys.access(userID ?? ""),
+    queryFn: ({ signal }): Promise<UserAccessResponse> => fetchUserAccess(userID ?? "", signal),
+    enabled: Boolean(userID),
+  });
+}
+
+/** Saves the access editor's draft. Invalidates every user query (the list's
+ *  role chips, page-access badges, the audit trail, and this user's access). */
+export function usePutUserAccess() {
+  const invalidate = useInvalidateUsers();
+  return useMutation({
+    mutationFn: ({ userID, body }: { userID: string; body: PutUserAccessRequest }) => putUserAccess(userID, body),
     onSuccess: invalidate,
   });
 }
