@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/hexane/atlas/internal/core/access"
 	coreuser "github.com/hexane/atlas/internal/core/user"
 	"github.com/hexane/atlas/internal/platform/postgres"
 	storageuser "github.com/hexane/atlas/internal/storage/user"
@@ -41,8 +42,8 @@ func (l lazyUserStore) ListUsersWithGrants(ctx context.Context) ([]coreuser.User
 func (l lazyUserStore) GetUser(ctx context.Context, id string) (coreuser.User, error) {
 	return l.repo().GetUser(ctx, id)
 }
-func (l lazyUserStore) AdminCreateUser(ctx context.Context, username, email, actorUserID string, now time.Time) (coreuser.User, string, error) {
-	return l.repo().AdminCreateUser(ctx, username, email, actorUserID, now)
+func (l lazyUserStore) AdminCreateUser(ctx context.Context, username, email, actorUserID string, initial *access.Desired, now time.Time) (coreuser.User, string, error) {
+	return l.repo().AdminCreateUser(ctx, username, email, actorUserID, initial, now)
 }
 func (l lazyUserStore) DisableUser(ctx context.Context, userID, actorUserID string, now time.Time) error {
 	return l.repo().DisableUser(ctx, userID, actorUserID, now)
@@ -64,6 +65,12 @@ func (l lazyUserStore) RevokeUserGrant(ctx context.Context, userID, grantID, rev
 }
 func (l lazyUserStore) IsSuperadmin(ctx context.Context, userID string) (bool, error) {
 	return l.repo().IsSuperadmin(ctx, userID)
+}
+func (l lazyUserStore) UserAccess(ctx context.Context, userID string) (access.State, error) {
+	return l.repo().UserAccess(ctx, userID)
+}
+func (l lazyUserStore) ReplaceUserAccess(ctx context.Context, userID, version string, desired access.Desired, actorUserID string, now time.Time) (access.State, access.Changes, error) {
+	return l.repo().ReplaceUserAccess(ctx, userID, version, desired, actorUserID, now)
 }
 
 // lazyAuthorizer wraps [lazyUserStore] in [coreuser.Authorizer], the

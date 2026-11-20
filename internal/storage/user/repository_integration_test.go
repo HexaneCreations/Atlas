@@ -653,7 +653,7 @@ func TestAdminCreateUserPersistsAWorkingGeneratedPassword(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC()
 
-	created, plaintext, err := repo.AdminCreateUser(ctx, "wendy", "wendy@example.com", "operator-id", now)
+	created, plaintext, err := repo.AdminCreateUser(ctx, "wendy", "wendy@example.com", "operator-id", nil, now)
 	if err != nil {
 		t.Fatalf("AdminCreateUser: %v", err)
 	}

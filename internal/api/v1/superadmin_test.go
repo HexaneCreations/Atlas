@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hexane/atlas/internal/core/access"
 	"github.com/hexane/atlas/internal/core/user"
 )
 
@@ -66,6 +67,8 @@ func targetActions(targetID, grantID string) []guardAction {
 		{"reset password", http.MethodPost, "/users/" + targetID + "/reset-password", ""},
 		{"force logout", http.MethodPost, "/users/" + targetID + "/force-logout", ""},
 		{"view audit", http.MethodGet, "/users/" + targetID + "/audit", ""},
+		{"edit access", http.MethodPut, "/users/" + targetID + "/access",
+			`{"version":"` + access.State{}.Version() + `","roles":[],"pages":[]}`},
 	}
 }
 

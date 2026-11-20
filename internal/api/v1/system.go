@@ -289,6 +289,8 @@ func (h *Handler) Mount(mux *http.ServeMux) {
 	mux.Handle("POST "+Prefix+"/users/{userID}/reset-password", h.protectTarget(h.ResetPassword))
 	mux.Handle("POST "+Prefix+"/users/{userID}/force-logout", h.protectTarget(h.ForceLogout))
 	mux.Handle("GET "+Prefix+"/users/{userID}/audit", h.protectTarget(h.ListUserAudit))
+	mux.Handle("GET "+Prefix+"/users/{userID}/access", httpx.Handler(h.GetUserAccess))
+	mux.Handle("PUT "+Prefix+"/users/{userID}/access", h.protectTarget(h.PutUserAccess))
 
 	mux.Handle("GET "+Prefix+"/role-access", httpx.Handler(h.ListRoleAccessDefinitions))
 	mux.Handle("GET "+Prefix+"/users/{userID}/page-access", httpx.Handler(h.ListUserPageAccess))

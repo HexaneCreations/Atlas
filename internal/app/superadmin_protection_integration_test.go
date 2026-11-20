@@ -143,6 +143,7 @@ type targetUser struct {
 	pageGrant     string
 	assignBundle  string // a bundle the target does not hold yet
 	grantablePage corepageauthz.Page
+	accessVersion string // the access editor's version of the target's state
 }
 
 func (f *protectionFixture) target(superadmin, disabled bool) targetUser {
@@ -210,6 +211,11 @@ func (f *protectionFixture) target(superadmin, disabled bool) targetUser {
 	}
 	q(`SELECT id FROM user_role_access WHERE user_id = $1 AND revoked_at IS NULL`, &tu.assignment, userID)
 	q(`SELECT id FROM user_page_access WHERE user_id = $1 AND page_key = 'users' AND revoked_at IS NULL`, &tu.pageGrant, userID)
+	st, err := f.users.UserAccess(ctx, userID)
+	if err != nil {
+		f.t.Fatalf("UserAccess: %v", err)
+	}
+	tu.accessVersion = st.Version()
 	return tu
 }
 
@@ -303,6 +309,15 @@ func protectedActions() []protectedAction {
 			body: func(u targetUser) string { return `{"page":"` + string(u.grantablePage) + `","fleet_wide":true}` }},
 		{name: "revoke page", method: http.MethodDelete, okStatus: http.StatusNoContent, body: none,
 			path: func(u targetUser) string { return "/users/" + u.id + "/page-access/" + u.pageGrant }},
+		// Keeps the admin role and every direct page except users: exactly
+		// one revoke when it is allowed.
+		{name: "edit access", method: http.MethodPut, okStatus: http.StatusOK,
+			path: func(u targetUser) string { return "/users/" + u.id + "/access" },
+			body: func(u targetUser) string {
+				return `{"version":"` + u.accessVersion + `","roles":[{"role":"admin","fleet_wide":true}],"pages":[` +
+					`{"page":"overview","fleet_wide":true},{"page":"nodes","fleet_wide":true},{"page":"processes","fleet_wide":true},` +
+					`{"page":"services","fleet_wide":true},{"page":"cron","fleet_wide":true},{"page":"ports","fleet_wide":true}]}`
+			}},
 	}
 }
 

@@ -16,6 +16,7 @@ import (
 // unprotectedUserTargetRoutes are the only {userID} routes allowed to skip
 // protectTarget: read-only views the superadmin rule does not cover.
 var unprotectedUserTargetRoutes = []string{
+	"GET /users/{userID}/access",
 	"GET /users/{userID}/page-access",
 }
 
@@ -60,9 +61,9 @@ func TestEveryUserTargetRouteIsProtected(t *testing.T) {
 	})
 
 	// Guards against the walk silently matching nothing (e.g. a rename of
-	// mux or Prefix): the 11 target routes that exist today must all be seen.
-	if len(protected) != 11 {
-		t.Errorf("protected {userID} routes = %d, want 11: %v", len(protected), protected)
+	// mux or Prefix): the 12 target routes that exist today must all be seen.
+	if len(protected) != 12 {
+		t.Errorf("protected {userID} routes = %d, want 12: %v", len(protected), protected)
 	}
 	if !slices.Equal(exempt, unprotectedUserTargetRoutes) {
 		t.Errorf("exempt routes seen = %v, want %v", exempt, unprotectedUserTargetRoutes)

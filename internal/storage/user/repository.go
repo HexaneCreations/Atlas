@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"time"
 
+	"github.com/hexane/atlas/internal/core/access"
 	corepageauthz "github.com/hexane/atlas/internal/core/pageauthz"
 	coreuser "github.com/hexane/atlas/internal/core/user"
 	"github.com/hexane/atlas/internal/platform/errs"
@@ -129,7 +130,11 @@ func (r *Repository) GetUser(ctx context.Context, userID string) (coreuser.User,
 // admin Users page's "Create user" flow — unlike [Repository.CreateUser],
 // which the CLI uses with a caller-supplied, already-hashed password, this
 // always generates the credential and records who created the account.
-func (r *Repository) AdminCreateUser(ctx context.Context, username, email, actorUserID string, now time.Time) (coreuser.User, string, error) {
+//
+// A non-nil initial is applied as the new user's access in the same
+// transaction (the rules of [Repository.ReplaceUserAccess]); if it is
+// refused, no user is created.
+func (r *Repository) AdminCreateUser(ctx context.Context, username, email, actorUserID string, initial *access.Desired, now time.Time) (coreuser.User, string, error) {
 	const op = "user.Repository.AdminCreateUser"
 
 	spec := coreuser.CreateSpec{Username: username, Email: email}
@@ -167,6 +172,11 @@ func (r *Repository) AdminCreateUser(ctx context.Context, username, email, actor
 	if err := insertAudit(ctx, tx, actorUserID, u.ID, coreuser.AuditActionCreateUser,
 		map[string]any{"username": username}, now); err != nil {
 		return coreuser.User{}, "", err
+	}
+	if initial != nil {
+		if _, err := applyAccess(ctx, tx, u.ID, access.State{}, *initial, actorUserID, now); err != nil {
+			return coreuser.User{}, "", err
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return coreuser.User{}, "", errs.Wrap(err, errs.CodeUnavailable, "could not create the user").WithOp(op)

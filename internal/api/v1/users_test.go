@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/hexane/atlas/internal/api"
+	"github.com/hexane/atlas/internal/core/access"
 	"github.com/hexane/atlas/internal/core/user"
 	"github.com/hexane/atlas/internal/platform/config"
 	"github.com/hexane/atlas/internal/platform/errs"
@@ -37,10 +38,20 @@ type fakeUserAdmin struct {
 	// without re-deriving it here.
 	lastAdminGrantID string
 	lastAdminUserID  string
+
+	// access is each user's editor state (zero value when unset); replaced
+	// counts ReplaceUserAccess calls that got past the version check, and
+	// createdWith records the initial access AdminCreateUser received.
+	access      map[string]access.State
+	replaced    map[string]int
+	createdWith map[string]*access.Desired
 }
 
 func newFakeUserAdmin(seed ...user.User) *fakeUserAdmin {
-	f := &fakeUserAdmin{users: map[string]user.User{}, grants: map[string]user.NodeRole{}, audit: map[string][]user.AuditEntry{}}
+	f := &fakeUserAdmin{
+		users: map[string]user.User{}, grants: map[string]user.NodeRole{}, audit: map[string][]user.AuditEntry{},
+		access: map[string]access.State{}, replaced: map[string]int{}, createdWith: map[string]*access.Desired{},
+	}
 	for _, u := range seed {
 		f.users[u.ID] = u
 	}
@@ -73,11 +84,12 @@ func (f *fakeUserAdmin) GetUser(_ context.Context, id string) (user.User, error)
 	return u, nil
 }
 
-func (f *fakeUserAdmin) AdminCreateUser(_ context.Context, username, email, _ string, now time.Time) (user.User, string, error) {
+func (f *fakeUserAdmin) AdminCreateUser(_ context.Context, username, email, _ string, initial *access.Desired, now time.Time) (user.User, string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	u := user.User{ID: "new-" + username, Username: username, Email: email, CreatedAt: now}
 	f.users[u.ID] = u
+	f.createdWith[u.ID] = initial
 	return u, "generated-one-time-password", nil
 }
 
@@ -162,6 +174,43 @@ func (f *fakeUserAdmin) RevokeUserGrant(_ context.Context, userID, grantID, _ st
 	g.RevokedAt = &now
 	f.grants[grantID] = g
 	return nil
+}
+
+func (f *fakeUserAdmin) UserAccess(_ context.Context, userID string) (access.State, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.users[userID]; !ok {
+		return access.State{}, errs.New(errs.CodeNotFound, "no such user")
+	}
+	return f.access[userID], nil
+}
+
+// ReplaceUserAccess checks the version and plans the change with every node
+// treated as known; it does not apply it — storage owns that, and is proven
+// against Postgres in internal/app/access_editor_integration_test.go.
+func (f *fakeUserAdmin) ReplaceUserAccess(_ context.Context, userID, version string, desired access.Desired, _ string, _ time.Time) (access.State, access.Changes, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.users[userID]; !ok {
+		return access.State{}, access.Changes{}, errs.New(errs.CodeNotFound, "no such user")
+	}
+	current := f.access[userID]
+	if current.Version() != version {
+		return access.State{}, access.Changes{}, access.ErrStaleVersion
+	}
+	known := map[string]bool{}
+	for _, r := range desired.Roles {
+		known[r.Scope.NodeID] = true
+	}
+	for _, p := range desired.Pages {
+		known[p.Scope.NodeID] = true
+	}
+	changes, err := access.Plan(current, desired, known)
+	if err != nil {
+		return access.State{}, access.Changes{}, err
+	}
+	f.replaced[userID]++
+	return current, changes, nil
 }
 
 // newUserAdminTestServer wires a real user + session + authz stack plus a

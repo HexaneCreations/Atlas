@@ -3,12 +3,13 @@ package v1
 import (
 	"context"
 	"encoding/json"
-	"github.com/hexane/atlas/internal/core/pageauthz"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/hexane/atlas/internal/api/session"
+	"github.com/hexane/atlas/internal/core/access"
+	"github.com/hexane/atlas/internal/core/pageauthz"
 	"github.com/hexane/atlas/internal/core/user"
 	"github.com/hexane/atlas/internal/platform/errs"
 	"github.com/hexane/atlas/internal/platform/httpx"
@@ -20,7 +21,9 @@ import (
 type UserAdmin interface {
 	ListUsersWithGrants(ctx context.Context) ([]user.UserWithGrants, error)
 	GetUser(ctx context.Context, id string) (user.User, error)
-	AdminCreateUser(ctx context.Context, username, email, actorUserID string, now time.Time) (user.User, string, error)
+	// AdminCreateUser applies a non-nil initial as the new user's access in
+	// the same transaction; if it is refused, no user is created.
+	AdminCreateUser(ctx context.Context, username, email, actorUserID string, initial *access.Desired, now time.Time) (user.User, string, error)
 	DisableUser(ctx context.Context, userID, actorUserID string, now time.Time) error
 	EnableUser(ctx context.Context, userID, actorUserID string, now time.Time) error
 	ResetPassword(ctx context.Context, userID, actorUserID string, now time.Time) (string, error)
@@ -32,6 +35,10 @@ type UserAdmin interface {
 	// IsSuperadmin reports whether userID currently holds the protected
 	// fleet-wide superadmin grant — see [Handler.guardSuperadminTarget].
 	IsSuperadmin(ctx context.Context, userID string) (bool, error)
+	// UserAccess and ReplaceUserAccess back the access editor — see
+	// [Handler.GetUserAccess] and [Handler.PutUserAccess].
+	UserAccess(ctx context.Context, userID string) (access.State, error)
+	ReplaceUserAccess(ctx context.Context, userID, version string, desired access.Desired, actorUserID string, now time.Time) (access.State, access.Changes, error)
 }
 
 // GrantResponse is one role grant as the admin Users page sees it.
@@ -196,9 +203,14 @@ func (h *Handler) ListUsers(w http.ResponseWriter, r *http.Request) error {
 // CreateUserRequest is the body of POST /users. There is no password field:
 // the admin Users page always generates one, shown to the admin exactly
 // once in the response — see [CreateUserResponse].
+//
+// Access, when present, is the new user's initial access, applied in the
+// same transaction as the insert under the access editor's rules; a refused
+// Access creates no user. Omitted, the user starts with no access.
 type CreateUserRequest struct {
-	Username string `json:"username"`
-	Email    string `json:"email,omitempty"`
+	Username string      `json:"username"`
+	Email    string      `json:"email,omitempty"`
+	Access   *AccessBody `json:"access,omitempty"`
 }
 
 // CreateUserResponse carries the generated password exactly once. There is
@@ -232,7 +244,12 @@ func (h *Handler) CreateUser(w http.ResponseWriter, r *http.Request) error {
 		return errs.New(errs.CodeInvalidArgument, "a username is required").WithOp(op)
 	}
 
-	created, plaintext, err := store.AdminCreateUser(r.Context(), req.Username, req.Email, actorID, time.Now())
+	var initial *access.Desired
+	if req.Access != nil {
+		d := req.Access.desired()
+		initial = &d
+	}
+	created, plaintext, err := store.AdminCreateUser(r.Context(), req.Username, req.Email, actorID, initial, time.Now())
 	if err != nil {
 		return err
 	}
