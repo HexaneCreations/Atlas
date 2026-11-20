@@ -31,3 +31,4 @@ web/.vite/
 .mcp.json
 atlas-agent-linux-amd64
 docs/ATLAS_OVERVIEW.txt
+.claude/settings.local.json
