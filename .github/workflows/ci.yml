@@ -433,7 +433,7 @@ jobs:
   deploy:
     name: Deploy to production
     runs-on: ubuntu-latest
-    needs: image
+    needs: [image, agent-release]
     # Strict vX.Y.Z only. A hyphen suffix (v1.2.3-rc1, v1.2.3-test1) is a
     # pre-release: it still builds and publishes images and agent binaries
     # for verification, but never deploys to production and never moves

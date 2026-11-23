@@ -6,6 +6,23 @@
 #   install.sh --transport libp2p --relationship NAME \            # libp2p
 #     --control-plane-url URL --server-addr MULTIADDR [options]
 #   install.sh --verify [--relationship NAME] [--data-dir DIR] [options]
+#   install.sh --upgrade --version vX.Y.Z [--sha256 HEX]           # binary only
+#   install.sh --upgrade --binary PATH [--sha256 HEX]
+#
+# Binary source (install and --upgrade):
+#   --binary PATH (default ./atlas-agent next to this script), or
+#   --version vX.Y.Z to download atlas-agent-linux-<arch> and SHA256SUMS from
+#   that GitHub Release. The download is verified against SHA256SUMS (and
+#   --sha256 when given) before it is executed or installed; any mismatch or
+#   a missing SHA256SUMS aborts with nothing changed. Its --version output is
+#   then checked, run as the unprivileged 'atlas' user, against vX.Y.Z.
+#
+# Upgrade:
+#   --upgrade replaces only /usr/local/bin/atlas-agent (keeping the old one as
+#   atlas-agent.prev), restarts the service, and requires it to stay active
+#   for 20 seconds with no automatic restart and to report the target
+#   version. Otherwise the previous binary is restored and restarted. It takes
+#   no connection flags and needs an existing /etc/atlas-agent/atlas-agent.env.
 #
 # Transports:
 #   https (default)  First run enrolls with --token and pins a CA (either
@@ -43,8 +60,12 @@
 #   --server-peer-id ID               libp2p server Peer ID (rendezvous)
 #   --agentops-container-logs-disabled
 #                            Set ..._AGENTOPS_CONTAINER_LOGS_DISABLED=true
+#   --version vX.Y.Z        Download and verify this release instead of --binary
+#   --sha256 HEX            Expected sha256 of the binary; must also match
+#   --upgrade               Replace only the binary of an existing install
 #   --no-start              Enable the service but do not start it
-#   --force-env             Overwrite an existing atlas-agent.env
+#   --force-env             Overwrite an existing atlas-agent.env. Without it,
+#                            an install onto a host that already has one fails.
 #   --verify               Read-only: run every check against an existing
 #                            install, print ok/FAIL per line, exit non-zero if
 #                            any failed. Makes no changes.
@@ -76,21 +97,37 @@ AGENTOPS_CONTAINER_LOGS_DISABLED=0
 DATA_DIR="/var/lib/atlas-agent"
 EXPECT_PEER_ID=""
 UNIT="atlas-agent"
+BINARY_SET=0
+RELEASE_VERSION=""
+EXPECT_SHA256=""
+UPGRADE=0
+# Every connection/config flag given, so an install onto an existing env
+# file and an --upgrade can refuse them instead of silently ignoring them.
+CONN_FLAGS=()
+
+# The public repository whose GitHub Releases carry atlas-agent-linux-<arch>
+# and SHA256SUMS (see the agent-release job in .github/workflows/ci.yml).
+RELEASE_REPO="HexaneCreations/Atlas"
+# How long a restarted service must stay active after --upgrade.
+HEALTH_SECONDS=20
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --binary) BINARY="$2"; shift 2 ;;
-    --control-plane-url) CONTROL_PLANE_URL="$2"; shift 2 ;;
-    --token) TOKEN="$2"; shift 2 ;;
-    --environment) ENVIRONMENT="$2"; shift 2 ;;
-    --ca-bundle) CA_BUNDLE="$2"; shift 2 ;;
-    --insecure-bootstrap) INSECURE_BOOTSTRAP=1; shift ;;
-    --transport) TRANSPORT="$2"; shift 2 ;;
-    --relationship) RELATIONSHIP="$2"; shift 2 ;;
-    --server-addr) LIBP2P_SERVER_ADDR="$2"; shift 2 ;;
-    --relay-addr) LIBP2P_RELAY_ADDR="$2"; shift 2 ;;
-    --server-peer-id) LIBP2P_SERVER_PEER_ID="$2"; shift 2 ;;
-    --agentops-container-logs-disabled) AGENTOPS_CONTAINER_LOGS_DISABLED=1; shift ;;
+    --binary) BINARY="$2"; BINARY_SET=1; shift 2 ;;
+    --version) RELEASE_VERSION="$2"; shift 2 ;;
+    --sha256) EXPECT_SHA256="$2"; shift 2 ;;
+    --upgrade) UPGRADE=1; shift ;;
+    --control-plane-url) CONTROL_PLANE_URL="$2"; CONN_FLAGS+=("$1"); shift 2 ;;
+    --token) TOKEN="$2"; CONN_FLAGS+=("$1"); shift 2 ;;
+    --environment) ENVIRONMENT="$2"; CONN_FLAGS+=("$1"); shift 2 ;;
+    --ca-bundle) CA_BUNDLE="$2"; CONN_FLAGS+=("$1"); shift 2 ;;
+    --insecure-bootstrap) INSECURE_BOOTSTRAP=1; CONN_FLAGS+=("$1"); shift ;;
+    --transport) TRANSPORT="$2"; CONN_FLAGS+=("$1"); shift 2 ;;
+    --relationship) RELATIONSHIP="$2"; CONN_FLAGS+=("$1"); shift 2 ;;
+    --server-addr) LIBP2P_SERVER_ADDR="$2"; CONN_FLAGS+=("$1"); shift 2 ;;
+    --relay-addr) LIBP2P_RELAY_ADDR="$2"; CONN_FLAGS+=("$1"); shift 2 ;;
+    --server-peer-id) LIBP2P_SERVER_PEER_ID="$2"; CONN_FLAGS+=("$1"); shift 2 ;;
+    --agentops-container-logs-disabled) AGENTOPS_CONTAINER_LOGS_DISABLED=1; CONN_FLAGS+=("$1"); shift ;;
     --no-start) START=0; shift ;;
     --force-env) FORCE_ENV=1; shift ;;
     --verify) MODE=verify; shift ;;
@@ -120,6 +157,13 @@ ENV_FILE="$CONF_DIR/atlas-agent.env"
 UNIT_DEST="$DESTDIR/etc/systemd/system/atlas-agent.service"
 # DATA_DIR is fixed by the unit's StateDirectory= for a real install; the
 # --data-dir flag only redirects where --verify looks.
+
+if [ "$MODE" = verify ]; then
+  [ "$UPGRADE" -eq 0 ] || die "--verify and --upgrade cannot be combined"
+  [ -z "$RELEASE_VERSION$EXPECT_SHA256" ] || die "--version and --sha256 are not used with --verify"
+elif [ "$UPGRADE" -eq 1 ]; then
+  MODE=upgrade
+fi
 
 # ---------------------------------------------------------------------------
 # verify mode
@@ -316,7 +360,7 @@ PY
 fi
 
 # ---------------------------------------------------------------------------
-# install mode
+# install and upgrade: shared setup
 # ---------------------------------------------------------------------------
 # STAGED is true when DESTDIR is set: write the tree under the prefix, own
 # files as the calling user, and touch nothing system-wide (no useradd, no
@@ -329,6 +373,268 @@ if [ "$STAGED" -eq 1 ]; then OWN_ROOT=(); OWN_ATLAS=(); fi
 
 if [ "$STAGED" -eq 0 ] && [ "$(id -u)" -ne 0 ]; then
   die "must run as root (try sudo), or set DESTDIR to stage the install"
+fi
+
+CLEANUP_DIRS=()
+cleanup() {
+  local d
+  for d in "${CLEANUP_DIRS[@]+"${CLEANUP_DIRS[@]}"}"; do rm -rf "$d"; done
+}
+trap cleanup EXIT
+
+# validate FLAG VALUE REGEX: an empty value is allowed (the caller decides
+# whether the flag is required); anything else must match REGEX in full.
+# Runs before anything is written, so a rejected value changes nothing.
+validate() {
+  local flag="$1" value="$2" re="$3" shown
+  [ -n "$value" ] || return 0
+  printf -v shown '%q' "$value"
+  case "$value" in
+    *$'\n'* | *$'\r'*) die "$flag must not contain a newline or carriage return: $shown" ;;
+  esac
+  [[ "$value" =~ $re ]] || die "$flag contains characters that are not allowed: $shown"
+}
+
+URL_RE='^https://([A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\])(:[0-9]{1,5})?(/[A-Za-z0-9._~/-]*)?$'
+MULTIADDR_RE='^/[A-Za-z0-9./:_-]+$'
+PEER_ID_RE='^[1-9A-HJ-NP-Za-km-z]{40,128}$'
+NAME_RE='^[A-Za-z0-9_-]+$'
+ENVIRONMENT_RE='^[A-Za-z0-9._-]{1,64}$'
+TOKEN_RE='^[A-Za-z0-9_-]{1,255}$'
+PATH_RE='^/[A-Za-z0-9._/-]+$'
+VERSION_RE='^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'
+SHA256_RE='^[0-9a-f]{64}$'
+
+validate --control-plane-url "$CONTROL_PLANE_URL" "$URL_RE"
+validate --token "$TOKEN" "$TOKEN_RE"
+validate --environment "$ENVIRONMENT" "$ENVIRONMENT_RE"
+validate --ca-bundle "$CA_BUNDLE" "$PATH_RE"
+validate --relationship "$RELATIONSHIP" "$NAME_RE"
+validate --server-addr "$LIBP2P_SERVER_ADDR" "$MULTIADDR_RE"
+validate --relay-addr "$LIBP2P_RELAY_ADDR" "$MULTIADDR_RE"
+validate --server-peer-id "$LIBP2P_SERVER_PEER_ID" "$PEER_ID_RE"
+validate --version "$RELEASE_VERSION" "$VERSION_RE"
+EXPECT_SHA256="$(printf '%s' "$EXPECT_SHA256" | tr 'A-F' 'a-f')"
+validate --sha256 "$EXPECT_SHA256" "$SHA256_RE"
+if [ -n "$RELEASE_VERSION" ] && [ "$BINARY_SET" -eq 1 ]; then
+  die "--version and --binary are alternatives; pass one"
+fi
+
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    shasum -a 256 "$1" | awk '{print $1}'
+  fi
+}
+
+fetch() {
+  curl --proto '=https' --tlsv1.2 -fsSL -o "$2" "$1"
+}
+
+# download_release sets BINARY to a verified copy of the $RELEASE_VERSION
+# asset for this machine, in a fresh 0700 directory. Nothing is executed or
+# installed before both checksums match.
+download_release() {
+  local os machine arch asset base work expected count actual
+  os="$(uname -s)"
+  [ "$os" = Linux ] || die "release binaries are built for Linux only (this host is $os)"
+  machine="$(uname -m)"
+  case "$machine" in
+    x86_64 | amd64) arch=amd64 ;;
+    aarch64 | arm64) arch=arm64 ;;
+    *) die "unsupported architecture '$machine': releases exist for x86_64 (amd64) and aarch64/arm64 only" ;;
+  esac
+  asset="atlas-agent-linux-$arch"
+  base="https://github.com/$RELEASE_REPO/releases/download/$RELEASE_VERSION"
+
+  work="$(mktemp -d)"
+  CLEANUP_DIRS+=("$work")
+  chmod 0700 "$work"
+
+  echo "==> Downloading $asset and SHA256SUMS for $RELEASE_VERSION"
+  fetch "$base/SHA256SUMS" "$work/SHA256SUMS" \
+    || die "could not download SHA256SUMS for $RELEASE_VERSION; refusing an unverified binary. Nothing was changed."
+  fetch "$base/$asset" "$work/$asset" \
+    || die "could not download $asset for $RELEASE_VERSION. Nothing was changed."
+
+  expected="$(awk -v a="$asset" '$2 == a || $2 == "*" a {print $1}' "$work/SHA256SUMS")"
+  count="$(printf '%s' "$expected" | grep -c . || true)"
+  if [ "$count" -ne 1 ] || ! [[ "$expected" =~ $SHA256_RE ]]; then
+    die "SHA256SUMS for $RELEASE_VERSION has no single valid entry for $asset. Nothing was changed."
+  fi
+  actual="$(sha256_of "$work/$asset")"
+  if [ "$actual" != "$expected" ]; then
+    die "checksum mismatch for $asset: SHA256SUMS has $expected, the download is $actual. Nothing was changed."
+  fi
+  if [ -n "$EXPECT_SHA256" ] && [ "$actual" != "$EXPECT_SHA256" ]; then
+    die "checksum mismatch for $asset: --sha256 is $EXPECT_SHA256, the download is $actual. Nothing was changed."
+  fi
+  echo "    sha256 $actual verified"
+  chmod 0755 "$work/$asset"
+  BINARY="$work/$asset"
+}
+
+ATLAS_USER_READY=0
+ensure_atlas_user() {
+  [ "$STAGED" -eq 0 ] && [ "$ATLAS_USER_READY" -eq 0 ] || return 0
+  ATLAS_USER_READY=1
+  echo "==> Creating system user 'atlas'"
+  if ! getent passwd atlas >/dev/null; then
+    useradd --system --no-create-home --home-dir /var/lib/atlas-agent \
+      --shell /usr/sbin/nologin atlas
+  fi
+}
+
+# binary_version PATH sets GOT_VERSION to the version PATH reports, running
+# it as the unprivileged 'atlas' user when this script is root. Returns
+# non-zero when it cannot be run or does not report "atlas <version> ...".
+binary_version() {
+  local out first rest
+  GOT_VERSION=""
+  if [ "$(id -u)" -ne 0 ]; then
+    out="$("$1" --version 2>/dev/null)" || return 1
+  elif command -v runuser >/dev/null 2>&1; then
+    out="$(runuser -u atlas -- "$1" --version 2>/dev/null)" || return 1
+  elif command -v setpriv >/dev/null 2>&1; then
+    out="$(setpriv --reuid=atlas --regid=atlas --init-groups -- "$1" --version 2>/dev/null)" || return 1
+  else
+    die "need runuser or setpriv to run the new binary as the atlas user"
+  fi
+  read -r first GOT_VERSION rest <<<"$out"
+  : "$rest"
+  [ "$first" = atlas ] && [ -n "$GOT_VERSION" ]
+}
+
+# probe_version PATH sets GOT_VERSION for a not-yet-installed binary. As root,
+# the binary is copied into a directory only 'atlas' can enter, so the atlas
+# user can execute the copy while the file root installs stays out of its
+# reach.
+probe_version() {
+  local bin="$1" probe
+  if [ "$(id -u)" -eq 0 ]; then
+    probe="$(mktemp -d)"
+    CLEANUP_DIRS+=("$probe")
+    chmod 0700 "$probe"
+    install -m 0755 "$bin" "$probe/atlas-agent"
+    chown atlas "$probe"
+    bin="$probe/atlas-agent"
+  fi
+  binary_version "$bin" || die "the new binary did not report a version (as the atlas user). Nothing was installed."
+}
+
+# acquire_binary leaves a verified binary at $BINARY, from --version or
+# --binary.
+acquire_binary() {
+  if [ -n "$RELEASE_VERSION" ]; then
+    download_release
+    return
+  fi
+  if [ ! -x "$BINARY" ]; then
+    die "no executable binary at $BINARY (pass --binary PATH or --version vX.Y.Z)"
+  fi
+  if [ -n "$EXPECT_SHA256" ]; then
+    local actual
+    actual="$(sha256_of "$BINARY")"
+    [ "$actual" = "$EXPECT_SHA256" ] \
+      || die "checksum mismatch for $BINARY: --sha256 is $EXPECT_SHA256, the file is $actual. Nothing was changed."
+  fi
+}
+
+# swap_binary SRC installs SRC as $BIN_DEST atomically: a temp file in the
+# same directory, then a rename over the old one.
+swap_binary() {
+  local tmp
+  tmp="$(mktemp "$(dirname "$BIN_DEST")/.atlas-agent.XXXXXX")"
+  install "${OWN_ROOT[@]}" -m 0755 "$1" "$tmp"
+  mv -f "$tmp" "$BIN_DEST"
+}
+
+# service_healthy sets HEALTH_ERR and returns non-zero unless the unit stays
+# active for HEALTH_SECONDS with no automatic restart.
+service_healthy() {
+  local before after state i
+  HEALTH_ERR=""
+  before="$(systemctl show -p NRestarts --value atlas-agent 2>/dev/null || true)"
+  for ((i = 0; i <= HEALTH_SECONDS; i++)); do
+    state="$(systemctl is-active atlas-agent 2>/dev/null || true)"
+    if [ "$state" != active ]; then
+      HEALTH_ERR="systemctl is-active was '$state' ${i}s after the restart"
+      return 1
+    fi
+    [ "$i" -lt "$HEALTH_SECONDS" ] && sleep 1
+  done
+  after="$(systemctl show -p NRestarts --value atlas-agent 2>/dev/null || true)"
+  if ! [[ "$before" =~ ^[0-9]+$ && "$after" =~ ^[0-9]+$ ]]; then
+    HEALTH_ERR="could not read NRestarts (before '$before', after '$after')"
+    return 1
+  fi
+  if [ "$after" -gt "$before" ]; then
+    HEALTH_ERR="the service restarted on its own (NRestarts $before -> $after)"
+    return 1
+  fi
+}
+
+rollback() {
+  echo "install.sh: upgrade failed: $1" >&2
+  echo "==> Restoring the previous binary from $BIN_DEST.prev" >&2
+  swap_binary "$BIN_DEST.prev"
+  systemctl restart atlas-agent || true
+  echo "    restored; atlas-agent is now '$(systemctl is-active atlas-agent 2>/dev/null || true)'" >&2
+  exit 1
+}
+
+# ---------------------------------------------------------------------------
+# upgrade mode: the binary and nothing else
+# ---------------------------------------------------------------------------
+if [ "$MODE" = upgrade ]; then
+  if [ "$STAGED" -eq 1 ] && [ "${ATLAS_INSTALL_TEST:-}" != 1 ]; then
+    die "--upgrade acts on the running service; DESTDIR is accepted with it only by the test suite"
+  fi
+  if [ "${#CONN_FLAGS[@]}" -gt 0 ]; then
+    die "--upgrade replaces only the binary and takes no connection flags (got: ${CONN_FLAGS[*]}). To change the configuration, re-install with --force-env."
+  fi
+  [ "$FORCE_ENV" -eq 0 ] || die "--force-env is not used with --upgrade"
+  [ "$START" -eq 1 ] || die "--no-start is not used with --upgrade"
+  if [ -z "$RELEASE_VERSION" ] && [ "$BINARY_SET" -eq 0 ]; then
+    die "--upgrade needs --version vX.Y.Z or --binary PATH"
+  fi
+  [ -f "$ENV_FILE" ] || die "no $ENV_FILE: there is no configured atlas-agent here to upgrade. Run a normal install first."
+  [ -x "$BIN_DEST" ] || die "no installed binary at $BIN_DEST to upgrade"
+
+  acquire_binary
+  probe_version "$BINARY"
+  TARGET="$GOT_VERSION"
+  if [ -n "$RELEASE_VERSION" ] && [ "$TARGET" != "$RELEASE_VERSION" ]; then
+    die "the downloaded binary reports $TARGET, not $RELEASE_VERSION. Nothing was installed."
+  fi
+
+  echo "==> Keeping the current binary as $BIN_DEST.prev"
+  prev_tmp="$(mktemp "$(dirname "$BIN_DEST")/.atlas-agent.prev.XXXXXX")"
+  install "${OWN_ROOT[@]}" -m 0755 "$BIN_DEST" "$prev_tmp"
+  mv -f "$prev_tmp" "$BIN_DEST.prev"
+
+  echo "==> Installing $TARGET to $BIN_DEST"
+  swap_binary "$BINARY"
+
+  echo "==> Restarting atlas-agent; it must stay active for ${HEALTH_SECONDS}s"
+  systemctl restart atlas-agent || rollback "systemctl restart atlas-agent failed"
+  service_healthy || rollback "$HEALTH_ERR"
+  binary_version "$BIN_DEST" || rollback "$BIN_DEST --version failed after the upgrade"
+  [ "$GOT_VERSION" = "$TARGET" ] || rollback "$BIN_DEST reports $GOT_VERSION, want $TARGET"
+
+  echo "==> Upgraded to $TARGET; atlas-agent is active (previous binary kept at $BIN_DEST.prev)"
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# install mode
+# ---------------------------------------------------------------------------
+if [ -f "$ENV_FILE" ] && [ "$FORCE_ENV" -ne 1 ]; then
+  if [ "${#CONN_FLAGS[@]}" -gt 0 ]; then
+    die "$ENV_FILE already exists, so these flags would be ignored: ${CONN_FLAGS[*]}. Pass --force-env to rewrite it, or use --upgrade to replace only the binary."
+  fi
+  die "$ENV_FILE already exists. Use --upgrade to replace only the binary, or --force-env with the full set of connection flags to rewrite it."
 fi
 [ -n "$CONTROL_PLANE_URL" ] || die "--control-plane-url is required"
 
@@ -367,21 +673,20 @@ if [ -n "$RELATIONSHIP" ]; then
   [ "$RELATIONSHIP" != "default" ] || die "'default' is reserved for the implicit relationship"
 fi
 
-if [ ! -x "$BINARY" ]; then
-  die "no executable binary at $BINARY (pass --binary PATH)"
+acquire_binary
+if [ -n "$RELEASE_VERSION" ]; then
+  # The atlas user must exist to run the verified download unprivileged.
+  ensure_atlas_user
+  probe_version "$BINARY"
+  [ "$GOT_VERSION" = "$RELEASE_VERSION" ] \
+    || die "the downloaded binary reports $GOT_VERSION, not $RELEASE_VERSION. Nothing was installed."
 fi
 
 echo "==> Installing binary to $BIN_DEST"
 install -d "$(dirname "$BIN_DEST")"
 install "${OWN_ROOT[@]}" -m 0755 "$BINARY" "$BIN_DEST"
 
-if [ "$STAGED" -eq 0 ]; then
-  echo "==> Creating system user 'atlas'"
-  if ! getent passwd atlas >/dev/null; then
-    useradd --system --no-create-home --home-dir /var/lib/atlas-agent \
-      --shell /usr/sbin/nologin atlas
-  fi
-fi
+ensure_atlas_user
 
 DROPIN_DIR="$DESTDIR/etc/systemd/system/atlas-agent.service.d"
 if [ "$STAGED" -eq 0 ] && getent group docker >/dev/null; then
@@ -398,9 +703,9 @@ fi
 
 echo "==> Writing $ENV_FILE"
 install -d "${OWN_ATLAS[@]}" -m 0750 "$CONF_DIR"
-if [ -f "$ENV_FILE" ] && [ "$FORCE_ENV" -ne 1 ]; then
-  echo "    $ENV_FILE already exists; leaving it as-is (--force-env to overwrite)"
-else
+# An existing env file without --force-env was refused above, before
+# anything was written.
+{
   if [ -n "$RELATIONSHIP" ]; then
     PFX="$(relationship_prefix "$RELATIONSHIP")"
     {
@@ -430,7 +735,7 @@ else
   fi
   [ "$STAGED" -eq 0 ] && chown root:atlas "$ENV_FILE"
   chmod 0640 "$ENV_FILE"
-fi
+}
 
 echo "==> Installing systemd unit"
 install -d "$(dirname "$UNIT_DEST")"
