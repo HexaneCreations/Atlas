@@ -463,20 +463,51 @@ jobs:
           target: /root/atlas
           strip_components: 0
 
+      # The notifications encryption key: created ONCE (openssl rand -base64
+      # 32) and stored as the production Environment secret
+      # NOTIFICATIONS_ENCRYPTION_KEY. This job only ever copies it to the
+      # server; it never generates one, so a deploy cannot rotate it and
+      # strand every stored channel secret. Fails the deploy when the secret
+      # is missing or is not 32 bytes of base64.
+      #
+      # Sent over SSH stdin, never on a command line: ssh-action's `envs:`
+      # becomes `export NAME=value` inside the remote command, which the
+      # server's shell receives as an argument (visible in `ps`). printf is
+      # a bash builtin, so the key is never an argument on the runner either.
+      - name: Upload the notifications encryption key
+        env:
+          NOTIFICATIONS_ENCRYPTION_KEY: ${{ secrets.NOTIFICATIONS_ENCRYPTION_KEY }}
+          PROD_SERVER_HOST: ${{ secrets.PROD_SERVER_HOST }}
+          PROD_SERVER_USER: ${{ secrets.PROD_SERVER_USER }}
+          PROD_SSH_PRIVATE_KEY: ${{ secrets.PROD_SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          umask 077
+          if [ -z "${NOTIFICATIONS_ENCRYPTION_KEY:-}" ]; then
+            echo "::error::the NOTIFICATIONS_ENCRYPTION_KEY production secret is not set"
+            exit 1
+          fi
+          key_bytes=$(printf '%s' "$NOTIFICATIONS_ENCRYPTION_KEY" | base64 -d 2>/dev/null | wc -c) || key_bytes=0
+          if [ "$key_bytes" -ne 32 ]; then
+            echo "::error::the NOTIFICATIONS_ENCRYPTION_KEY production secret must be 32 bytes, base64-encoded"
+            exit 1
+          fi
+          ssh_dir="$RUNNER_TEMP/notifications-key-ssh"
+          mkdir -p "$ssh_dir"
+          trap 'rm -rf "$ssh_dir"' EXIT
+          printf '%s\n' "$PROD_SSH_PRIVATE_KEY" > "$ssh_dir/id"
+          printf '%s' "$NOTIFICATIONS_ENCRYPTION_KEY" | ssh -i "$ssh_dir/id" \
+            -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+            -o UserKnownHostsFile="$ssh_dir/known_hosts" \
+            "$PROD_SERVER_USER@$PROD_SERVER_HOST" \
+            'umask 077 && cat > /root/atlas/secrets/atlas_notifications_key.txt.new && mv -f /root/atlas/secrets/atlas_notifications_key.txt.new /root/atlas/secrets/atlas_notifications_key.txt'
+
       - name: Configure and deploy
         uses: appleboy/ssh-action@v1.0.3
-        env:
-          # Created ONCE (openssl rand -base64 32) and stored as a production (TEMPORARY: a variable, move to a secret)
-          # Environment secret. This job only ever copies it to the server;
-          # it never generates one, so a deploy cannot rotate it and strand
-          # every stored channel secret. Passed through the environment
-          # rather than spliced into the script text.
-          ATLAS_NOTIFICATIONS_ENCRYPTION_KEY: ${{ vars.NOTIFICATIONS_ENCRYPTION_KEY }}
         with:
           host: ${{ secrets.PROD_SERVER_HOST }}
           username: ${{ secrets.PROD_SERVER_USER }}
           key: ${{ secrets.PROD_SSH_PRIVATE_KEY }}
-          envs: ATLAS_NOTIFICATIONS_ENCRYPTION_KEY
           script: |
             set -euo pipefail
             cd /root/atlas
@@ -522,23 +553,16 @@ jobs:
             # prod.yml) points here.
             printf '%s' "${{ secrets.ATLAS_DATABASE_PASSWORD }}" > secrets/atlas_db_password.txt
 
-            # The notifications encryption key, copied verbatim from the
-            # production Environment secret. Fails the deploy — never
-            # generates a replacement — when the secret is missing or is not
-            # 32 bytes of base64, so a misconfigured secret cannot silently
-            # start atlas-server with notifications disabled or with a new
-            # key. Neither check prints the key.
-            if [ -z "${ATLAS_NOTIFICATIONS_ENCRYPTION_KEY:-}" ]; then
-              echo "the NOTIFICATIONS_ENCRYPTION_KEY production variable is not set" >&2
-              exit 1
-            fi
-            KEY_BYTES=$(printf '%s' "$ATLAS_NOTIFICATIONS_ENCRYPTION_KEY" | base64 -d 2>/dev/null | wc -c) || KEY_BYTES=0
+            # The notifications encryption key, written by the previous step
+            # over SSH stdin. Checked again here so a failed upload stops the
+            # deploy instead of starting atlas-server with notifications
+            # disabled. The check reads the file on stdin and never prints it.
+            KEY_BYTES=$(base64 -d < secrets/atlas_notifications_key.txt 2>/dev/null | wc -c) || KEY_BYTES=0
             if [ "$KEY_BYTES" -ne 32 ]; then
-              echo "the NOTIFICATIONS_ENCRYPTION_KEY production variable must be 32 bytes, base64-encoded" >&2
+              echo "secrets/atlas_notifications_key.txt is missing or is not 32 bytes, base64-encoded" >&2
               exit 1
             fi
-            printf '%s' "$ATLAS_NOTIFICATIONS_ENCRYPTION_KEY" > secrets/atlas_notifications_key.txt
-            unset ATLAS_NOTIFICATIONS_ENCRYPTION_KEY KEY_BYTES
+            unset KEY_BYTES
 
             # github.repository_owner, not a hardcoded name — GHCR accepts
             # any username paired with a valid token, so this only needs to
