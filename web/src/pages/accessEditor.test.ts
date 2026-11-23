@@ -12,6 +12,7 @@ import {
   normalize,
   pageLock,
   problems,
+  roleSelectState,
   saveErrorKind,
   toBody,
   toDraft,
@@ -200,5 +201,15 @@ describe("saveErrorKind", () => {
     expect(saveErrorKind(409, "access changed since you opened it; reload")).toBe("stale");
     expect(saveErrorKind(409, "page \"containers\" on fleet-wide is already granted by a role bundle")).toBe("server");
     expect(saveErrorKind(412, "this is the last user with fleet-wide admin access")).toBe("server");
+  });
+});
+
+describe("roleSelectState", () => {
+  it("a non-superadmin cannot pick admin, nor change a row that holds it", () => {
+    expect(roleSelectState("viewer", false)).toEqual({ selectDisabled: false, adminOptionDisabled: true });
+    expect(roleSelectState(undefined, false)).toEqual({ selectDisabled: false, adminOptionDisabled: true });
+    expect(roleSelectState("admin", false)).toEqual({ selectDisabled: true, adminOptionDisabled: true });
+    expect(roleSelectState("admin", true)).toEqual({ selectDisabled: false, adminOptionDisabled: false });
+    expect(roleSelectState(undefined, true)).toEqual({ selectDisabled: false, adminOptionDisabled: false });
   });
 });

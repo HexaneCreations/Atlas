@@ -66,6 +66,9 @@ func (l lazyUserStore) RevokeUserGrant(ctx context.Context, userID, grantID, rev
 func (l lazyUserStore) IsSuperadmin(ctx context.Context, userID string) (bool, error) {
 	return l.repo().IsSuperadmin(ctx, userID)
 }
+func (l lazyUserStore) ListGrants(ctx context.Context, userID string) ([]coreuser.NodeRole, error) {
+	return l.repo().ListGrants(ctx, userID)
+}
 func (l lazyUserStore) UserAccess(ctx context.Context, userID string) (access.State, error) {
 	return l.repo().UserAccess(ctx, userID)
 }

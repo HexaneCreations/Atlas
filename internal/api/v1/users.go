@@ -35,6 +35,9 @@ type UserAdmin interface {
 	// IsSuperadmin reports whether userID currently holds the protected
 	// fleet-wide superadmin grant — see [Handler.guardSuperadminTarget].
 	IsSuperadmin(ctx context.Context, userID string) (bool, error)
+	// ListGrants returns every role grant userID has held, active and
+	// revoked — see [Handler.guardAdminTarget].
+	ListGrants(ctx context.Context, userID string) ([]user.NodeRole, error)
 	// UserAccess and ReplaceUserAccess back the access editor — see
 	// [Handler.GetUserAccess] and [Handler.PutUserAccess].
 	UserAccess(ctx context.Context, userID string) (access.State, error)
@@ -173,6 +176,65 @@ func (h *Handler) guardSuperadminTarget(ctx context.Context, store UserAdmin, ac
 	return user.ErrProtectedSuperadmin
 }
 
+// adminTarget wraps a {userID} route, inside [Handler.protectTarget], in
+// [Handler.guardAdminTarget]. Applied to disable, enable and reset-password.
+func (h *Handler) adminTarget(next httpx.Handler) httpx.Handler {
+	return func(w http.ResponseWriter, r *http.Request) error {
+		const op = "v1.Handler.adminTarget"
+		store, err := h.userAdmin(op)
+		if err != nil {
+			return err
+		}
+		actorID, err := h.actor(r, op)
+		if err != nil {
+			return err
+		}
+		if err := h.guardAdminTarget(r.Context(), store, actorID, r.PathValue("userID")); err != nil {
+			return err
+		}
+		return next(w, r)
+	}
+}
+
+// guardAdminTarget refuses an account action against a user who holds an
+// active admin grant (fleet-wide or node-scoped) unless the caller is a
+// superadmin, with [user.ErrAdminOnlySuperadmin]. The caller's own account
+// passes through, so each handler's own self-action rule answers first.
+// A superadmin target is refused earlier by [Handler.guardSuperadminTarget].
+func (h *Handler) guardAdminTarget(ctx context.Context, store UserAdmin, actorID, targetID string) error {
+	if targetID == "" || actorID == targetID {
+		return nil
+	}
+	actorSuper, err := store.IsSuperadmin(ctx, actorID)
+	if err != nil || actorSuper {
+		return err
+	}
+	grants, err := store.ListGrants(ctx, targetID)
+	if err != nil {
+		return err
+	}
+	for _, g := range grants {
+		if g.RevokedAt == nil && g.Role == user.RoleAdmin {
+			return user.ErrAdminOnlySuperadmin
+		}
+	}
+	return nil
+}
+
+// requireSuperadminActor returns [user.ErrAdminOnlySuperadmin] unless the
+// authenticated caller holds the superadmin role. The actor id always comes
+// from the session principal, never from the request body.
+func requireSuperadminActor(ctx context.Context, store UserAdmin, actorID string) error {
+	super, err := store.IsSuperadmin(ctx, actorID)
+	if err != nil {
+		return err
+	}
+	if !super {
+		return user.ErrAdminOnlySuperadmin
+	}
+	return nil
+}
+
 // ListUsers returns every user and their current active role grants.
 func (h *Handler) ListUsers(w http.ResponseWriter, r *http.Request) error {
 	const op = "v1.Handler.ListUsers"
@@ -247,6 +309,11 @@ func (h *Handler) CreateUser(w http.ResponseWriter, r *http.Request) error {
 	var initial *access.Desired
 	if req.Access != nil {
 		d := req.Access.desired()
+		if d.GrantsAdmin() {
+			if err = requireSuperadminActor(r.Context(), store, actorID); err != nil {
+				return err
+			}
+		}
 		initial = &d
 	}
 	created, plaintext, err := store.AdminCreateUser(r.Context(), req.Username, req.Email, actorID, initial, time.Now())
@@ -302,6 +369,11 @@ func (h *Handler) GrantRole(w http.ResponseWriter, r *http.Request) error {
 	if err := spec.Validate(); err != nil {
 		return err
 	}
+	if spec.Role == user.RoleAdmin {
+		if err = requireSuperadminActor(r.Context(), store, actorID); err != nil {
+			return err
+		}
+	}
 	if err := store.Grant(r.Context(), spec, time.Now()); err != nil {
 		return err
 	}
@@ -328,7 +400,21 @@ func (h *Handler) RevokeRole(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 
-	if err := store.RevokeUserGrant(r.Context(), r.PathValue("userID"), r.PathValue("grantID"), actorID, time.Now()); err != nil {
+	targetID, grantID := r.PathValue("userID"), r.PathValue("grantID")
+	// A grant row's role never changes, so this read cannot go stale before
+	// the revoke below.
+	grants, err := store.ListGrants(r.Context(), targetID)
+	if err != nil {
+		return err
+	}
+	for _, g := range grants {
+		if g.ID == grantID && g.RevokedAt == nil && g.Role == user.RoleAdmin {
+			if err = requireSuperadminActor(r.Context(), store, actorID); err != nil {
+				return err
+			}
+		}
+	}
+	if err := store.RevokeUserGrant(r.Context(), targetID, grantID, actorID, time.Now()); err != nil {
 		return err
 	}
 	w.WriteHeader(http.StatusNoContent)

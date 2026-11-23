@@ -1,12 +1,16 @@
 import { describe, expect, it } from "vitest";
 import type { Grant, ListUserPageAccessResponse, Page, PageAccessAssignment } from "../api/types";
 import {
+  ADMIN_ONLY_SUPERADMIN_MESSAGE,
   LAST_ADMIN_REVOKE_MESSAGE,
   PROTECTED_SUPERADMIN_MESSAGE,
   SELF_REVOKE_MESSAGE,
+  adminTargetLocked,
   effectivePages,
+  holdsAdmin,
   holdsSuperadmin,
   revokeGuard,
+  roleRevokeGuard,
 } from "./usersAccess";
 
 function grant(partial: Partial<Grant>): Grant {
@@ -117,5 +121,43 @@ describe("effectivePages", () => {
   it("ignores a bundle assignment whose definition is unknown", () => {
     const pa = access({ role_access: [bundleAssignment("since-deleted")] });
     expect(effectivePages(pa, bundles).size).toBe(0);
+  });
+});
+
+describe("admin-only-superadmin rule", () => {
+  const admin = [grant({ role: "admin", fleet_wide: false, node_id: "n1" })];
+  const operator = [grant({ role: "operator" })];
+
+  it("holdsAdmin counts active admin grants on any scope", () => {
+    expect(holdsAdmin(admin)).toBe(true);
+    expect(holdsAdmin(operator)).toBe(false);
+    expect(holdsAdmin([grant({ role: "admin", revoked_at: "2026-01-02T00:00:00Z" })])).toBe(false);
+    expect(holdsAdmin(undefined)).toBe(false);
+  });
+
+  it("locks disable/enable/reset only for a non-superadmin acting on another user who holds admin", () => {
+    const cases: [boolean, boolean, Grant[], boolean][] = [
+      // actorIsSuperadmin, isSelf, target grants, locked
+      [false, false, admin, true],
+      [false, false, operator, false],
+      [false, false, [], false],
+      [false, true, admin, false],
+      [true, false, admin, false],
+      [true, false, operator, false],
+    ];
+    for (const [actorIsSuperadmin, isSelf, targetGrants, locked] of cases) {
+      expect(adminTargetLocked({ actorIsSuperadmin, isSelf, targetGrants })).toBe(locked);
+    }
+  });
+
+  it("locks Revoke on an admin grant for a non-superadmin; other guards win first", () => {
+    const g = grant({ role: "admin" });
+    expect(roleRevokeGuard({ isSelf: false, actorIsSuperadmin: false, grant: g })).toEqual({
+      disabled: true,
+      reason: ADMIN_ONLY_SUPERADMIN_MESSAGE,
+    });
+    expect(roleRevokeGuard({ isSelf: false, actorIsSuperadmin: true, grant: g })).toEqual({ disabled: false });
+    expect(roleRevokeGuard({ isSelf: false, actorIsSuperadmin: false, grant: grant({ role: "viewer" }) })).toEqual({ disabled: false });
+    expect(roleRevokeGuard({ isSelf: false, lastAdmin: true, actorIsSuperadmin: false, grant: g }).reason).toBe(LAST_ADMIN_REVOKE_MESSAGE);
   });
 });

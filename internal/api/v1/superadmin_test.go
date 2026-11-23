@@ -160,14 +160,18 @@ func TestSuperadminCanActOnAdmins(t *testing.T) {
 	}
 }
 
-// Point 6: admin-vs-admin behaviour is unchanged. A plain fleet-wide admin
-// acting on a different (non-superadmin) fleet-wide admin still succeeds on
-// every action — the guard's precondition is specifically "target holds
-// superadmin", which is not met here.
+// Admin-vs-admin: the superadmin guard does not fire, so every action an
+// admin may still take on another admin succeeds. Revoking the admin grant,
+// disable, enable and reset-password are refused by guardAdminTarget — see
+// TestAdminCannotTakeAdminOnlyActions.
 func TestAdminVsAdminActionsAreUnchanged(t *testing.T) {
 	t.Parallel()
 
+	refused := map[string]bool{"revoke role": true, "disable": true, "enable": true, "reset password": true}
 	for _, a := range targetActions(secondAdminID, secondAdminGrant) {
+		if refused[a.name] {
+			continue
+		}
 		t.Run(a.name, func(t *testing.T) {
 			base, _, client := newSuperadminGuardServer(t, false)
 			if code := do(t, client, base, a); code >= 400 {

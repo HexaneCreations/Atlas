@@ -170,3 +170,43 @@ func TestProtectedSuperadminMessage(t *testing.T) {
 		t.Errorf("ErrProtectedSuperadmin = %q, want it to contain %q", got, want)
 	}
 }
+
+// Disable, enable and reset-password must be registered as
+// h.protectTarget(h.adminTarget(h.X)): the admin-only-superadmin rule for
+// targets who hold admin.
+func TestAdminTargetRoutesAreGuarded(t *testing.T) {
+	t.Parallel()
+
+	want := []string{
+		"POST /users/{userID}/disable",
+		"POST /users/{userID}/enable",
+		"POST /users/{userID}/reset-password",
+	}
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "system.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse system.go: %v", err)
+	}
+	var guarded []string
+	ast.Inspect(file, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok || len(call.Args) != 2 || !isSelector(call.Fun, "mux", "Handle") {
+			return true
+		}
+		pattern, ok := routePattern(call.Args[0])
+		if !ok {
+			return true
+		}
+		outer, ok := call.Args[1].(*ast.CallExpr)
+		if !ok || !isSelector(outer.Fun, "h", "protectTarget") || len(outer.Args) != 1 {
+			return true
+		}
+		if inner, ok := outer.Args[0].(*ast.CallExpr); ok && isSelector(inner.Fun, "h", "adminTarget") {
+			guarded = append(guarded, pattern)
+		}
+		return true
+	})
+	if !slices.Equal(guarded, want) {
+		t.Errorf("adminTarget routes = %v, want %v", guarded, want)
+	}
+}

@@ -22,6 +22,11 @@ export const LAST_ADMIN_REVOKE_MESSAGE = "Can't revoke — this is the last user
  *  backend's guardSuperadminTarget 403. */
 export const PROTECTED_SUPERADMIN_MESSAGE = "Superadmin accounts can only be changed by a superadmin";
 
+/** Shown on every control a non-superadmin may not use because it grants or
+ *  removes the admin role, or acts on an account holding it. Mirrors the
+ *  backend's ErrAdminOnlySuperadmin 403. */
+export const ADMIN_ONLY_SUPERADMIN_MESSAGE = "Only a superadmin can change admin access";
+
 export interface RevokeGuard {
   disabled: boolean;
   reason?: string;
@@ -46,6 +51,39 @@ export function revokeGuard(opts: {
   if (opts.lastAdmin) return { disabled: true, reason: LAST_ADMIN_REVOKE_MESSAGE };
   if (opts.isSelf) return { disabled: true, reason: SELF_REVOKE_MESSAGE };
   return { disabled: false };
+}
+
+/** Whether a user holds an active admin grant, fleet-wide or on any node. */
+export function holdsAdmin(grants: readonly Grant[] | undefined): boolean {
+  return (grants ?? []).some((g) => g.role === "admin" && !g.revoked_at);
+}
+
+/**
+ * Whether disable, enable and reset-password are locked on a target: only a
+ * superadmin may take them against a user who holds admin. The caller's own
+ * account is never locked by this rule (the server's self-action rules
+ * answer there), mirroring guardAdminTarget.
+ */
+export function adminTargetLocked(opts: { actorIsSuperadmin: boolean; isSelf: boolean; targetGrants: readonly Grant[] | undefined }): boolean {
+  return !opts.actorIsSuperadmin && !opts.isSelf && holdsAdmin(opts.targetGrants);
+}
+
+/**
+ * Whether a Revoke control in the user detail panel must be disabled, and the
+ * reason to surface on hover — see [revokeGuard]; `adminOnly` marks an admin
+ * grant the signed-in non-superadmin may not revoke.
+ */
+export function roleRevokeGuard(opts: {
+  isSelf: boolean;
+  lastAdmin?: boolean;
+  protectedSuperadmin?: boolean;
+  actorIsSuperadmin: boolean;
+  grant: Grant;
+}): RevokeGuard {
+  const base = revokeGuard(opts);
+  if (base.disabled) return base;
+  if (!opts.actorIsSuperadmin && opts.grant.role === "admin") return { disabled: true, reason: ADMIN_ONLY_SUPERADMIN_MESSAGE };
+  return base;
 }
 
 /**

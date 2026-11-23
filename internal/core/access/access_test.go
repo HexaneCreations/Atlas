@@ -313,3 +313,45 @@ func TestVersion(t *testing.T) {
 		t.Error("an empty state has no version")
 	}
 }
+
+func TestChangesAdmin(t *testing.T) {
+	t.Parallel()
+	const a, o, v = user.RoleAdmin, user.RoleOperator, user.RoleViewer
+	cases := []struct {
+		name    string
+		current []access.RoleGrant
+		desired []access.Role
+		want    bool
+	}{
+		{"no admin either side", []access.RoleGrant{heldRole("r1", node("n1"), v)}, []access.Role{role(fleet, o)}, false},
+		{"grant fleet-wide admin", nil, []access.Role{role(fleet, a)}, true},
+		{"grant node admin", []access.RoleGrant{heldRole("r1", fleet, v)}, []access.Role{role(fleet, v), role(node("n1"), a)}, true},
+		{"revoke fleet-wide admin", []access.RoleGrant{heldRole("r1", fleet, a)}, []access.Role{role(fleet, o)}, true},
+		{"revoke node admin", []access.RoleGrant{heldRole("r1", node("n1"), a)}, nil, true},
+		{"move node admin", []access.RoleGrant{heldRole("r1", node("n1"), a)}, []access.Role{role(node("n2"), a)}, true},
+		{"keep fleet-wide admin, edit others", []access.RoleGrant{heldRole("r1", fleet, a), heldRole("r2", node("n1"), o)},
+			[]access.Role{role(fleet, a)}, false},
+		{"redundant node admin cleaned up", []access.RoleGrant{heldRole("r1", fleet, a), heldRole("r2", node("n1"), a)},
+			[]access.Role{role(fleet, a), role(node("n1"), a)}, false},
+		{"fleet-wide admin replaced by node admin", []access.RoleGrant{heldRole("r1", fleet, a)},
+			[]access.Role{role(fleet, o), role(node("n1"), a)}, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := access.ChangesAdmin(access.State{Roles: c.current}, access.Desired{Roles: c.desired})
+			if got != c.want {
+				t.Errorf("ChangesAdmin = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+func TestGrantsAdmin(t *testing.T) {
+	t.Parallel()
+	if (access.Desired{Roles: []access.Role{role(fleet, user.RoleOperator)}}).GrantsAdmin() {
+		t.Error("operator reported as admin")
+	}
+	if !(access.Desired{Roles: []access.Role{role(node("n1"), user.RoleAdmin)}}).GrantsAdmin() {
+		t.Error("node-scoped admin not reported")
+	}
+}

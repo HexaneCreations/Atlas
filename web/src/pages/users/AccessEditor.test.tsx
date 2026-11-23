@@ -89,3 +89,30 @@ describe("AccessGrid", () => {
     expect(html).toContain("needs a role with user management");
   });
 });
+
+describe("AccessGrid for a non-superadmin", () => {
+  const server: UserAccessResponse = {
+    version: "v1",
+    roles: [{ id: "r1", role: "admin", fleet_wide: true, granted_at: "2026-01-01T00:00:00Z" }],
+    pages: [],
+    bundles: [],
+  };
+  const render = (canChangeAdmin: boolean) =>
+    renderToStaticMarkup(
+      <AccessGrid server={server} draft={toDraft(server)} nodes={[{ node_id: "n1", hostname: "web-1" }]} readOnly={false} canChangeAdmin={canChangeAdmin} onEdit={() => undefined} />,
+    );
+
+  it("disables the admin option and the admin row, with the hint", () => {
+    const html = render(false);
+    expect(html.match(/<option value="admin" disabled=""/g)).toHaveLength(2);
+    expect(html).toMatch(/aria-label="Role for fleet-wide"[^>]*disabled=""/);
+    expect(html).not.toMatch(/aria-label="Role for n1"[^>]*disabled=""/);
+    expect(html).toContain("Only a superadmin can change admin access");
+  });
+
+  it("a superadmin sees no change", () => {
+    const html = render(true);
+    expect(html).not.toContain('<option value="admin" disabled');
+    expect(html).not.toContain("Only a superadmin can change admin access");
+  });
+});

@@ -270,3 +270,11 @@ func (a Authorizer) AuthorizedNodes(ctx context.Context, principal Principal, pe
 	}
 	return false, set, nil
 }
+
+// ErrAdminOnlySuperadmin is returned when a non-superadmin actor grants or
+// revokes the admin role (fleet-wide or node-scoped), through any API path,
+// or disables, enables or resets the password of a user who holds it.
+// Everything else an admin may do to an admin target stays allowed — see
+// internal/api/v1.Handler.guardAdminTarget.
+var ErrAdminOnlySuperadmin = errs.New(errs.CodePermissionDenied,
+	"admin accounts can only be changed by a superadmin")

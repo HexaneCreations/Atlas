@@ -277,6 +277,10 @@ type protectedAction struct {
 	readOnly       bool // succeeds without changing state
 	superadminOnly bool // only meaningful against a superadmin target
 	needsDisabled  bool // the target must start disabled for the action to change anything
+	// adminOnly marks an action only a superadmin may take against a target
+	// holding admin (user.ErrAdminOnlySuperadmin); covered by
+	// admin_only_superadmin_integration_test.go.
+	adminOnly bool
 }
 
 func protectedActions() []protectedAction {
@@ -285,15 +289,15 @@ func protectedActions() []protectedAction {
 		{name: "grant role", method: http.MethodPost, okStatus: http.StatusNoContent,
 			path: func(u targetUser) string { return "/users/" + u.id + "/grants" },
 			body: func(targetUser) string { return `{"role":"viewer","fleet_wide":true}` }},
-		{name: "revoke admin grant", method: http.MethodDelete, okStatus: http.StatusNoContent, body: none,
+		{name: "revoke admin grant", method: http.MethodDelete, okStatus: http.StatusNoContent, body: none, adminOnly: true,
 			path: func(u targetUser) string { return "/users/" + u.id + "/grants/" + u.adminGrant }},
 		{name: "revoke superadmin grant", method: http.MethodDelete, okStatus: http.StatusNoContent, body: none, superadminOnly: true,
 			path: func(u targetUser) string { return "/users/" + u.id + "/grants/" + u.superGrant }},
-		{name: "disable", method: http.MethodPost, okStatus: http.StatusNoContent, body: none,
+		{name: "disable", method: http.MethodPost, okStatus: http.StatusNoContent, body: none, adminOnly: true,
 			path: func(u targetUser) string { return "/users/" + u.id + "/disable" }},
-		{name: "enable", method: http.MethodPost, okStatus: http.StatusNoContent, body: none, needsDisabled: true,
+		{name: "enable", method: http.MethodPost, okStatus: http.StatusNoContent, body: none, needsDisabled: true, adminOnly: true,
 			path: func(u targetUser) string { return "/users/" + u.id + "/enable" }},
-		{name: "reset password", method: http.MethodPost, okStatus: http.StatusOK, body: none,
+		{name: "reset password", method: http.MethodPost, okStatus: http.StatusOK, body: none, adminOnly: true,
 			path: func(u targetUser) string { return "/users/" + u.id + "/reset-password" }},
 		{name: "force logout", method: http.MethodPost, okStatus: http.StatusNoContent, body: none,
 			path: func(u targetUser) string { return "/users/" + u.id + "/force-logout" }},
@@ -356,7 +360,9 @@ func TestAdminCannotChangeASuperadmin(t *testing.T) {
 }
 
 // The guard's precondition is "target holds superadmin": admin-on-admin and
-// superadmin-on-admin succeed and actually change the target. There is no
+// superadmin-on-admin succeed and actually change the target, except that
+// admin-on-admin skips the adminOnly actions (refused, see
+// admin_only_superadmin_integration_test.go). There is no
 // superadmin-on-another-superadmin pair: migrations/0022_single_superadmin.sql
 // makes a second superadmin impossible (the guard-logic pin lives in
 // internal/api/v1's TestSuperadminCanActOnAnotherSuperadmin).
@@ -370,13 +376,14 @@ func TestProtectionLeavesOtherPairsWorking(t *testing.T) {
 		client           *http.Client
 		actorID          string
 		targetSuperadmin bool
+		actorSuperadmin  bool
 	}{
-		{"admin on admin", admin, adminID, false},
-		{"superadmin on admin", super, superID, false},
+		{"admin on admin", admin, adminID, false, false},
+		{"superadmin on admin", super, superID, false, true},
 	}
 	for _, p := range pairs {
 		for _, a := range protectedActions() {
-			if a.superadminOnly && !p.targetSuperadmin {
+			if a.superadminOnly && !p.targetSuperadmin || a.adminOnly && !p.actorSuperadmin {
 				continue
 			}
 			t.Run(p.name+"/"+a.name, func(t *testing.T) {

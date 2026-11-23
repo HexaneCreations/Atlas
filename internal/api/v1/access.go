@@ -219,11 +219,37 @@ func (h *Handler) PutUserAccess(w http.ResponseWriter, r *http.Request) error {
 		return errs.New(errs.CodeInvalidArgument, "roles and pages are both required; send [] to clear one").WithOp(op)
 	}
 
-	state, changes, err := store.ReplaceUserAccess(r.Context(), targetID, req.Version, req.desired(), actorID, time.Now())
+	desired := req.desired()
+	if err = h.guardAdminChange(r, store, actorID, targetID, req.Version, desired); err != nil {
+		return err
+	}
+	state, changes, err := store.ReplaceUserAccess(r.Context(), targetID, req.Version, desired, actorID, time.Now())
 	if err != nil {
 		return err
 	}
 	httpx.JSON(w, r, http.StatusOK, PutUserAccessResponse{Access: presentAccess(state), Changes: presentChanges(changes)})
+	return nil
+}
+
+// guardAdminChange refuses, for a non-superadmin caller, a save that would
+// grant or remove the admin role ([access.ChangesAdmin]). It decides against
+// the state at the client's version; ReplaceUserAccess re-checks that version
+// inside its transaction, so the save cannot apply to any other state.
+func (h *Handler) guardAdminChange(r *http.Request, store UserAdmin, actorID, targetID, version string, desired access.Desired) error {
+	super, err := store.IsSuperadmin(r.Context(), actorID)
+	if err != nil || super {
+		return err
+	}
+	current, err := store.UserAccess(r.Context(), targetID)
+	if err != nil {
+		return err
+	}
+	if current.Version() != version {
+		return access.ErrStaleVersion
+	}
+	if access.ChangesAdmin(current, desired) {
+		return user.ErrAdminOnlySuperadmin
+	}
 	return nil
 }
 

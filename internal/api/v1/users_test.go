@@ -158,6 +158,18 @@ func (f *fakeUserAdmin) IsSuperadmin(_ context.Context, userID string) (bool, er
 	return false, nil
 }
 
+func (f *fakeUserAdmin) ListGrants(_ context.Context, userID string) ([]user.NodeRole, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []user.NodeRole
+	for _, g := range f.grants {
+		if g.UserID == userID {
+			out = append(out, g)
+		}
+	}
+	return out, nil
+}
+
 func (f *fakeUserAdmin) RevokeUserGrant(_ context.Context, userID, grantID, _ string, now time.Time) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -456,6 +468,8 @@ func TestRevokeRoleSurfacesTheLastAdminGuard(t *testing.T) {
 	admin := newFakeUserAdmin(u)
 	admin.grants["grant-last-admin"] = user.NodeRole{ID: "grant-last-admin", UserID: "target-1", Role: user.RoleAdmin}
 	admin.lastAdminGrantID = "grant-last-admin"
+	// Only a superadmin may revoke the admin role at all.
+	admin.grants["grant-super"] = user.NodeRole{ID: "grant-super", UserID: u.ID, Role: user.RoleSuperadmin}
 	srv := newUserAdminTestServer(t, u, &fakeAuthorizer{allow: true}, admin)
 	client := mustClientWithCookies(t)
 	login(t, client, srv.URL, "yara", "correct horse battery staple").Body.Close()

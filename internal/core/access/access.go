@@ -17,6 +17,7 @@ package access
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -124,6 +125,53 @@ func (c Changes) RevokesFleetWideAdmin() bool {
 		}
 	}
 	return false
+}
+
+// GrantsAdmin reports whether d asks for the admin role on any scope.
+func (d Desired) GrantsAdmin() bool {
+	for _, r := range d.Roles {
+		if r.Role == user.RoleAdmin {
+			return true
+		}
+	}
+	return false
+}
+
+// ChangesAdmin reports whether applying desired to current would change
+// where the user holds the admin role: gaining or losing it fleet-wide, or,
+// without a fleet-wide admin role on either side, on any node. Revoking an
+// admin row that another admin row still covers (a node-scoped admin under
+// a fleet-wide one) is not a change.
+func ChangesAdmin(current State, desired Desired) bool {
+	before := adminCoverage{nodes: map[string]bool{}}
+	for _, g := range current.Roles {
+		before.add(g.Role)
+	}
+	after := adminCoverage{nodes: map[string]bool{}}
+	roles, _ := normalize(desired)
+	for _, r := range roles {
+		after.add(r)
+	}
+	if before.fleet || after.fleet {
+		return before.fleet != after.fleet
+	}
+	return !maps.Equal(before.nodes, after.nodes)
+}
+
+type adminCoverage struct {
+	fleet bool
+	nodes map[string]bool
+}
+
+func (c *adminCoverage) add(r Role) {
+	if r.Role != user.RoleAdmin {
+		return
+	}
+	if r.Scope.FleetWide {
+		c.fleet = true
+		return
+	}
+	c.nodes[r.Scope.NodeID] = true
 }
 
 // ErrOwnAccess refuses an edit of the caller's own access, for every caller

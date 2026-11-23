@@ -354,3 +354,17 @@ export function initialEditorState(server: UserAccessResponse): EditorState {
 export function saveErrorKind(status: number, message: string): "stale" | "server" {
   return status === 409 && message.includes("access changed since you opened it") ? "stale" : "server";
 }
+
+/**
+ * How a row's role select behaves for the signed-in user. A non-superadmin
+ * cannot grant or remove the admin role: the admin option is disabled, and a
+ * row that already holds admin cannot be changed at all. Mirrors the
+ * backend's ErrAdminOnlySuperadmin on PUT /users/{id}/access.
+ */
+export function roleSelectState(own: EditableRole | undefined, canChangeAdmin: boolean): {
+  selectDisabled: boolean;
+  adminOptionDisabled: boolean;
+} {
+  if (canChangeAdmin) return { selectDisabled: false, adminOptionDisabled: false };
+  return { selectDisabled: own === "admin", adminOptionDisabled: true };
+}

@@ -54,7 +54,15 @@ import { SearchInput, Toolbar } from "../components/Toolbar";
 import { NAV_PAGES } from "../shell/pages";
 import { emptyArt, errorArt } from "../lib/assets";
 import { formatDateTime } from "../format";
-import { PROTECTED_SUPERADMIN_MESSAGE, effectivePages, holdsSuperadmin, revokeGuard } from "./usersAccess";
+import {
+  ADMIN_ONLY_SUPERADMIN_MESSAGE,
+  PROTECTED_SUPERADMIN_MESSAGE,
+  adminTargetLocked,
+  effectivePages,
+  holdsSuperadmin,
+  revokeGuard,
+  roleRevokeGuard,
+} from "./usersAccess";
 import { EMPTY_ACCESS, diff, editorReducer, initialEditorState, problems, toBody } from "./accessEditor";
 import { AccessGrid, AccessTab, ChangeList } from "./users/AccessEditor";
 import { RoleGrantsTable } from "./users/RoleGrants";
@@ -362,6 +370,7 @@ export function UsersPage() {
                     bundlePages={bundlePages}
                     isOnlyFleetAdmin={enabledFleetAdmins.has(u.id) && enabledFleetAdmins.size <= 1}
                     protectedTarget={isProtectedTarget(u)}
+                    adminLocked={adminTargetLocked({ actorIsSuperadmin: iAmSuperadmin, isSelf: u.id === me.user_id, targetGrants: u.grants })}
                     onSelect={() => { togglePanel(u.id); }}
                     onEditAccess={() => { openTab(u.id, "access"); }}
                     onDisable={() => { setModal({ kind: "disable", target: u }); }}
@@ -387,6 +396,7 @@ export function UsersPage() {
           user={selectedUser}
           isSelf={selectedUser.id === me.user_id}
           protectedTarget={isProtectedTarget(selectedUser)}
+          actorIsSuperadmin={iAmSuperadmin}
           nodeNames={nodeNames}
           showBundles={hasBundles}
           tab={panelTab}
@@ -402,6 +412,7 @@ export function UsersPage() {
 
       {modal?.kind === "create" ? (
         <CreateUserModal
+          actorIsSuperadmin={iAmSuperadmin}
           createUser={createUser}
           onClose={() => { setModal(null); }}
           onCreated={(user, password) => { setModal({ kind: "created", user, password }); }}
@@ -536,6 +547,7 @@ function UserRow({
   bundlePages,
   isOnlyFleetAdmin,
   protectedTarget,
+  adminLocked,
   onSelect,
   onEditAccess,
   onDisable,
@@ -553,6 +565,7 @@ function UserRow({
   bundlePages: ReadonlyMap<string, readonly Page[]>;
   isOnlyFleetAdmin: boolean;
   protectedTarget: boolean;
+  adminLocked: boolean;
   onSelect: () => void;
   onEditAccess: () => void;
   onDisable: () => void;
@@ -563,10 +576,13 @@ function UserRow({
 }) {
   const grants = u.grants ?? [];
 
+  // Only a superadmin may disable, enable or reset the password of a user
+  // holding admin (the server's ErrAdminOnlySuperadmin).
+  const adminLock = adminLocked ? { disabled: true, disabledReason: ADMIN_ONLY_SUPERADMIN_MESSAGE } : {};
   const rawItems: RowMenuItem[] = [
     { label: "Edit access", icon: ShieldPlus, onClick: onEditAccess },
     u.disabled
-      ? { label: "Enable user", icon: PlayCircle, onClick: onEnable }
+      ? { label: "Enable user", icon: PlayCircle, onClick: onEnable, ...adminLock }
       : {
           label: "Disable user",
           icon: Ban,
@@ -578,8 +594,9 @@ function UserRow({
             : isOnlyFleetAdmin
               ? "Can't disable — this is the last user with admin access"
               : undefined,
+          ...adminLock,
         },
-    { label: "Reset password", icon: KeyRound, onClick: onResetPassword },
+    { label: "Reset password", icon: KeyRound, onClick: onResetPassword, ...adminLock },
     {
       label: "Force logout",
       icon: LogOut,
@@ -764,6 +781,7 @@ function UserDetailPanel({
   user,
   isSelf,
   protectedTarget,
+  actorIsSuperadmin,
   nodeNames,
   showBundles,
   tab,
@@ -778,6 +796,7 @@ function UserDetailPanel({
   user: UserAccount;
   isSelf: boolean;
   protectedTarget: boolean;
+  actorIsSuperadmin: boolean;
   nodeNames: Map<string, string>;
   showBundles: boolean;
   tab: PanelTab;
@@ -861,7 +880,9 @@ function UserDetailPanel({
               <RoleGrantsTable
                 grants={grants}
                 scopeLabel={(g) => scopeLabel(g, nodeNames)}
-                guardFor={(g) => revokeGuard({ isSelf, lastAdmin: isRevokeBlocked(g), protectedSuperadmin: protectedTarget })}
+                guardFor={(g) =>
+                  roleRevokeGuard({ isSelf, lastAdmin: isRevokeBlocked(g), protectedSuperadmin: protectedTarget, actorIsSuperadmin, grant: g })
+                }
                 onRevoke={onRevokeRole}
               />
             )}
@@ -990,6 +1011,7 @@ function UserDetailPanel({
           <AccessTab
             userID={user.id}
             readOnly={isSelf || holdsSuperadmin(grants)}
+            canChangeAdmin={actorIsSuperadmin}
             readOnlyReason={
               isSelf
                 ? "You cannot change your own access — ask another admin."
@@ -1168,10 +1190,12 @@ function ErrorLine({ error }: { error: string | null }) {
 }
 
 function CreateUserModal({
+  actorIsSuperadmin,
   createUser,
   onClose,
   onCreated,
 }: {
+  actorIsSuperadmin: boolean;
   createUser: ReturnType<typeof useCreateUser>;
   onClose: () => void;
   onCreated: (user: UserAccount, password: string) => void;
@@ -1235,6 +1259,7 @@ function CreateUserModal({
               draft={editor.draft}
               nodes={nodes.data?.nodes ?? []}
               readOnly={false}
+              canChangeAdmin={actorIsSuperadmin}
               onEdit={(edit) => { dispatch({ type: "edit", edit }); }}
             />
             <ChangeList changes={changes} />

@@ -4,6 +4,7 @@ import { useNodes, usePutUserAccess, useUserAccess } from "../../api/queries";
 import type { Page, UserAccessResponse } from "../../api/types";
 import { Button } from "../../components/Button";
 import { useToast } from "../../components/Toast";
+import { ADMIN_ONLY_SUPERADMIN_MESSAGE } from "../usersAccess";
 import {
   EDITABLE_ROLES,
   FLEET,
@@ -17,6 +18,7 @@ import {
   pageLock,
   pagesForRow,
   problems,
+  roleSelectState,
   rowHasRole,
   saveErrorKind,
   toRequest,
@@ -46,19 +48,22 @@ export interface NodeInfo {
 
 /**
  * The editable grid: a Fleet-wide row, then one row per node. Controlled —
- * the caller owns the draft and applies each [Edit].
+ * the caller owns the draft and applies each [Edit]. `canChangeAdmin` is
+ * false for a non-superadmin, who may not grant or remove the admin role.
  */
 export function AccessGrid({
   server,
   draft,
   nodes,
   readOnly,
+  canChangeAdmin = true,
   onEdit,
 }: {
   server: UserAccessResponse;
   draft: Draft;
   nodes: readonly NodeInfo[];
   readOnly: boolean;
+  canChangeAdmin?: boolean;
   onEdit: (e: Edit) => void;
 }) {
   const hostnames = new Map(nodes.map((n) => [n.node_id, n.hostname]));
@@ -84,6 +89,7 @@ export function AccessGrid({
             const hostname = hostnames.get(row);
             const known = isFleet || hostnames.has(row);
             const ticked = new Set(draft.pages[row] ?? []);
+            const select = roleSelectState(own, canChangeAdmin);
             return (
               <tr key={row} className="border-t border-border/60 align-top">
                 <td className="py-2.5 pr-3">
@@ -97,15 +103,21 @@ export function AccessGrid({
                   <select
                     aria-label={`Role for ${isFleet ? "fleet-wide" : row}`}
                     value={own ?? "none"}
-                    disabled={readOnly}
+                    disabled={readOnly || select.selectDisabled}
+                    title={!readOnly && !canChangeAdmin ? ADMIN_ONLY_SUPERADMIN_MESSAGE : undefined}
                     onChange={(e) => { onEdit({ kind: "role", row, role: e.target.value as RoleChoice }); }}
                     className="rounded-lg border border-border bg-bg px-2 py-1.5 text-sm text-text outline-none focus-visible:ring-2 focus-visible:ring-primary disabled:opacity-60"
                   >
                     <option value="none">{!isFleet && fleetRole ? `none (fleet-wide ${fleetRole})` : "none"}</option>
                     {EDITABLE_ROLES.map((r) => (
-                      <option key={r} value={r}>{r}</option>
+                      <option key={r} value={r} disabled={r === "admin" && select.adminOptionDisabled}>
+                        {r}
+                      </option>
                     ))}
                   </select>
+                  {!readOnly && !canChangeAdmin && (own === "admin" || isFleet) ? (
+                    <span className="mt-1 block text-[10px] text-text-subtle">{ADMIN_ONLY_SUPERADMIN_MESSAGE}</span>
+                  ) : null}
                 </td>
                 <td className="py-2.5">
                   <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
@@ -226,11 +238,13 @@ export function AccessTab({
   userID,
   readOnly,
   readOnlyReason,
+  canChangeAdmin,
   onDirtyChange,
 }: {
   userID: string;
   readOnly: boolean;
   readOnlyReason?: string | undefined;
+  canChangeAdmin: boolean;
   onDirtyChange: (dirty: boolean) => void;
 }) {
   const access = useUserAccess(userID);
@@ -309,6 +323,7 @@ export function AccessTab({
         draft={state.draft}
         nodes={nodes.data?.nodes ?? []}
         readOnly={readOnly}
+        canChangeAdmin={canChangeAdmin}
         onEdit={(e) => { setError(null); dispatch({ type: "edit", edit: e }); }}
       />
       {!readOnly ? (
