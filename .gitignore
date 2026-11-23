@@ -32,3 +32,9 @@ web/.vite/
 atlas-agent-linux-amd64
 docs/ATLAS_OVERVIEW.txt
 .claude/settings.local.json
+CLAUDE.local.md
+*.zip
+/atlas-agent
+/atlas-agent-linux-amd64
+/dist/
+*.bak
