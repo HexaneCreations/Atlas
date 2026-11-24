@@ -111,7 +111,7 @@ type createdCommand struct {
 	code string
 }
 
-var commandCodeRE = regexp.MustCompile(`--install-code '(atlas_install_[0-9a-f]{64})'`)
+var commandCodeRE = regexp.MustCompile(`ATLAS_INSTALL_CODE='(atlas_install_[0-9a-f]{64})'`)
 
 func (f *installFixture) create(client *http.Client, body string) createdCommand {
 	f.t.Helper()
@@ -260,12 +260,16 @@ func TestInstallCodeRedeemAuthorizesThePeerOnceForThePreassignedNode(t *testing.
 	}
 	for _, want := range []string{
 		"--version '" + installTestVersion + "'",
-		"--control-plane-url 'https://atlas.example.test'",
-		"--server-addr '/ip4/203.0.113.10/tcp/4102/p2p/12D3KooW",
+		"--server-url 'https://atlas.example.test'",
 		"raw.githubusercontent.com/HexaneCreations/Atlas/" + installTestVersion + "/packaging/atlas-agent/install.sh",
 	} {
 		if !strings.Contains(created.Command, want) {
 			t.Errorf("command lacks %q: %s", want, created.Command)
+		}
+	}
+	for _, notWant := range []string{"--install-code", "--server-addr", "--transport", "--control-plane-url"} {
+		if strings.Contains(created.Command, notWant) {
+			t.Errorf("command carries %q as a flag; the code and connection details come from redeem, not the command line: %s", notWant, created.Command)
 		}
 	}
 
@@ -287,8 +291,11 @@ func TestInstallCodeRedeemAuthorizesThePeerOnceForThePreassignedNode(t *testing.
 	peerA, peerB := newPeerID(t), newPeerID(t)
 	ip := freshIP()
 	status, body := f.redeemFrom(ip, created.code, peerA)
-	if status != http.StatusOK || body["node_id"] != created.NodeID || body["environment"] != "production" || len(body) != 2 {
-		t.Fatalf("redeem: %d %v, want 200 {node_id: %s, environment: production}", status, body, created.NodeID)
+	wantAddr := "/ip4/203.0.113.10/tcp/4102/p2p/"
+	if status != http.StatusOK || body["node_id"] != created.NodeID || body["environment"] != "production" ||
+		len(body) != 3 || !strings.HasPrefix(fmt.Sprint(body["server_addr"]), wantAddr) {
+		t.Fatalf("redeem: %d %v, want 200 {node_id: %s, environment: production, server_addr: %s...}",
+			status, body, created.NodeID, wantAddr)
 	}
 	node, env, role, st, ok := f.peerRow(peerA)
 	if !ok || node != created.NodeID || env != "production" || role != "agent" || st != "active" {

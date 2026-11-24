@@ -28,7 +28,8 @@ snapshot() {
 fail() { echo "  FAIL  $CURRENT: $*"; FAIL=$((FAIL + 1)); CASE_OK=0; }
 
 # fake_binary PATH VERSION [MARKER]: a stand-in agent whose --version prints
-# the same shape as internal/platform/build.Info.String.
+# the same shape as internal/platform/build.Info.String, and whose peer-id
+# prints a fixed, format-valid Peer ID (install-code mode tests only).
 fake_binary() {
   mkdir -p "$(dirname "$1")"
   cat >"$1" <<EOF
@@ -36,6 +37,8 @@ fake_binary() {
 # ${3:-healthy}
 if [ "\$1" = --version ]; then
   echo "atlas $2 (abcdef0) built 2026-01-01T00:00:00Z with go1.25 for linux/amd64"
+elif [ "\$1" = peer-id ]; then
+  echo "12D3KooWTestFixturePeerIdForInstallerUnitTestsXX"
 fi
 EOF
   chmod 0755 "$1"
@@ -66,6 +69,16 @@ while [ $# -gt 0 ]; do
     *) url="$1"; shift ;;
   esac
 done
+case "$url" in
+  */api/v1/agent/install/redeem)
+    # Drain the piped JSON body (install.sh never reads curl's stdout for
+    # this call except via -w, below) and never let it touch disk.
+    cat >/dev/null
+    if [ -f "$STUB_STATE/redeem_response" ]; then cp "$STUB_STATE/redeem_response" "$out"; else : >"$out"; fi
+    if [ -f "$STUB_STATE/redeem_status" ]; then cat "$STUB_STATE/redeem_status"; else printf '200'; fi
+    exit 0
+    ;;
+esac
 prefix="https://github.com/HexaneCreations/Atlas/releases/download/"
 case "$url" in "$prefix"*) ;; *) exit 98 ;; esac
 src="$FIXTURES/${url#"$prefix"}"
@@ -129,7 +142,33 @@ run_install() {
   set -e
 }
 
+# run_install_stdin CODE ARGS...: like run_install, but feeds CODE on stdin
+# instead of passing it any other way — for "--install-code -" tests.
+run_install_stdin() {
+  local code="$1"; shift
+  OUT="$SANDBOX/out.txt"
+  set +e
+  printf '%s\n' "$code" | bash "$WORK/install.sh" "$@" >"$OUT" 2>&1
+  RC=$?
+  set -e
+}
+
 https_flags=(--control-plane-url https://cp.example.com:8443 --token atlas_enroll_0123abcd --insecure-bootstrap)
+
+# A format-valid install code and server url, for install-code mode tests.
+TEST_INSTALL_CODE="atlas_install_$(printf '0123456789abcdef%.0s' {1..4})"
+TEST_SERVER_URL="https://cp.example.com"
+
+# redeem_ok NODE_ID ENVIRONMENT SERVER_ADDR: makes the curl stub's redeem
+# endpoint answer 200 with this body. redeem_status CODE overrides the HTTP
+# status for the next redeem call (default 200 when no file is written).
+redeem_ok() {
+  printf '{"node_id":"%s","environment":"%s","server_addr":"%s"}\n' "$1" "$2" "$3" >"$STUB_STATE/redeem_response"
+}
+redeem_status() { printf '%s' "$1" >"$STUB_STATE/redeem_status"; }
+
+TEST_NODE_ID="0123456789abcdef0123456789abcdef"
+TEST_SERVER_ADDR="/ip4/203.0.113.10/tcp/4102/p2p/12D3KooWD3eckifWpRn9wQpMG9R9hX3sD158z7EqHWmweQAJU5SA"
 
 # seed_install: an existing install the upgrade must leave alone.
 seed_install() {
@@ -402,6 +441,138 @@ for entry in "${injections[@]}"; do
   [ "$(snapshot "$DESTDIR")" = "<absent>" ] || fail "something was written for $flag"
   teardown
 done
+
+# ---------------------------------------------------------------------------
+# install-code mode
+# ---------------------------------------------------------------------------
+install_code_artifacts_gone() {
+  [ ! -e "$DESTDIR/usr/local/bin/atlas-agent" ] || fail "binary not rolled back"
+  [ ! -e "$DESTDIR/etc/atlas-agent/atlas-agent.env" ] || fail "env file not rolled back"
+  [ ! -e "$DESTDIR/etc/systemd/system/atlas-agent.service" ] || fail "unit not rolled back"
+  [ ! -d "$DESTDIR/var/lib/atlas-agent" ] || fail "agent data dir not rolled back"
+}
+
+setup "install-code: rejects a malformed code"
+run_install --install-code 'not-a-code' --server-url "$TEST_SERVER_URL" --version v1.2.3
+expect_rc_nonzero
+expect_output "install.sh: --install-code contains characters that are not allowed"
+[ "$(snapshot "$DESTDIR")" = "<absent>" ] || fail "something was written"
+teardown
+
+setup "install-code: --server-url must be https"
+run_install --install-code "$TEST_INSTALL_CODE" --server-url 'http://cp.example.com' --version v1.2.3
+expect_rc_nonzero
+expect_output "install.sh: --server-url contains characters that are not allowed"
+[ "$(snapshot "$DESTDIR")" = "<absent>" ] || fail "something was written"
+teardown
+
+setup "install-code: --install-code and --server-url are required together (code only)"
+run_install --install-code "$TEST_INSTALL_CODE" --version v1.2.3
+expect_rc_nonzero
+expect_output "must be given together"
+teardown
+
+setup "install-code: --install-code and --server-url are required together (url only)"
+run_install --server-url "$TEST_SERVER_URL" --version v1.2.3
+expect_rc_nonzero
+expect_output "must be given together"
+teardown
+
+setup "install-code: happy path redeems against a stub server"
+publish v1.2.3 amd64
+redeem_ok "$TEST_NODE_ID" production "$TEST_SERVER_ADDR"
+run_install --install-code "$TEST_INSTALL_CODE" --server-url "$TEST_SERVER_URL" --version v1.2.3
+expect_rc_zero
+grep -qx "ATLAS_AGENT_CONTROL_PLANE_URL=$TEST_SERVER_URL" "$DESTDIR/etc/atlas-agent/atlas-agent.env" || fail "env file lacks the control-plane URL"
+grep -qx "ATLAS_AGENT_ENVIRONMENT=production" "$DESTDIR/etc/atlas-agent/atlas-agent.env" || fail "env file lacks the environment"
+grep -qx "ATLAS_AGENT_NODE_ID=$TEST_NODE_ID" "$DESTDIR/etc/atlas-agent/atlas-agent.env" || fail "env file lacks the node id"
+grep -qx "ATLAS_AGENT_TRANSPORT=libp2p" "$DESTDIR/etc/atlas-agent/atlas-agent.env" || fail "env file lacks the transport"
+grep -qx "ATLAS_AGENT_LIBP2P_SERVER_ADDR=$TEST_SERVER_ADDR" "$DESTDIR/etc/atlas-agent/atlas-agent.env" || fail "env file lacks the server address"
+[ -f "$DESTDIR/etc/systemd/system/atlas-agent.service" ] || fail "unit not installed"
+! grep -rF "$TEST_INSTALL_CODE" "$SANDBOX" >/dev/null 2>&1 || fail "the install code appears somewhere under $SANDBOX"
+teardown
+
+setup "install-code: a 401 from redeem gives a clear message and changes nothing"
+publish v1.2.3 amd64
+redeem_status 401
+run_install --install-code "$TEST_INSTALL_CODE" --server-url "$TEST_SERVER_URL" --version v1.2.3
+expect_rc_nonzero
+expect_output "the install code was rejected: invalid, expired, or already used"
+install_code_artifacts_gone
+! grep -rF "$TEST_INSTALL_CODE" "$SANDBOX" >/dev/null 2>&1 || fail "the install code appears somewhere under $SANDBOX"
+teardown
+
+setup "install-code: a malformed redeem response burns the code and rolls back"
+publish v1.2.3 amd64
+printf '{"node_id":"not-hex","environment":"production","server_addr":"%s"}\n' "$TEST_SERVER_ADDR" >"$STUB_STATE/redeem_response"
+run_install --install-code "$TEST_INSTALL_CODE" --server-url "$TEST_SERVER_URL" --version v1.2.3
+expect_rc_nonzero
+expect_output "the install code was already redeemed on the server; this host has been rolled back"
+install_code_artifacts_gone
+teardown
+
+setup "install-code: service unhealthy after redeem burns the code and rolls back"
+publish v1.2.3 amd64 CRASHES
+redeem_ok "$TEST_NODE_ID" production "$TEST_SERVER_ADDR"
+export ATLAS_INSTALL_TEST=1
+run_install --install-code "$TEST_INSTALL_CODE" --server-url "$TEST_SERVER_URL" --version v1.2.3
+expect_rc_nonzero
+expect_output "is-active was 'activating'"
+expect_output "the install code was already redeemed on the server; this host has been rolled back"
+install_code_artifacts_gone
+teardown
+
+setup "install-code: --install-code - reads the code from stdin"
+publish v1.2.3 amd64
+redeem_ok "$TEST_NODE_ID" production "$TEST_SERVER_ADDR"
+run_install_stdin "$TEST_INSTALL_CODE" --install-code - --server-url "$TEST_SERVER_URL" --version v1.2.3
+expect_rc_zero
+grep -qx "ATLAS_AGENT_NODE_ID=$TEST_NODE_ID" "$DESTDIR/etc/atlas-agent/atlas-agent.env" || fail "env file lacks the node id"
+teardown
+
+setup "install-code: ATLAS_INSTALL_CODE environment variable works without the flag"
+publish v1.2.3 amd64
+redeem_ok "$TEST_NODE_ID" production "$TEST_SERVER_ADDR"
+export ATLAS_INSTALL_CODE="$TEST_INSTALL_CODE"
+run_install --server-url "$TEST_SERVER_URL" --version v1.2.3
+unset ATLAS_INSTALL_CODE
+expect_rc_zero
+grep -qx "ATLAS_AGENT_NODE_ID=$TEST_NODE_ID" "$DESTDIR/etc/atlas-agent/atlas-agent.env" || fail "env file lacks the node id"
+teardown
+
+setup "install-code: refuses an already configured host, to prevent cloning an identity"
+seed_install
+before="$(snapshot "$DESTDIR")"
+run_install --install-code "$TEST_INSTALL_CODE" --server-url "$TEST_SERVER_URL" --version v1.2.3
+expect_rc_nonzero
+expect_output "already exists. Use --upgrade"
+[ "$(snapshot "$DESTDIR")" = "$before" ] || fail "something changed"
+teardown
+
+setup "install-code: --force-env is refused together with --install-code"
+seed_install
+before="$(snapshot "$DESTDIR")"
+run_install --install-code "$TEST_INSTALL_CODE" --server-url "$TEST_SERVER_URL" --version v1.2.3 --force-env
+expect_rc_nonzero
+expect_output "--force-env is not used with --install-code"
+[ "$(snapshot "$DESTDIR")" = "$before" ] || fail "something changed"
+teardown
+
+setup "install-code: --upgrade is refused together with --install-code"
+seed_install
+before="$(snapshot "$DESTDIR")"
+run_install --upgrade --install-code "$TEST_INSTALL_CODE" --server-url "$TEST_SERVER_URL" --version v1.2.3
+expect_rc_nonzero
+expect_output "--install-code is not used with --upgrade"
+[ "$(snapshot "$DESTDIR")" = "$before" ] || fail "something changed"
+teardown
+
+setup "install-code: connection flags are refused alongside --install-code"
+run_install --install-code "$TEST_INSTALL_CODE" --server-url "$TEST_SERVER_URL" --version v1.2.3 --environment staging
+expect_rc_nonzero
+expect_output "does not take connection flags"
+[ "$(snapshot "$DESTDIR")" = "<absent>" ] || fail "something was written"
+teardown
 
 echo
 echo "==> $PASS passed, $FAIL failed"

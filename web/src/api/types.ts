@@ -86,6 +86,10 @@ export interface CurrentUser {
   /** True when this caller holds `notifications.manage` (superadmin only).
    *  A display hint only; every /notifications endpoint checks it itself. */
   can_manage_notifications: boolean;
+  /** Display hint for the Nodes page's "Add server" action — never the
+   *  enforcement point; every /fleet/install-commands endpoint checks
+   *  `fleet.enroll` independently. */
+  can_enroll_fleet: boolean;
 }
 
 /** One reachable page in [CurrentUser.page_access]. `fleet_wide` true means
@@ -860,4 +864,50 @@ export interface ListActivityResponse {
   /** Events the bus dropped because the recorder fell behind. Non-zero means
    *  the feed has gaps. */
   dropped: number;
+}
+
+// --------------------------------------------------- Fleet: install codes ----
+//
+// "Add server": a one-time code an admin generates, which install.sh
+// redeems to enroll a new machine with no manual token or peer
+// authorization. Gated by `fleet.enroll` — see [CurrentUser.can_enroll_fleet].
+
+export type InstallCodeStatus = "pending" | "redeemed" | "expired" | "revoked";
+
+/** POST /api/v1/fleet/install-commands body. */
+export interface CreateInstallCommandRequest {
+  environment: string;
+  /** Minutes until expiry; omit for the server's default (30, max 60). */
+  ttl_minutes?: number;
+}
+
+/** The only place the install code's plaintext ever appears — embedded in
+ *  `command`, never returned again. */
+export interface CreateInstallCommandResponse {
+  id: string;
+  node_id: string;
+  expires_at: string;
+  command: string;
+}
+
+/** One install code as listed — never carries the code itself. */
+export interface InstallCommand {
+  id: string;
+  node_id: string;
+  environment: string;
+  created_by: string;
+  status: InstallCodeStatus;
+  created_at: string;
+  expires_at: string;
+  revoked_at?: string;
+  revoked_by?: string;
+  redeemed_at?: string;
+  redeemed_peer_id?: string;
+  redeemed_ip?: string;
+}
+
+/** GET /api/v1/fleet/install-commands */
+export interface ListInstallCommandsResponse {
+  install_commands: InstallCommand[];
+  total: number;
 }

@@ -9,6 +9,7 @@ function user(pageAccess: PageAccessEntry[]): CurrentUser {
     can_manage_users: false,
     is_superadmin: false,
     can_manage_notifications: false,
+    can_enroll_fleet: false,
     page_access: pageAccess,
   };
 }

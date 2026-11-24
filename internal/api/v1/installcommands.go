@@ -74,10 +74,16 @@ type RedeemInstallCodeRequest struct {
 	PeerID string `json:"peer_id"`
 }
 
-// RedeemInstallCodeResponse is what a successful redeem tells the installer.
+// RedeemInstallCodeResponse is what a successful redeem tells the installer:
+// everything install.sh needs to configure the libp2p transport and nothing
+// it did not already know. ServerAddr is the full multiaddr, server Peer ID
+// included (see [fleet.InstallTarget.ServerAddr]) — the one value the
+// installer cannot supply itself, since it comes from the fleet listener's
+// running identity, not from static configuration.
 type RedeemInstallCodeResponse struct {
 	NodeID      string `json:"node_id"`
 	Environment string `json:"environment"`
+	ServerAddr  string `json:"server_addr"`
 }
 
 func presentInstallCode(c fleet.InstallCode, now time.Time) InstallCommandResponse {
@@ -207,13 +213,22 @@ func (h *Handler) RevokeInstallCommand(w http.ResponseWriter, r *http.Request) e
 // the same [fleet.ErrInstallCodeRejected]; the reason is logged, never sent.
 func (h *Handler) RedeemInstallCode(w http.ResponseWriter, r *http.Request) error {
 	const op = "v1.Handler.RedeemInstallCode"
-	if h.deps.InstallCodes == nil || h.deps.RedeemLimiter == nil {
+	if h.deps.InstallCodes == nil || h.deps.RedeemLimiter == nil || h.deps.InstallTargets == nil {
 		return errs.New(errs.CodeUnavailable, "install code redemption is not available on this instance").WithOp(op)
 	}
 
 	sourceIP := httpx.ClientIP(r)
 	if !h.deps.RedeemLimiter.Allow(sourceIP) {
 		return errs.New(errs.CodeRateLimited, "too many install attempts; try again later").WithOp(op)
+	}
+
+	// Resolved and validated before anything else: a misconfigured server
+	// (fleet libp2p not up yet) fails here, before a code could be spent for
+	// a response that could never have carried a server address anyway —
+	// the same ordering [Handler.CreateInstallCommand] already uses.
+	target, err := h.deps.InstallTargets.InstallTarget()
+	if err != nil {
+		return err
 	}
 
 	logger := log.FromContext(r.Context())
@@ -251,6 +266,8 @@ func (h *Handler) RedeemInstallCode(w http.ResponseWriter, r *http.Request) erro
 		slog.String("source_ip", sourceIP))
 
 	w.Header().Set("Cache-Control", "no-store")
-	httpx.JSON(w, r, http.StatusOK, RedeemInstallCodeResponse{NodeID: red.NodeID, Environment: red.Environment})
+	httpx.JSON(w, r, http.StatusOK, RedeemInstallCodeResponse{
+		NodeID: red.NodeID, Environment: red.Environment, ServerAddr: target.ServerAddr,
+	})
 	return nil
 }

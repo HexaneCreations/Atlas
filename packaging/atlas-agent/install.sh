@@ -5,6 +5,8 @@
 #   install.sh --control-plane-url URL --token TOKEN [options]     # https
 #   install.sh --transport libp2p --relationship NAME \            # libp2p
 #     --control-plane-url URL --server-addr MULTIADDR [options]
+#   install.sh --install-code atlas_install_<64 hex> \              # install code
+#     --server-url URL --version vX.Y.Z
 #   install.sh --verify [--relationship NAME] [--data-dir DIR] [options]
 #   install.sh --upgrade --version vX.Y.Z [--sha256 HEX]           # binary only
 #   install.sh --upgrade --binary PATH [--sha256 HEX]
@@ -35,6 +37,24 @@
 #                      --server-addr MULTIADDR                    (static), or
 #                      --relay-addr MULTIADDR --server-peer-id ID (rendezvous)
 #
+# Install codes:
+#   --install-code CODE --server-url URL --version vX.Y.Z installs with no
+#   manual token or peer authorization at all: the agent generates its own
+#   identity, presents CODE and that identity to POST /agent/install/redeem
+#   on URL, and configures itself (implicit "default" relationship, libp2p
+#   transport) from the response — the server address, environment and node
+#   id all come from there, never from a flag. CODE has the exact shape
+#   atlas_install_<64 lowercase hex> (see fleet.InstallCodePrefix) and is
+#   never written to disk, a log, or an error message: pass it as the flag's
+#   value, as the ATLAS_INSTALL_CODE environment variable (what the Atlas
+#   UI's generated command uses), or as "-" to read one line from stdin.
+#   A 401 from redeem means the code is invalid, expired, or already used.
+#   Any failure after a successful redeem has already spent the code on the
+#   server; this host is rolled back to its pre-install state so it can
+#   retry cleanly with a freshly generated one. Refused on an already
+#   configured host, same as a plain re-install, to prevent cloning an
+#   identity, and --force-env is not accepted together with it.
+#
 # Relationships:
 #   Without --relationship the flags configure the implicit "default"
 #   relationship via flat ATLAS_AGENT_* variables (unchanged behaviour).
@@ -58,6 +78,12 @@
 #   --server-addr MULTIADDR           libp2p static server multiaddr
 #   --relay-addr MULTIADDR            libp2p relay multiaddr (rendezvous)
 #   --server-peer-id ID               libp2p server Peer ID (rendezvous)
+#   --install-code CODE|-             One-time install code; "-" reads it from
+#                            stdin. Required together with --server-url;
+#                            ATLAS_INSTALL_CODE in the environment works the
+#                            same as the flag when the flag is not given.
+#   --server-url URL        https base URL to redeem --install-code against.
+#                            Required together with --install-code.
 #   --agentops-container-logs-disabled
 #                            Set ..._AGENTOPS_CONTAINER_LOGS_DISABLED=true
 #   --version vX.Y.Z        Download and verify this release instead of --binary
@@ -78,6 +104,39 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 die() { echo "install.sh: $*" >&2; exit 1; }
+
+# json_get FILE KEY -> prints the string value of a top-level "KEY". Used by
+# --verify and by install-code mode to read the redeem response, without
+# assuming jq is installed (a minimal Ubuntu host has neither python3 nor jq
+# guaranteed, hence the grep fallback).
+json_get() {
+  local f="$1" k="$2"
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$f" "$k" <<'PY' 2>/dev/null || true
+import json, sys
+try:
+    with open(sys.argv[1]) as fh:
+        print(json.load(fh).get(sys.argv[2], ""))
+except Exception:
+    sys.exit(1)
+PY
+  elif command -v jq >/dev/null 2>&1; then
+    jq -r --arg k "$k" '.[$k] // ""' "$f" 2>/dev/null || true
+  else
+    grep -oE "\"$k\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" "$f" 2>/dev/null \
+      | sed -E "s/.*:[[:space:]]*\"([^\"]*)\"/\1/" | head -1
+  fi
+}
+json_parses() {
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$1" 2>/dev/null
+  elif command -v jq >/dev/null 2>&1; then
+    jq -e . "$1" >/dev/null 2>&1
+  else
+    # last resort: balanced braces and a trailing "}"
+    head -c1 "$1" | grep -q '{' && tail -c2 "$1" | grep -q '}'
+  fi
+}
 
 MODE=install
 BINARY="$SCRIPT_DIR/atlas-agent"
@@ -101,6 +160,20 @@ BINARY_SET=0
 RELEASE_VERSION=""
 EXPECT_SHA256=""
 UPGRADE=0
+INSTALL_CODE="${ATLAS_INSTALL_CODE:-}"
+INSTALL_CODE_FROM_STDIN=0
+SERVER_URL=""
+NODE_ID=""
+# Set once the on-disk state (env file + unit) matches a successful redeem;
+# until then, a failure rolls everything install-code mode wrote back out —
+# see the cleanup() trap below and the "install-code mode" section's comment.
+INSTALL_CODE_COMMITTED=0
+# Set only once the already-configured-host guard confirms this host had no
+# $ENV_FILE before this run — so the cleanup trap below knows it is safe to
+# delete $BIN_DEST/$ENV_FILE/$UNIT_DEST: they can only be what this run
+# itself wrote, never a pre-existing install the guard would otherwise have
+# refused to touch.
+INSTALL_CODE_FRESH_INSTALL=0
 # Every connection/config flag given, so an install onto an existing env
 # file and an --upgrade can refuse them instead of silently ignoring them.
 CONN_FLAGS=()
@@ -128,6 +201,10 @@ while [ $# -gt 0 ]; do
     --relay-addr) LIBP2P_RELAY_ADDR="$2"; CONN_FLAGS+=("$1"); shift 2 ;;
     --server-peer-id) LIBP2P_SERVER_PEER_ID="$2"; CONN_FLAGS+=("$1"); shift 2 ;;
     --agentops-container-logs-disabled) AGENTOPS_CONTAINER_LOGS_DISABLED=1; CONN_FLAGS+=("$1"); shift ;;
+    --install-code)
+      if [ "$2" = "-" ]; then INSTALL_CODE_FROM_STDIN=1; else INSTALL_CODE="$2"; fi
+      shift 2 ;;
+    --server-url) SERVER_URL="$2"; shift 2 ;;
     --no-start) START=0; shift ;;
     --force-env) FORCE_ENV=1; shift ;;
     --verify) MODE=verify; shift ;;
@@ -138,6 +215,12 @@ while [ $# -gt 0 ]; do
     *) die "unknown option $1" ;;
   esac
 done
+
+if [ "$INSTALL_CODE_FROM_STDIN" -eq 1 ]; then
+  IFS= read -r INSTALL_CODE || die "--install-code - expected a code on stdin"
+fi
+INSTALL_CODE_MODE=0
+[ -n "$INSTALL_CODE" ] && INSTALL_CODE_MODE=1
 
 # relationshipEnvPrefix mirrors internal/agent/config.go: upper-case the id,
 # then replace every character that is not A-Z or 0-9 with "_".
@@ -174,36 +257,6 @@ if [ "$MODE" = verify ]; then
   pass() { printf '  ok    %s\n' "$1"; }
   fail() { printf '  FAIL  %s\n' "$1" >&2; fails=$((fails + 1)); }
   warn() { printf '  warn  %s\n' "$1"; }   # advisory only — does not fail --verify
-
-  json_get() {
-    # json_get FILE KEY  ->  prints the string value of a top-level "KEY"
-    local f="$1" k="$2"
-    if command -v python3 >/dev/null 2>&1; then
-      python3 - "$f" "$k" <<'PY' 2>/dev/null || true
-import json, sys
-try:
-    with open(sys.argv[1]) as fh:
-        print(json.load(fh).get(sys.argv[2], ""))
-except Exception:
-    sys.exit(1)
-PY
-    elif command -v jq >/dev/null 2>&1; then
-      jq -r --arg k "$k" '.[$k] // ""' "$f" 2>/dev/null || true
-    else
-      grep -oE "\"$k\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" "$f" 2>/dev/null \
-        | sed -E "s/.*:[[:space:]]*\"([^\"]*)\"/\1/" | head -1
-    fi
-  }
-  json_parses() {
-    if command -v python3 >/dev/null 2>&1; then
-      python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$1" 2>/dev/null
-    elif command -v jq >/dev/null 2>&1; then
-      jq -e . "$1" >/dev/null 2>&1
-    else
-      # last resort: balanced braces and a trailing "}"
-      head -c1 "$1" | grep -q '{' && tail -c2 "$1" | grep -q '}'
-    fi
-  }
 
   echo "==> Verifying atlas-agent (data dir: $DATA_DIR, relationship: ${RELATIONSHIP:-<from env>})"
 
@@ -379,6 +432,16 @@ CLEANUP_DIRS=()
 cleanup() {
   local d
   for d in "${CLEANUP_DIRS[@]+"${CLEANUP_DIRS[@]}"}"; do rm -rf "$d"; done
+  # install-code mode: anything written before INSTALL_CODE_COMMITTED is set
+  # (see the "install-code mode" section) is only ever half of a redeem —
+  # on ANY exit before that point, undo it so the host is clean and
+  # re-installable with a freshly generated code, per the script's own doc.
+  if [ "${INSTALL_CODE_MODE:-0}" -eq 1 ] && [ "${INSTALL_CODE_FRESH_INSTALL:-0}" -eq 1 ] && [ "${INSTALL_CODE_COMMITTED:-0}" -ne 1 ]; then
+    rm -f "$BIN_DEST" "$ENV_FILE" "$UNIT_DEST" 2>/dev/null || true
+    [ -n "${DROPIN_DIR:-}" ] && rm -f "$DROPIN_DIR/10-docker-group.conf" 2>/dev/null
+    [ -n "${AGENT_DATA_DIR:-}" ] && rm -rf "$AGENT_DATA_DIR" 2>/dev/null
+    if [ "$STAGED" -eq 0 ] && command -v systemctl >/dev/null 2>&1; then systemctl daemon-reload 2>/dev/null || true; fi
+  fi
 }
 trap cleanup EXIT
 
@@ -404,6 +467,7 @@ TOKEN_RE='^[A-Za-z0-9_-]{1,255}$'
 PATH_RE='^/[A-Za-z0-9._/-]+$'
 VERSION_RE='^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'
 SHA256_RE='^[0-9a-f]{64}$'
+INSTALL_CODE_RE='^atlas_install_[0-9a-f]{64}$'
 
 validate --control-plane-url "$CONTROL_PLANE_URL" "$URL_RE"
 validate --token "$TOKEN" "$TOKEN_RE"
@@ -416,8 +480,24 @@ validate --server-peer-id "$LIBP2P_SERVER_PEER_ID" "$PEER_ID_RE"
 validate --version "$RELEASE_VERSION" "$VERSION_RE"
 EXPECT_SHA256="$(printf '%s' "$EXPECT_SHA256" | tr 'A-F' 'a-f')"
 validate --sha256 "$EXPECT_SHA256" "$SHA256_RE"
+validate --install-code "$INSTALL_CODE" "$INSTALL_CODE_RE"
+validate --server-url "$SERVER_URL" "$URL_RE"
 if [ -n "$RELEASE_VERSION" ] && [ "$BINARY_SET" -eq 1 ]; then
   die "--version and --binary are alternatives; pass one"
+fi
+
+if [ -n "$INSTALL_CODE$SERVER_URL" ] && { [ -z "$INSTALL_CODE" ] || [ -z "$SERVER_URL" ]; }; then
+  die "--install-code and --server-url must be given together"
+fi
+if [ "$INSTALL_CODE_MODE" -eq 1 ]; then
+  # MODE can only be "install" or "upgrade" here — a --verify run already
+  # exited, above, before this point. --upgrade is still reachable (it sets
+  # UPGRADE=1 and only turns into MODE=upgrade; see the MODE resolution near
+  # the top of the script), so it still needs an explicit refusal.
+  [ "$UPGRADE" -eq 0 ] || die "--install-code is not used with --upgrade"
+  [ "$FORCE_ENV" -eq 0 ] || die "--force-env is not used with --install-code (it would risk cloning an existing identity)"
+  [ "${#CONN_FLAGS[@]}" -eq 0 ] \
+    || die "--install-code does not take connection flags (got: ${CONN_FLAGS[*]}); the server supplies them via redeem"
 fi
 
 sha256_of() {
@@ -521,6 +601,28 @@ probe_version() {
     bin="$probe/atlas-agent"
   fi
   binary_version "$bin" || die "the new binary did not report a version (as the atlas user). Nothing was installed."
+}
+
+# agent_peer_id DIR prints the persistent libp2p Peer ID `atlas-agent
+# peer-id` resolves for data directory DIR, generating the identity file
+# there if absent — run as the unprivileged 'atlas' user, the same identity
+# the installed service will run with. Called only after $BIN_DEST already
+# holds the verified binary (world-executable at 0755), so no probe-copy
+# trick like [probe_version]'s is needed here.
+agent_peer_id() {
+  local dir="$1" out
+  if [ "$STAGED" -eq 1 ]; then
+    out="$(ATLAS_AGENT_DATA_DIR="$dir" "$BIN_DEST" peer-id 2>&1)" || { echo "$out" >&2; return 1; }
+  elif command -v runuser >/dev/null 2>&1; then
+    out="$(runuser -u atlas -- env ATLAS_AGENT_DATA_DIR="$dir" "$BIN_DEST" peer-id 2>&1)" || { echo "$out" >&2; return 1; }
+  elif command -v setpriv >/dev/null 2>&1; then
+    out="$(setpriv --reuid=atlas --regid=atlas --init-groups -- env ATLAS_AGENT_DATA_DIR="$dir" "$BIN_DEST" peer-id 2>&1)" \
+      || { echo "$out" >&2; return 1; }
+  else
+    echo "need runuser or setpriv to generate the agent identity as the atlas user" >&2
+    return 1
+  fi
+  printf '%s' "$out"
 }
 
 # acquire_binary leaves a verified binary at $BINARY, from --version or
@@ -636,36 +738,43 @@ if [ -f "$ENV_FILE" ] && [ "$FORCE_ENV" -ne 1 ]; then
   fi
   die "$ENV_FILE already exists. Use --upgrade to replace only the binary, or --force-env with the full set of connection flags to rewrite it."
 fi
-[ -n "$CONTROL_PLANE_URL" ] || die "--control-plane-url is required"
+INSTALL_CODE_FRESH_INSTALL=1
+if [ "$INSTALL_CODE_MODE" -eq 0 ]; then
+  [ -n "$CONTROL_PLANE_URL" ] || die "--control-plane-url is required"
 
-case "$TRANSPORT" in
-  https)
-    if [ -n "$LIBP2P_SERVER_ADDR$LIBP2P_RELAY_ADDR$LIBP2P_SERVER_PEER_ID" ]; then
-      die "--server-addr / --relay-addr / --server-peer-id require --transport libp2p"
-    fi
-    if [ -z "$CA_BUNDLE" ] && [ "$INSECURE_BOOTSTRAP" -ne 1 ]; then
-      echo "install.sh: pass --ca-bundle PATH for a verified bootstrap, or" >&2
-      echo "            --insecure-bootstrap to trust the certificate presented on first contact" >&2
-      exit 1
-    fi
-    ;;
-  libp2p)
-    [ -z "$TOKEN" ] || die "--token is not used on the libp2p transport (Peer ID authorizes the agent)"
-    [ -z "$CA_BUNDLE" ] || die "--ca-bundle is not used on the libp2p transport"
-    [ "$INSECURE_BOOTSTRAP" -eq 0 ] || die "--insecure-bootstrap is not used on the libp2p transport"
-    if [ -n "$LIBP2P_SERVER_ADDR" ]; then
-      [ -z "$LIBP2P_RELAY_ADDR$LIBP2P_SERVER_PEER_ID" ] \
-        || die "use --server-addr alone, or --relay-addr with --server-peer-id, not both"
-    elif [ -n "$LIBP2P_RELAY_ADDR" ] && [ -n "$LIBP2P_SERVER_PEER_ID" ]; then
-      :
-    else
-      die "libp2p needs --server-addr, or both --relay-addr and --server-peer-id"
-    fi
-    ;;
-  *)
-    die "unknown --transport '$TRANSPORT' (https or libp2p)"
-    ;;
-esac
+  case "$TRANSPORT" in
+    https)
+      if [ -n "$LIBP2P_SERVER_ADDR$LIBP2P_RELAY_ADDR$LIBP2P_SERVER_PEER_ID" ]; then
+        die "--server-addr / --relay-addr / --server-peer-id require --transport libp2p"
+      fi
+      if [ -z "$CA_BUNDLE" ] && [ "$INSECURE_BOOTSTRAP" -ne 1 ]; then
+        echo "install.sh: pass --ca-bundle PATH for a verified bootstrap, or" >&2
+        echo "            --insecure-bootstrap to trust the certificate presented on first contact" >&2
+        exit 1
+      fi
+      ;;
+    libp2p)
+      [ -z "$TOKEN" ] || die "--token is not used on the libp2p transport (Peer ID authorizes the agent)"
+      [ -z "$CA_BUNDLE" ] || die "--ca-bundle is not used on the libp2p transport"
+      [ "$INSECURE_BOOTSTRAP" -eq 0 ] || die "--insecure-bootstrap is not used on the libp2p transport"
+      if [ -n "$LIBP2P_SERVER_ADDR" ]; then
+        [ -z "$LIBP2P_RELAY_ADDR$LIBP2P_SERVER_PEER_ID" ] \
+          || die "use --server-addr alone, or --relay-addr with --server-peer-id, not both"
+      elif [ -n "$LIBP2P_RELAY_ADDR" ] && [ -n "$LIBP2P_SERVER_PEER_ID" ]; then
+        :
+      else
+        die "libp2p needs --server-addr, or both --relay-addr and --server-peer-id"
+      fi
+      ;;
+    *)
+      die "unknown --transport '$TRANSPORT' (https or libp2p)"
+      ;;
+  esac
+fi
+# install-code mode supplies none of the above itself: --server-url is only
+# the https endpoint to redeem against, and TRANSPORT/CONTROL_PLANE_URL/
+# LIBP2P_SERVER_ADDR are set further down, from the redeem response, once it
+# succeeds.
 
 if [ -n "$RELATIONSHIP" ]; then
   printf '%s' "$RELATIONSHIP" | grep -Eq '^[A-Za-z0-9_-]+$' \
@@ -701,6 +810,60 @@ elif [ "$STAGED" -eq 0 ]; then
   rm -f "$DROPIN_DIR/10-docker-group.conf" 2>/dev/null || true
 fi
 
+if [ "$INSTALL_CODE_MODE" -eq 1 ]; then
+  echo "==> Generating agent identity"
+  AGENT_DATA_DIR="$DESTDIR/var/lib/atlas-agent"
+  install -d "${OWN_ATLAS[@]}" -m 0700 "$AGENT_DATA_DIR"
+  PEER_ID="$(agent_peer_id "$AGENT_DATA_DIR")" || die "could not generate the agent identity"
+  printf '%s' "$PEER_ID" | grep -Eq '^(12D3Koo|Qm)' || die "atlas-agent peer-id produced an unexpected value"
+
+  echo "==> Redeeming install code"
+  resp_file="$(mktemp)"
+  redeem_body="$(printf '{"code":"%s","peer_id":"%s"}' "$INSTALL_CODE" "$PEER_ID")"
+  http_code="$(printf '%s' "$redeem_body" | curl --proto '=https' --tlsv1.2 -sS \
+    --connect-timeout 5 --max-time 15 --max-filesize 65536 \
+    -o "$resp_file" -w '%{http_code}' \
+    -H 'Content-Type: application/json' --data-binary @- \
+    "$SERVER_URL/api/v1/agent/install/redeem")" || http_code=0
+  # The code is consumed the instant it crosses the wire above; it has no
+  # further use in this process and must not sit in memory any longer than
+  # it has to.
+  unset INSTALL_CODE ATLAS_INSTALL_CODE redeem_body
+
+  if [ "$http_code" = "401" ]; then
+    rm -f "$resp_file"
+    die "the install code was rejected: invalid, expired, or already used. Generate a new one in the Atlas UI and try again."
+  elif [ "$http_code" != "200" ]; then
+    rm -f "$resp_file"
+    die "install code redeem failed (HTTP $http_code). Nothing was installed."
+  fi
+
+  # From here on, the code is spent on the server regardless of what this
+  # script does next — any die() below must say so, which burn_die does.
+  burn_die() {
+    echo "install.sh: $*" >&2
+    echo "install.sh: the install code was already redeemed on the server; this host has been rolled back. Generate a new install code to retry." >&2
+    exit 1
+  }
+  [ "$(wc -c <"$resp_file")" -le 65536 ] || burn_die "redeem response exceeded the size limit"
+  json_parses "$resp_file" || burn_die "redeem response did not parse as JSON"
+  NODE_ID="$(json_get "$resp_file" node_id)"
+  ENVIRONMENT="$(json_get "$resp_file" environment)"
+  LIBP2P_SERVER_ADDR="$(json_get "$resp_file" server_addr)"
+  rm -f "$resp_file"
+  printf '%s' "$NODE_ID" | grep -Eq '^[0-9a-f]{32}$' || burn_die "redeem response node_id is not well-formed"
+  printf '%s' "$ENVIRONMENT" | grep -Eq "$ENVIRONMENT_RE" || burn_die "redeem response environment is not well-formed"
+  printf '%s' "$LIBP2P_SERVER_ADDR" | grep -Eq "$MULTIADDR_RE" || burn_die "redeem response server_addr is not well-formed"
+  case "$LIBP2P_SERVER_ADDR" in
+    */p2p/*) ;;
+    *) burn_die "redeem response server_addr carries no peer id" ;;
+  esac
+
+  CONTROL_PLANE_URL="$SERVER_URL"
+  TRANSPORT="libp2p"
+  echo "    redeemed: node $NODE_ID, environment $ENVIRONMENT"
+fi
+
 echo "==> Writing $ENV_FILE"
 install -d "${OWN_ATLAS[@]}" -m 0750 "$CONF_DIR"
 # An existing env file without --force-env was refused above, before
@@ -727,10 +890,22 @@ install -d "${OWN_ATLAS[@]}" -m 0750 "$CONF_DIR"
   else
     {
       echo "ATLAS_AGENT_CONTROL_PLANE_URL=$CONTROL_PLANE_URL"
-      echo "ATLAS_AGENT_TOKEN=$TOKEN"
       echo "ATLAS_AGENT_ENVIRONMENT=$ENVIRONMENT"
-      [ -n "$CA_BUNDLE" ] && echo "ATLAS_AGENT_CA_BUNDLE=$CA_BUNDLE"
-      [ "$INSECURE_BOOTSTRAP" -eq 1 ] && echo "ATLAS_AGENT_INSECURE_BOOTSTRAP=true"
+      [ -n "$NODE_ID" ] && echo "ATLAS_AGENT_NODE_ID=$NODE_ID"
+      # TRANSPORT defaults to "https"; a bare --transport libp2p (no
+      # --relationship) previously validated but was never actually written
+      # here, leaving the agent to fall back to its own https default. Fixed
+      # for both that case and install-code mode, which always sets it.
+      if [ "$TRANSPORT" = "libp2p" ]; then
+        echo "ATLAS_AGENT_TRANSPORT=libp2p"
+        [ -n "$LIBP2P_SERVER_ADDR" ]    && echo "ATLAS_AGENT_LIBP2P_SERVER_ADDR=$LIBP2P_SERVER_ADDR"
+        [ -n "$LIBP2P_RELAY_ADDR" ]     && echo "ATLAS_AGENT_LIBP2P_RELAY_ADDR=$LIBP2P_RELAY_ADDR"
+        [ -n "$LIBP2P_SERVER_PEER_ID" ] && echo "ATLAS_AGENT_LIBP2P_SERVER_PEER_ID=$LIBP2P_SERVER_PEER_ID"
+      else
+        echo "ATLAS_AGENT_TOKEN=$TOKEN"
+        [ -n "$CA_BUNDLE" ] && echo "ATLAS_AGENT_CA_BUNDLE=$CA_BUNDLE"
+        [ "$INSECURE_BOOTSTRAP" -eq 1 ] && echo "ATLAS_AGENT_INSECURE_BOOTSTRAP=true"
+      fi
     } > "$ENV_FILE"
   fi
   [ "$STAGED" -eq 0 ] && chown root:atlas "$ENV_FILE"
@@ -740,14 +915,32 @@ install -d "${OWN_ATLAS[@]}" -m 0750 "$CONF_DIR"
 echo "==> Installing systemd unit"
 install -d "$(dirname "$UNIT_DEST")"
 install "${OWN_ROOT[@]}" -m 0644 "$SCRIPT_DIR/atlas-agent.service" "$UNIT_DEST"
-if [ "$STAGED" -eq 1 ]; then
+if [ "$STAGED" -eq 1 ] && { [ "$INSTALL_CODE_MODE" -eq 0 ] || [ "${ATLAS_INSTALL_TEST:-}" != 1 ]; }; then
+  # A plain staged install (no systemd on the test host) is already a
+  # complete, successful install-code run too — env file and unit on disk is
+  # exactly what a real run would have at this point, absent the actual
+  # systemd actions below. ATLAS_INSTALL_TEST=1 is the same escape hatch
+  # --upgrade's staged tests already use, to additionally exercise the
+  # start/health-check path below against the stub systemctl.
+  INSTALL_CODE_COMMITTED=1
   echo "==> Staged install complete under $DESTDIR (no systemd actions taken)."
   exit 0
 fi
 systemctl daemon-reload
 systemctl enable atlas-agent >/dev/null
 
-if [ "$START" -eq 1 ]; then
+if [ "$INSTALL_CODE_MODE" -eq 1 ]; then
+  if [ "$START" -eq 1 ]; then
+    echo "==> Starting atlas-agent; it must stay active for ${HEALTH_SECONDS}s"
+    systemctl restart atlas-agent || burn_die "systemctl restart atlas-agent failed"
+    service_healthy || burn_die "$HEALTH_ERR"
+  else
+    echo "==> Service enabled, not started (--no-start). Start with:"
+    echo "      systemctl start atlas-agent"
+  fi
+  INSTALL_CODE_COMMITTED=1
+  echo "==> atlas-agent installed (node $NODE_ID, environment $ENVIRONMENT)"
+elif [ "$START" -eq 1 ]; then
   if [ "$TRANSPORT" = "https" ] && [ -z "$TOKEN" ] && [ ! -f "$DATA_DIR/agent-cert.pem" ]; then
     echo "==> No --token given and no certificate on disk yet."
     echo "    Edit $ENV_FILE, set ATLAS_AGENT_TOKEN, then:"

@@ -219,9 +219,19 @@ func (t InstallTarget) Validate() error {
 	return nil
 }
 
-// InstallCommand renders the one-line install command for code. Every value
-// is checked against the installer's allowlists first and single-quoted; the
-// allowlists exclude the quote character, so quoting cannot be broken.
+// InstallCommand renders the one-line install command for code: two steps,
+// not curl | bash — install.sh is downloaded first, verified over https by
+// the same raw-at-tag URL the installer's own --version download trusts,
+// then run. The code travels as the ATLAS_INSTALL_CODE environment variable
+// of the sudo'd process, never as a command-line flag: a flag is visible to
+// any local user via a bare `ps aux`, an env var is not. The libp2p server
+// address, Peer ID, and environment are deliberately absent here — the
+// installer learns them from POST /agent/install/redeem instead, so this
+// command carries nothing an admin must keep secret beyond the code itself.
+//
+// Every value is checked against the installer's allowlists first and
+// single-quoted; the allowlists exclude the quote character, so quoting
+// cannot be broken.
 func InstallCommand(t InstallTarget, code string) (string, error) {
 	if err := t.Validate(); err != nil {
 		return "", err
@@ -232,12 +242,9 @@ func InstallCommand(t InstallTarget, code string) (string, error) {
 	script := "https://raw.githubusercontent.com/" + InstallScriptRepo + "/" + t.Version + "/packaging/atlas-agent/install.sh"
 	return "d=\"$(mktemp -d)\" && " +
 		"curl --proto '=https' --tlsv1.2 -fsSL -o \"$d/install.sh\" '" + script + "' && " +
-		"sudo bash \"$d/install.sh\"" +
+		"sudo env ATLAS_INSTALL_CODE='" + code + "' bash \"$d/install.sh\"" +
 		" --version '" + t.Version + "'" +
-		" --transport libp2p" +
-		" --control-plane-url '" + t.ControlPlaneURL + "'" +
-		" --server-addr '" + t.ServerAddr + "'" +
-		" --install-code '" + code + "'", nil
+		" --server-url '" + t.ControlPlaneURL + "'", nil
 }
 
 // Redeem rate-limit defaults: per source address, and across all sources.

@@ -3,6 +3,7 @@ import { ArrowDown, ArrowUp, ChevronsUpDown } from "lucide-react";
 import { useCollectors, useFleetLatestMetrics, useNodes } from "../api/queries";
 import type { Node, NodeStatus } from "../api/types";
 import { emptyArray } from "../api/empty";
+import { useAuth } from "../auth/AuthContext";
 import { Card } from "../components/Card";
 import { Badge, type Tone } from "../components/Badge";
 import { PageHeader } from "../components/PageHeader";
@@ -14,6 +15,7 @@ import { SearchInput, FilterSelect, Toolbar } from "../components/Toolbar";
 import { formatAgo, formatDuration, formatValue } from "../format";
 import { FleetDistribution } from "./nodes/FleetDistribution";
 import { EnvironmentComparison } from "./nodes/EnvironmentComparison";
+import { InstallCodesPanel } from "./nodes/InstallCodes";
 import { NodeComparison } from "./nodes/NodeComparison";
 import { NodeInspector } from "./nodes/NodeInspector";
 import { readVitals } from "./nodes/nodeMetrics";
@@ -49,6 +51,7 @@ const STATUS_OPTIONS: { value: "all" | NodeStatus; label: string }[] = [
  * labelled "not reporting"; none of it is ever rendered as zero.
  */
 export function NodesPage() {
+  const { user: me } = useAuth();
   const nodes = useNodes();
   const collectors = useCollectors();
   const [selectedID, setSelectedID] = useState<string | null>(null);
@@ -97,6 +100,7 @@ export function NodesPage() {
             hint: nodes.error ? "unavailable" : nodes.isPending ? "loading" : "no nodes",
           }))}
         />
+        {me?.can_enroll_fleet ? <InstallCodesPanel /> : null}
         <Card level="floating" className="p-0">
           <QueryState
             isPending={nodes.isPending}
@@ -146,6 +150,8 @@ export function NodesPage() {
           },
         ]}
       />
+
+      {me?.can_enroll_fleet ? <InstallCodesPanel /> : null}
 
       <h2 className="eyebrow mb-3">Fleet composition</h2>
       <FleetDistribution nodes={all} />

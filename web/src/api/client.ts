@@ -2,12 +2,15 @@ import type {
   ApiErrorBody,
   ApiErrorResponse,
   AssignRoleAccessRequest,
+  CreateInstallCommandRequest,
+  CreateInstallCommandResponse,
   CreateUserRequest,
   CreateUserResponse,
   CurrentUser,
   ErrorCode,
   GrantPageAccessRequest,
   GrantRoleRequest,
+  ListInstallCommandsResponse,
   ListRoleAccessResponse,
   ListUserAuditResponse,
   ListUserPageAccessResponse,
@@ -365,6 +368,29 @@ export async function revokeRoleAccess(userID: string, assignmentID: string): Pr
   await request(`/users/${encodeURIComponent(userID)}/role-access/${encodeURIComponent(assignmentID)}`, {
     method: "DELETE",
   });
+}
+
+// ------------------------------------------------- Fleet: install codes ----
+
+/** Generates a one-time install code and its ready-to-paste command. The
+ *  command is the only place the code's plaintext ever appears. */
+export async function createInstallCommand(body: CreateInstallCommandRequest): Promise<CreateInstallCommandResponse> {
+  const response = await request("/fleet/install-commands", {
+    method: "POST",
+    headers: JSON_HEADERS,
+    body: JSON.stringify(body),
+  });
+  return (await response.json()) as CreateInstallCommandResponse;
+}
+
+/** Every install code Atlas knows about, without any code. */
+export async function fetchInstallCommands(signal?: AbortSignal): Promise<ListInstallCommandsResponse> {
+  return apiGet<ListInstallCommandsResponse>("/fleet/install-commands", signal ? { signal } : {});
+}
+
+/** Revokes a pending install code so it can no longer be redeemed. */
+export async function revokeInstallCommand(id: string): Promise<void> {
+  await request(`/fleet/install-commands/${encodeURIComponent(id)}`, { method: "DELETE" });
 }
 
 /**
