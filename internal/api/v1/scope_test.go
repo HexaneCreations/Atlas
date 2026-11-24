@@ -61,7 +61,7 @@ func newScopeServer(t *testing.T) (*httptest.Server, *scopeCollection) {
 		Collection: coll,
 	})
 
-	srv := httptest.NewServer(handler)
+	srv := httptest.NewServer(signedIn(handler))
 	t.Cleanup(srv.Close)
 	return srv, coll
 }
@@ -194,7 +194,7 @@ func TestRemoteScopeIsRefusedBeforePluginAvailability(t *testing.T) {
 		Bus:        bus,
 		Collection: &scopeNoPlugins{},
 	})
-	srv := httptest.NewServer(handler)
+	srv := httptest.NewServer(signedIn(handler))
 	t.Cleanup(srv.Close)
 
 	// Local: the honest answer is that this host has no such integration.

@@ -172,7 +172,7 @@ func TestCapacityFleetRollsUpWorstStatusAcrossNodes(t *testing.T) {
 	nodeID := fmt.Sprintf("capacitytest-fleet-node-%d", time.Now().UnixNano())
 	seedCapacityFixture(t, seedPool, nodeID)
 
-	resp, err := http.Get(base + "/api/v1/capacity/fleet")
+	resp, err := authenticatedTestClient(t, base, "viewer").Get(base + "/api/v1/capacity/fleet")
 	if err != nil {
 		t.Fatalf("GET capacity/fleet: %v", err)
 	}

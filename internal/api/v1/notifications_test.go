@@ -88,7 +88,7 @@ func newNotificationServer(t *testing.T, store *fakeNotificationStore) *httptest
 		Config: &cfg, Health: health.NewRegistry(nil), Pool: postgres.NewPool(cfg.Database, nil),
 		Bus: bus, NotificationStore: store,
 	})
-	srv := httptest.NewServer(handler)
+	srv := httptest.NewServer(signedIn(handler))
 	t.Cleanup(srv.Close)
 	return srv
 }

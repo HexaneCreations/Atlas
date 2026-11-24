@@ -52,7 +52,7 @@ func newGraphServer(t *testing.T, g *service.Graph) *httptest.Server {
 		Collection: fakeCollection{serviceGraph: g, activePlugins: []string{"service"}},
 	})
 
-	srv := httptest.NewServer(handler)
+	srv := httptest.NewServer(signedIn(handler))
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -273,7 +273,7 @@ func TestServiceGraphWithoutManagerIsNotImplemented(t *testing.T) {
 		Bus:        bus,
 		Collection: fakeCollection{}, // no service plugin active
 	})
-	srv := httptest.NewServer(handler)
+	srv := httptest.NewServer(signedIn(handler))
 	t.Cleanup(srv.Close)
 
 	if _, status := getJSON[v1.ServiceGraphResponse](t, srv.URL+"/api/v1/services/graph"); status != http.StatusNotImplemented {

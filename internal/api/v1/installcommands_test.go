@@ -230,7 +230,9 @@ func TestInstallCommandEndpointsNeedASessionAndWiredAuthz(t *testing.T) {
 		{"revoke", http.MethodDelete, "/fleet/install-commands/abc", ""},
 	}
 	withAuthz := newInstallTestServer(t, &fakeInstallStore{}, fleet.NewRedeemLimiter(10, 10), roleAuthorizer{role: user.RoleSuperadmin})
-	noAuthz := newInstallTestServer(t, &fakeInstallStore{}, fleet.NewRedeemLimiter(10, 10), nil)
+	unwired := newInstallTestServer(t, &fakeInstallStore{}, fleet.NewRedeemLimiter(10, 10), nil)
+	noAuthz := httptest.NewServer(signedIn(unwired.Config.Handler))
+	t.Cleanup(noAuthz.Close)
 	for _, a := range actions {
 		if code := do(t, http.DefaultClient, withAuthz.URL, a); code != http.StatusUnauthorized {
 			t.Errorf("%s anonymous: status %d, want 401", a.name, code)

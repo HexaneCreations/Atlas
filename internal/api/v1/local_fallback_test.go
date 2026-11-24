@@ -43,7 +43,7 @@ func newFallbackServer(t *testing.T, coll v1.CollectionSource, inv *fakeInventor
 		Inventory:  inv,
 		Nodes:      &fakeNodeExistence{known: map[string]bool{scopeTestNode: true}},
 	})
-	srv := httptest.NewServer(handler)
+	srv := httptest.NewServer(signedIn(handler))
 	t.Cleanup(srv.Close)
 	return srv
 }

@@ -275,7 +275,11 @@ func NewHandler(deps Deps) *Handler { return &Handler{deps: deps} }
 // Routes are declared with Go 1.22 method-and-pattern syntax, so an
 // unsupported method returns 405 from the router rather than reaching a
 // handler that has to check for itself.
+//
+// Every route requires a session unless it is listed in [publicRoutes].
 func (h *Handler) Mount(mux Registrar) {
+	mux = sessionRequired{mux}
+
 	mux.Handle("GET "+Prefix+"/system/info", httpx.Handler(h.SystemInfo))
 	mux.Handle("GET "+Prefix+"/system/health", httpx.Handler(h.SystemHealth))
 	mux.Handle("GET "+Prefix+"/system/runtime", httpx.Handler(h.SystemRuntime))

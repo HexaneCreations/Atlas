@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	"github.com/hexane/atlas/internal/api"
+	"github.com/hexane/atlas/internal/api/session"
+	"github.com/hexane/atlas/internal/core/user"
 	"github.com/hexane/atlas/internal/platform/config"
 	"github.com/hexane/atlas/internal/platform/errs"
 	"github.com/hexane/atlas/internal/platform/eventbus"
@@ -43,6 +45,16 @@ func get(t *testing.T, h http.Handler, path string) *httptest.ResponseRecorder {
 	t.Helper()
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+	return rec
+}
+
+// getSignedIn is get as an authenticated caller.
+func getSignedIn(t *testing.T, h http.Handler, path string) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodGet, path, nil)
+	p := user.Principal{UserID: "test-user", Username: "test-user"}
+	h.ServeHTTP(rec, r.WithContext(session.WithPrincipal(r.Context(), p)))
 	return rec
 }
 
@@ -118,7 +130,7 @@ func TestReadinessReflectsCriticalDependencies(t *testing.T) {
 func TestSystemInfoAnswersWithoutTheDatabase(t *testing.T) {
 	t.Parallel()
 
-	rec := get(t, newTestAPI(t), "/api/v1/system/info")
+	rec := getSignedIn(t, newTestAPI(t), "/api/v1/system/info")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
@@ -157,7 +169,7 @@ func TestSystemHealthAlwaysReturnsOK(t *testing.T) {
 func TestSystemRuntimeReportsSelfTelemetry(t *testing.T) {
 	t.Parallel()
 
-	rec := get(t, newTestAPI(t), "/api/v1/system/runtime")
+	rec := getSignedIn(t, newTestAPI(t), "/api/v1/system/runtime")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}

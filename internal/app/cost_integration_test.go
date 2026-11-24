@@ -192,7 +192,7 @@ func TestCostFleetIncludesSeededNodeInTheFleetTotal(t *testing.T) {
 	nodeID := fmt.Sprintf("costtest-fleet-node-%d", time.Now().UnixNano())
 	seedCostFixture(t, seedPool, nodeID)
 
-	resp, err := http.Get(base + "/api/v1/cost/fleet")
+	resp, err := authenticatedTestClient(t, base, "viewer").Get(base + "/api/v1/cost/fleet")
 	if err != nil {
 		t.Fatalf("GET cost/fleet: %v", err)
 	}

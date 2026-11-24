@@ -175,7 +175,7 @@ func TestHealthScoreFleetIncludesSeededNode(t *testing.T) {
 	nodeID := fmt.Sprintf("healthtest-fleet-node-%d", time.Now().UnixNano())
 	seedHealthScoreFixture(t, seedPool, nodeID)
 
-	resp, err := http.Get(base + "/api/v1/health/fleet")
+	resp, err := authenticatedTestClient(t, base, "viewer").Get(base + "/api/v1/health/fleet")
 	if err != nil {
 		t.Fatalf("GET health/fleet: %v", err)
 	}
