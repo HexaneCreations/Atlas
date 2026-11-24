@@ -64,6 +64,11 @@ func (e Environment) valid() bool {
 type Config struct {
 	// Environment is the deployment tier: development, staging, or production.
 	Environment Environment `yaml:"environment" json:"environment" env:"ENVIRONMENT"`
+	// PublicHostname is the public DNS name (optionally host:port) the
+	// reverse proxy serves Atlas on — the same ATLAS_PUBLIC_HOSTNAME the
+	// proxy is configured with. Install commands use https://<it> as the
+	// control-plane URL; empty disables them.
+	PublicHostname string `yaml:"public_hostname" json:"public_hostname" env:"PUBLIC_HOSTNAME"`
 
 	Node     Node       `yaml:"node" json:"node" env:"NODE"`
 	Server   Server     `yaml:"server" json:"server" env:"SERVER"`
@@ -151,6 +156,12 @@ type Fleet struct {
 	// NAT with no forwarded port. LibP2PListenAddrs is still bound alongside
 	// it (harmless, just unreachable from outside).
 	LibP2PRelayAddr string `yaml:"libp2p_relay_addr" json:"libp2p_relay_addr" env:"LIBP2P_RELAY_ADDR"`
+	// LibP2PAdvertisedAddr is the public multiaddr agents dial this control
+	// plane's libp2p listener at, without the /p2p/ part — for example
+	// "/ip4/203.0.113.10/tcp/4102" or "/dns4/atlas.example.com/tcp/4102".
+	// Never auto-detected. Install commands append /p2p/<this server's Peer
+	// ID>; empty disables them.
+	LibP2PAdvertisedAddr string `yaml:"libp2p_advertised_addr" json:"libp2p_advertised_addr" env:"LIBP2P_ADVERTISED_ADDR"`
 
 	// MaxRequestBytes caps an agent request body. This listener is reachable
 	// by every enrolled agent in the fleet, so an unbounded body is a

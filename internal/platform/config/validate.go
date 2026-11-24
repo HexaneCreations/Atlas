@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -58,6 +59,9 @@ func (c *Config) Validate() error {
 	c.EventBus.validate(v)
 	c.Collection.validate(v)
 	c.Fleet.validate(v)
+	if c.PublicHostname != "" && !publicHostnameRE.MatchString(c.PublicHostname) {
+		v.addf("public_hostname", "%q is not a host name, optionally with :port", c.PublicHostname)
+	}
 	c.Notifications.validate(v)
 
 	if err := c.Logging.Validate(); err != nil {
@@ -100,7 +104,24 @@ func (f Fleet) validate(v *violations) {
 	if f.MaxRequestsPerMinute <= 0 {
 		v.addf("fleet.max_requests_per_minute", "must be positive")
 	}
+	if f.LibP2PAdvertisedAddr != "" {
+		switch {
+		case !f.LibP2PEnabled:
+			v.addf("fleet.libp2p_advertised_addr", "is set but libp2p is not enabled")
+		case !advertisedAddrRE.MatchString(f.LibP2PAdvertisedAddr):
+			v.addf("fleet.libp2p_advertised_addr", "%q is not a multiaddr like /ip4/203.0.113.10/tcp/4102", f.LibP2PAdvertisedAddr)
+		case strings.Contains(f.LibP2PAdvertisedAddr, "/p2p/"):
+			v.addf("fleet.libp2p_advertised_addr", "must not include /p2p/; the server's own Peer ID is appended")
+		}
+	}
 }
+
+// advertisedAddrRE is install.sh's multiaddr allowlist (MULTIADDR_RE).
+var advertisedAddrRE = regexp.MustCompile(`^/[A-Za-z0-9./:_-]+$`)
+
+// publicHostnameRE accepts a DNS name or IPv4 address, optionally with a
+// port — the host part of install.sh's URL allowlist.
+var publicHostnameRE = regexp.MustCompile(`^[A-Za-z0-9.-]+(:[0-9]{1,5})?$`)
 
 func (s Server) validate(v *violations, prod bool) {
 	if s.Host == "" {

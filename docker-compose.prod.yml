@@ -156,6 +156,12 @@ services:
     #   ATLAS_ENV_FILE=.env.prod.example docker compose --env-file .env.prod.example -f docker-compose.prod.yml config
     # Real usage is unaffected: --env-file .env.prod leaves this at its
     # default, which is the same file.
+    # .env.prod also carries ATLAS_PUBLIC_HOSTNAME and
+    # ATLAS_FLEET_LIBP2P_ADVERTISED_ADDR, which atlas-server reads to build
+    # the "Add server" install command (see .env.prod.example). They reach the
+    # container through env_file only; repeating them under environment:
+    # would override them with an empty value whenever compose is run
+    # without --env-file.
     env_file:
       - ${ATLAS_ENV_FILE:-.env.prod}
     secrets:

@@ -26,6 +26,7 @@ import (
 	"github.com/hexane/atlas/internal/core/activity"
 	corealert "github.com/hexane/atlas/internal/core/alert"
 	coreeventstore "github.com/hexane/atlas/internal/core/eventstore"
+	corefleet "github.com/hexane/atlas/internal/core/fleet"
 	coreuser "github.com/hexane/atlas/internal/core/user"
 	"github.com/hexane/atlas/internal/platform/build"
 	"github.com/hexane/atlas/internal/platform/config"
@@ -164,6 +165,9 @@ func New(cfg *config.Config, logger *slog.Logger) (*App, error) {
 		PageAuthz:         lazyPageAuthorizer{pool: pool},
 		PageAdmin:         lazyPageAdmin{pool: pool},
 		LoginLimiter:      coreuser.NewLoginLimiter(),
+		InstallCodes:      lazyInstallCodeStore{pool: pool},
+		InstallTargets:    installTargets{cfg: cfg, fleet: fleetPipe},
+		RedeemLimiter:     corefleet.NewRedeemLimiter(corefleet.RedeemPerIPPerMinute, corefleet.RedeemGlobalPerMinute),
 		Logger:            logger,
 	})
 	server := httpx.NewServer(cfg.Server, handler, logger)

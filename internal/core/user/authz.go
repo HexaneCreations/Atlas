@@ -66,6 +66,10 @@ const (
 	// superadmin only (see migrations/0021_notifications_manage_permission.sql)
 	// and checked fleet-wide-only, the same way as PermissionUserManage.
 	PermissionNotificationsManage Permission = "notifications.manage"
+	// PermissionFleetEnroll covers creating, listing and revoking one-time
+	// install codes (the "Add server" flow). Held by admin and superadmin
+	// (see migrations/0023_install_codes.sql), checked fleet-wide-only.
+	PermissionFleetEnroll Permission = "fleet.enroll"
 )
 
 // FleetWide is the sentinel passed to [GrantSpec.NodeID] to mean "every

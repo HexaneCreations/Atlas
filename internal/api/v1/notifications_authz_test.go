@@ -11,16 +11,16 @@ import (
 )
 
 // rolePermissions mirrors the role_permissions seed (migrations 0012, 0013,
-// 0014, 0019, 0021). The real table is exercised by the integration tests in
+// 0014, 0019, 0021, 0023). The real table is exercised by the integration tests in
 // internal/storage/user and internal/app; this copy lets the handler tests
 // speak in roles.
 var rolePermissions = map[string][]user.Permission{
 	user.RoleViewer:   {user.PermissionNodeRead},
 	user.RoleOperator: {user.PermissionNodeRead, user.PermissionNodeLogsRead, user.PermissionFleetWrite},
 	user.RoleAdmin: {user.PermissionNodeRead, user.PermissionNodeLogsRead, user.PermissionFleetWrite,
-		user.PermissionUserManage},
+		user.PermissionUserManage, user.PermissionFleetEnroll},
 	user.RoleSuperadmin: {user.PermissionNodeRead, user.PermissionNodeLogsRead, user.PermissionFleetWrite,
-		user.PermissionUserManage, user.PermissionNotificationsManage},
+		user.PermissionUserManage, user.PermissionNotificationsManage, user.PermissionFleetEnroll},
 }
 
 // roleAuthorizer answers Require the way storage/user.Repository.HasPermission

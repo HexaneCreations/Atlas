@@ -17,6 +17,7 @@ import (
 	"github.com/hexane/atlas/internal/core/activity"
 	corecapacityplanning "github.com/hexane/atlas/internal/core/capacityplanning"
 	corecostanalysis "github.com/hexane/atlas/internal/core/costanalysis"
+	corefleet "github.com/hexane/atlas/internal/core/fleet"
 	coregoldensignals "github.com/hexane/atlas/internal/core/goldensignals"
 	corehealthscore "github.com/hexane/atlas/internal/core/healthscore"
 	coreinventory "github.com/hexane/atlas/internal/core/inventory"
@@ -74,6 +75,11 @@ type Deps struct {
 	// throttling rather than crashing it, the same convention as the
 	// stores above.
 	LoginLimiter v1.LoginLimiter
+	// InstallCodes, InstallTargets and RedeemLimiter back the install-command
+	// endpoints; nil answers 503 there.
+	InstallCodes   corefleet.InstallCodeStore
+	InstallTargets v1.InstallTargetSource
+	RedeemLimiter  v1.RedeemLimiter
 	// Logger is used only to build the authentication middleware; nil is
 	// valid and falls back to slog's default handler.
 	Logger *slog.Logger
@@ -116,6 +122,9 @@ func New(deps Deps) http.Handler {
 		PageAuthz:         deps.PageAuthz,
 		PageAdmin:         deps.PageAdmin,
 		LoginLimiter:      deps.LoginLimiter,
+		InstallCodes:      deps.InstallCodes,
+		InstallTargets:    deps.InstallTargets,
+		RedeemLimiter:     deps.RedeemLimiter,
 		SessionSecure:     deps.Config.Environment.IsProduction(),
 	}).Mount(mux)
 

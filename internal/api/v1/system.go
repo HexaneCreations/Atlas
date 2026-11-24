@@ -22,6 +22,7 @@ import (
 	"github.com/hexane/atlas/internal/core/capacityplanning"
 	"github.com/hexane/atlas/internal/core/costanalysis"
 	"github.com/hexane/atlas/internal/core/eventstore"
+	"github.com/hexane/atlas/internal/core/fleet"
 	"github.com/hexane/atlas/internal/core/goldensignals"
 	"github.com/hexane/atlas/internal/core/healthscore"
 	"github.com/hexane/atlas/internal/core/incident"
@@ -148,6 +149,12 @@ type Deps struct {
 	// rather than crashing it, the same convention as the other stores
 	// above — see [Handler.Login].
 	LoginLimiter LoginLimiter
+	// InstallCodes, InstallTargets and RedeemLimiter back the "Add server"
+	// install-command endpoints and the unauthenticated redeem endpoint.
+	// Nil makes those endpoints answer 503.
+	InstallCodes   fleet.InstallCodeStore
+	InstallTargets InstallTargetSource
+	RedeemLimiter  RedeemLimiter
 }
 
 // SLOStore is the SLO definition store the API reads and writes. Satisfied
@@ -268,7 +275,7 @@ func NewHandler(deps Deps) *Handler { return &Handler{deps: deps} }
 // Routes are declared with Go 1.22 method-and-pattern syntax, so an
 // unsupported method returns 405 from the router rather than reaching a
 // handler that has to check for itself.
-func (h *Handler) Mount(mux *http.ServeMux) {
+func (h *Handler) Mount(mux Registrar) {
 	mux.Handle("GET "+Prefix+"/system/info", httpx.Handler(h.SystemInfo))
 	mux.Handle("GET "+Prefix+"/system/health", httpx.Handler(h.SystemHealth))
 	mux.Handle("GET "+Prefix+"/system/runtime", httpx.Handler(h.SystemRuntime))
@@ -364,6 +371,19 @@ func (h *Handler) Mount(mux *http.ServeMux) {
 	mux.Handle("GET "+Prefix+"/cron", httpx.Handler(h.ListCronJobs))
 	mux.Handle("GET "+Prefix+"/ports", httpx.Handler(h.ListPorts))
 	mux.Handle("GET "+Prefix+"/mounts", httpx.Handler(h.ListMounts))
+
+	mux.Handle("POST "+Prefix+"/fleet/install-commands", httpx.Handler(h.CreateInstallCommand))
+	mux.Handle("GET "+Prefix+"/fleet/install-commands", httpx.Handler(h.ListInstallCommands))
+	mux.Handle("DELETE "+Prefix+"/fleet/install-commands/{installID}", httpx.Handler(h.RevokeInstallCommand))
+	// Unauthenticated by design: the installer has no session. See
+	// [Handler.RedeemInstallCode].
+	mux.Handle("POST "+Prefix+"/agent/install/redeem", httpx.Handler(h.RedeemInstallCode))
+}
+
+// Registrar is the route-registration surface [Handler.Mount] needs.
+// Satisfied by [*http.ServeMux]; tests pass a recorder to enumerate routes.
+type Registrar interface {
+	Handle(pattern string, handler http.Handler)
 }
 
 // SystemInfoResponse describes the running Atlas instance.
