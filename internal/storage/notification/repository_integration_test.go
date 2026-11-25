@@ -345,7 +345,7 @@ func TestSeededGlobalRules(t *testing.T) {
 	}{
 		{corenotification.TriggerDiskPct, ptr(80.0), ptr(90.0), 300, 5},
 		{corenotification.TriggerRAMPct, ptr(85.0), ptr(95.0), 300, 5},
-		{corenotification.TriggerNodeDown, nil, nil, 300, 0},
+		{corenotification.TriggerNodeDown, nil, nil, 480, 0},
 		{corenotification.TriggerServiceFailed, nil, nil, 300, 0},
 		{corenotification.TriggerContainerExit, nil, nil, 0, 0},
 		{corenotification.TriggerContainerRestart, nil, nil, 0, 0},

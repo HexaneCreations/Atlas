@@ -1,4 +1,4 @@
--- 0022_notification_schema.sql
+-- 0024_notification_schema.sql
 --
 -- Replaces 0009's webhook-only channels and delivery queue with the schema
 -- for current-state notifications (internal/core/notification):
@@ -81,7 +81,10 @@ INSERT INTO notification_rules
 VALUES
     ('global-disk_pct',          'disk_pct',          NULL, true, 80,   90,   300, 120, 5, 1800, true, '{}', 'migration'),
     ('global-ram_pct',           'ram_pct',           NULL, true, 85,   95,   300, 120, 5, 1800, true, '{}', 'migration'),
-    ('global-node_down',         'node_down',         NULL, true, NULL, NULL, 300, 120, 0, 1800, true, '{}', 'migration'),
+    -- node_down for_seconds is 480, not 300 like the others: a rebooting or
+    -- briefly unreachable host must not page anyone, so the hold has to cover
+    -- a boot plus a missed collection window, not just one missed collection.
+    ('global-node_down',         'node_down',         NULL, true, NULL, NULL, 480, 120, 0, 1800, true, '{}', 'migration'),
     ('global-service_failed',    'service_failed',    NULL, true, NULL, NULL, 300, 120, 0, 1800, true, '{}', 'migration'),
     -- Events, not conditions: they fire on the observed change itself.
     ('global-container_exit',    'container_exit',    NULL, true, NULL, NULL, 0,   120, 0, 1800, true, '{}', 'migration'),
@@ -137,3 +140,20 @@ CREATE TABLE notification_deliveries (
 CREATE INDEX idx_notification_deliveries_due ON notification_deliveries (next_attempt_at) WHERE status = 'pending';
 -- Keyset pagination of the delivery log, newest first.
 CREATE INDEX idx_notification_deliveries_created ON notification_deliveries (created_at DESC, id DESC);
+
+-- An archived node is retired from monitoring without deleting its history
+-- (metrics, events, incidents, grants): the evaluator must skip it, the same
+-- way it already has no reason to watch a node nobody enrolled. No API or UI
+-- sets this in step 6 — only the column exists, for the evaluator to read
+-- once it is written.
+ALTER TABLE nodes ADD COLUMN archived_at timestamptz;
+
+-- No partial index on (archived_at) WHERE archived_at IS NULL here. The
+-- evaluator that would run this predicate does not exist yet (step 7+), so
+-- there is no real query shape to optimize for — it may well filter by
+-- archived_at alongside something else (environment, a join on
+-- notification_rules), which would make a single-column partial index on
+-- archived_at the wrong index anyway. nodes is one row per host, not per
+-- sample like metric_samples/events — a sequential scan over it costs
+-- nothing at any fleet size this product targets. Add the index once the
+-- evaluator's actual WHERE clause is known, in the same change that writes it.

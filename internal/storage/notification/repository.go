@@ -1,6 +1,6 @@
 // Package notification is the PostgreSQL store for notification channels,
 // rules, evaluator state and deliveries (see
-// internal/core/notification and migrations/0022_notification_schema.sql).
+// internal/core/notification and migrations/0024_notification_schema.sql).
 package notification
 
 import (
