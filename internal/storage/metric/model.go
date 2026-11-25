@@ -50,6 +50,18 @@ type Node struct {
 	// product UUID on Linux, IOPlatformUUID on macOS), agent-read and never
 	// derived from the machine id. Empty when the host cannot supply one.
 	HardwareUUID string `json:"hardware_uuid,omitempty"`
+
+	// ArchivedAt retires a node from monitoring without deleting its
+	// history. Set by no API or UI yet (migration 0024's own comment); read
+	// by the notification evaluator (internal/core/notification), which
+	// skips an archived node entirely. Not serialised to the public nodes
+	// API — presentNode in internal/api/v1/nodes.go builds that response
+	// field by field and simply does not include it.
+	ArchivedAt *time.Time `json:"-"`
+	// AlertsMutedUntil is nil when alerts are on, or a future time while
+	// muted. Same story as ArchivedAt: no setter yet, evaluator-only, not
+	// part of the public API.
+	AlertsMutedUntil *time.Time `json:"-"`
 }
 
 // NodeAddress is one address bound to one of a node's network interfaces, as

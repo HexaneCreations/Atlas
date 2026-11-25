@@ -157,3 +157,10 @@ ALTER TABLE nodes ADD COLUMN archived_at timestamptz;
 -- sample like metric_samples/events — a sequential scan over it costs
 -- nothing at any fleet size this product targets. Add the index once the
 -- evaluator's actual WHERE clause is known, in the same change that writes it.
+
+-- NULL means alerts are on; a future time means muted until then. The
+-- evaluator (step 9a) checks this before touching a node's notification
+-- state at all — a muted node is skipped entirely, the same way an
+-- archived one is, and the column is cleared or allowed to lapse by a
+-- future admin action with no API or UI of its own yet.
+ALTER TABLE nodes ADD COLUMN alerts_muted_until timestamptz;

@@ -313,7 +313,8 @@ func (r *Repository) ListNodes(ctx context.Context) ([]Node, error) {
 		       COALESCE(os, ''), COALESCE(platform, ''), COALESCE(kernel, ''),
 		       COALESCE(architecture, ''), COALESCE(cpu_cores, 0),
 		       COALESCE(agent_version, ''), COALESCE(environment, ''), boot_time, first_seen_at, last_seen_at,
-		       clock_skew_seconds, COALESCE(host(public_ip), ''), COALESCE(hardware_uuid, '')
+		       clock_skew_seconds, COALESCE(host(public_ip), ''), COALESCE(hardware_uuid, ''),
+		       archived_at, alerts_muted_until
 		FROM nodes
 		ORDER BY last_seen_at DESC, node_id`
 
@@ -346,7 +347,8 @@ func (r *Repository) GetNode(ctx context.Context, nodeID string) (Node, error) {
 		       COALESCE(os, ''), COALESCE(platform, ''), COALESCE(kernel, ''),
 		       COALESCE(architecture, ''), COALESCE(cpu_cores, 0),
 		       COALESCE(agent_version, ''), COALESCE(environment, ''), boot_time, first_seen_at, last_seen_at,
-		       clock_skew_seconds, COALESCE(host(public_ip), ''), COALESCE(hardware_uuid, '')
+		       clock_skew_seconds, COALESCE(host(public_ip), ''), COALESCE(hardware_uuid, ''),
+		       archived_at, alerts_muted_until
 		FROM nodes WHERE node_id = $1`
 
 	rows, err := r.pool.Query(ctx, q, nodeID)
@@ -376,7 +378,8 @@ func scanNode(rows pgx.Rows) (Node, error) {
 
 	err := rows.Scan(&n.NodeID, &n.Hostname, &n.OS, &n.Platform, &n.Kernel,
 		&n.Architecture, &n.CPUCores, &n.AgentVersion, &n.Environment,
-		&bootTime, &n.FirstSeenAt, &n.LastSeenAt, &n.ClockSkewSeconds, &n.PublicIP, &n.HardwareUUID)
+		&bootTime, &n.FirstSeenAt, &n.LastSeenAt, &n.ClockSkewSeconds, &n.PublicIP, &n.HardwareUUID,
+		&n.ArchivedAt, &n.AlertsMutedUntil)
 	if err != nil {
 		return Node{}, err
 	}

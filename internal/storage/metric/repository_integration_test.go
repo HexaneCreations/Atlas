@@ -446,6 +446,68 @@ func TestInsertBatchWithDifferentEnvelopeIDsBothWrite(t *testing.T) {
 	}
 }
 
+// TestGetNodeAndListNodesExposeArchivedAtAndAlertsMutedUntil covers the
+// repository accessors the notification evaluator needs for both
+// migration 0024 columns: nil by default, and whatever is actually
+// stored once set — there is no repository setter yet for either (no API
+// or UI sets them this step), so both are written directly.
+func TestGetNodeAndListNodesExposeArchivedAtAndAlertsMutedUntil(t *testing.T) {
+	repo, pool := newRepository(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	if err := insertBatch(t, repo, ctx, envelope("node-k", "system.cpu", "system.cpu.usage", now, 1)); err != nil {
+		t.Fatalf("InsertBatch: %v", err)
+	}
+
+	node, err := repo.GetNode(ctx, "node-k")
+	if err != nil {
+		t.Fatalf("GetNode: %v", err)
+	}
+	if node.ArchivedAt != nil || node.AlertsMutedUntil != nil {
+		t.Fatalf("node = %+v, want both nil before anything sets them", node)
+	}
+
+	archivedAt := now.Add(-time.Hour).Truncate(time.Second)
+	mutedUntil := now.Add(time.Hour).Truncate(time.Second)
+	if _, err := pool.Exec(ctx, `UPDATE nodes SET archived_at = $2, alerts_muted_until = $3 WHERE node_id = $1`,
+		"node-k", archivedAt, mutedUntil); err != nil {
+		t.Fatalf("set archived_at/alerts_muted_until: %v", err)
+	}
+
+	node, err = repo.GetNode(ctx, "node-k")
+	if err != nil {
+		t.Fatalf("GetNode: %v", err)
+	}
+	if node.ArchivedAt == nil || !node.ArchivedAt.Equal(archivedAt) {
+		t.Errorf("ArchivedAt = %v, want %v", node.ArchivedAt, archivedAt)
+	}
+	if node.AlertsMutedUntil == nil || !node.AlertsMutedUntil.Equal(mutedUntil) {
+		t.Errorf("AlertsMutedUntil = %v, want %v", node.AlertsMutedUntil, mutedUntil)
+	}
+
+	nodes, err := repo.ListNodes(ctx)
+	if err != nil {
+		t.Fatalf("ListNodes: %v", err)
+	}
+	found := false
+	for _, n := range nodes {
+		if n.NodeID != "node-k" {
+			continue
+		}
+		found = true
+		if n.ArchivedAt == nil || !n.ArchivedAt.Equal(archivedAt) {
+			t.Errorf("ListNodes ArchivedAt = %v, want %v", n.ArchivedAt, archivedAt)
+		}
+		if n.AlertsMutedUntil == nil || !n.AlertsMutedUntil.Equal(mutedUntil) {
+			t.Errorf("ListNodes AlertsMutedUntil = %v, want %v", n.AlertsMutedUntil, mutedUntil)
+		}
+	}
+	if !found {
+		t.Fatal("node-k not found in ListNodes")
+	}
+}
+
 func TestUpdateClockSkewRoundTrips(t *testing.T) {
 	repo, _ := newRepository(t)
 	ctx := context.Background()

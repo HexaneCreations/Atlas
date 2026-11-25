@@ -4,32 +4,40 @@ import (
 	"context"
 	"log/slog"
 	"sync"
+	"time"
 
 	corenotification "github.com/hexane/atlas/internal/core/notification"
 	"github.com/hexane/atlas/internal/platform/postgres"
 	"github.com/hexane/atlas/internal/platform/secretbox"
+	"github.com/hexane/atlas/internal/storage/metric"
 	storagenotification "github.com/hexane/atlas/internal/storage/notification"
 )
 
 // notificationPipeline owns the notification subsystem's lifecycle: the
-// background dispatcher that turns queued notification_deliveries rows
-// into sent messages. The evaluator that decides when to queue one (step
-// 9) is not wired in yet; this pipeline only drains whatever already
-// lands in the queue (today, nothing does).
+// evaluator that watches disk_pct, ram_pct and node_down (container and
+// service triggers are step 9b and are not wired in) and the background
+// dispatcher that turns what it queues into sent messages.
 type notificationPipeline struct {
 	logger *slog.Logger
 	pool   *postgres.Pool
 	// key encrypts channel secrets. Nil disables notifications entirely —
-	// the dispatcher never starts, and there is nowhere safe to keep a
-	// channel's secret, so none is ever read or sent.
+	// neither the evaluator nor the dispatcher starts, and there is
+	// nowhere safe to keep a channel's secret, so none is ever read or
+	// sent.
 	key *secretbox.Key
+	// localNodeID is this server's own node id (internal/platform/hostid,
+	// resolved once in app.New) — the evaluator never evaluates it, the
+	// same way the local collection pipeline is the one writing its data
+	// in the first place. See evaluator.go's EvalNode doc comment.
+	localNodeID string
 
-	mu     sync.RWMutex
-	engine *corenotification.Engine
+	mu        sync.RWMutex
+	engine    *corenotification.Engine
+	evaluator *corenotification.Evaluator
 }
 
-func newNotificationPipeline(logger *slog.Logger, pool *postgres.Pool, key *secretbox.Key) *notificationPipeline {
-	return &notificationPipeline{logger: logger, pool: pool, key: key}
+func newNotificationPipeline(logger *slog.Logger, pool *postgres.Pool, key *secretbox.Key, localNodeID string) *notificationPipeline {
+	return &notificationPipeline{logger: logger, pool: pool, key: key, localNodeID: localNodeID}
 }
 
 func (p *notificationPipeline) Name() string { return "notification.pipeline" }
@@ -50,11 +58,20 @@ func (p *notificationPipeline) Start(ctx context.Context) error {
 		},
 	})
 
+	metricRepo := metric.NewRepository(p.pool.DB())
+	evaluator := corenotification.NewEvaluator(corenotification.EvaluatorOptions{
+		Rules: repo, States: repo, Notifier: engine, Logger: p.logger,
+		Nodes:       evaluatorNodeAdapter{repo: metricRepo},
+		Metrics:     evaluatorMetricAdapter{repo: metricRepo},
+		LocalNodeID: p.localNodeID,
+	})
+
 	p.mu.Lock()
-	p.engine = engine
+	p.engine, p.evaluator = engine, evaluator
 	p.mu.Unlock()
 
 	go engine.Run(ctx)
+	go evaluator.Run(ctx)
 
 	p.logger.InfoContext(ctx, "notifications ready", slog.String("encryption_key_id", p.key.ID()))
 	return nil
@@ -62,12 +79,56 @@ func (p *notificationPipeline) Start(ctx context.Context) error {
 
 func (p *notificationPipeline) Stop(ctx context.Context) error {
 	p.mu.RLock()
-	engine := p.engine
+	engine, evaluator := p.engine, p.evaluator
 	p.mu.RUnlock()
+	// The evaluator first: its own work is a quick DB read/write with no
+	// real bound needed (see its Stop's doc comment), and stopping it
+	// before the dispatcher means nothing new gets queued while the
+	// dispatcher is draining what is already there.
+	if evaluator != nil {
+		evaluator.Stop()
+	}
 	if engine != nil {
 		engine.Stop(ctx)
 	}
 	return nil
+}
+
+// evaluatorNodeAdapter adapts [*metric.Repository] to [corenotification.
+// NodeStore] — the three lines that keep core/notification from depending
+// on storage/metric, the same pattern [metricSourceAdapter] in alert.go
+// already uses for corealert.
+type evaluatorNodeAdapter struct{ repo *metric.Repository }
+
+func (a evaluatorNodeAdapter) ListNodes(ctx context.Context) ([]corenotification.EvalNode, error) {
+	nodes, err := a.repo.ListNodes(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]corenotification.EvalNode, 0, len(nodes))
+	for _, n := range nodes {
+		out = append(out, corenotification.EvalNode{
+			NodeID: n.NodeID, LastSeenAt: n.LastSeenAt,
+			ArchivedAt: n.ArchivedAt, AlertsMutedUntil: n.AlertsMutedUntil,
+		})
+	}
+	return out, nil
+}
+
+// evaluatorMetricAdapter adapts [*metric.Repository] to [corenotification.
+// MetricSource].
+type evaluatorMetricAdapter struct{ repo *metric.Repository }
+
+func (a evaluatorMetricAdapter) LatestForMetric(ctx context.Context, name string, within time.Duration) ([]corenotification.MetricSample, error) {
+	values, err := a.repo.LatestForMetric(ctx, name, within)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]corenotification.MetricSample, 0, len(values))
+	for _, v := range values {
+		out = append(out, corenotification.MetricSample{NodeID: v.NodeID, Labels: v.Labels, Value: v.Value, Time: v.Time})
+	}
+	return out, nil
 }
 
 // lazyNotificationStore defers repository construction to call time, for
