@@ -231,6 +231,18 @@ func (f *failOnceStateStore) EndMuteAfterExpiry(ctx context.Context, nodeID stri
 	return f.repo.EndMuteAfterExpiry(ctx, nodeID, now)
 }
 
+func (f *failOnceStateStore) ListNodeStates(ctx context.Context, nodeID string, triggers ...corenotification.Trigger) ([]corenotification.State, error) {
+	return f.repo.ListNodeStates(ctx, nodeID, triggers...)
+}
+
+func (f *failOnceStateStore) BeginPending(ctx context.Context, s corenotification.State) (corenotification.State, error) {
+	return f.repo.BeginPending(ctx, s)
+}
+
+func (f *failOnceStateStore) DeleteState(ctx context.Context, trigger corenotification.Trigger, nodeID, subject string) error {
+	return f.repo.DeleteState(ctx, trigger, nodeID, subject)
+}
+
 func (f *failOnceStateStore) ResetNodeStates(ctx context.Context, nodeID string) error {
 	return f.repo.ResetNodeStates(ctx, nodeID)
 }

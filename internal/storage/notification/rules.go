@@ -249,10 +249,70 @@ func (r *Repository) GetState(ctx context.Context, trigger corenotification.Trig
 	return s, true, nil
 }
 
+// ListNodeStates returns every state row of one node for the given triggers.
+func (r *Repository) ListNodeStates(ctx context.Context, nodeID string, triggers ...corenotification.Trigger) ([]corenotification.State, error) {
+	const op = "notification.Repository.ListNodeStates"
+
+	names := make([]string, len(triggers))
+	for i, t := range triggers {
+		names[i] = string(t)
+	}
+	rows, err := r.pool.Query(ctx, `SELECT `+stateColumns+` FROM notification_state
+		WHERE node_id = $1 AND trigger = ANY($2) ORDER BY trigger, subject`, nodeID, names)
+	if err != nil {
+		return nil, errs.Wrap(err, errs.CodeUnavailable, "could not list the node's notification states").WithOp(op)
+	}
+	defer rows.Close()
+	states := []corenotification.State{}
+	for rows.Next() {
+		s, err := scanState(rows)
+		if err != nil {
+			return nil, errs.Wrap(err, errs.CodeInternal, "could not read a notification state").WithOp(op)
+		}
+		states = append(states, s)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, errs.Wrap(err, errs.CodeUnavailable, "could not list the node's notification states").WithOp(op)
+	}
+	return states, nil
+}
+
+// DeleteState removes one state row; a missing row is not an error.
+func (r *Repository) DeleteState(ctx context.Context, trigger corenotification.Trigger, nodeID, subject string) error {
+	const op = "notification.Repository.DeleteState"
+	if _, err := r.pool.Exec(ctx, `DELETE FROM notification_state WHERE trigger = $1 AND node_id = $2 AND subject = $3`,
+		string(trigger), nodeID, subject); err != nil {
+		return errs.Wrap(err, errs.CodeUnavailable, "could not delete the notification state").WithOp(op)
+	}
+	return nil
+}
+
+// BeginPending records s unless the stored row has already left ok, then
+// returns the row as it stands, so concurrent evaluators starting the same
+// transition all continue from the first one's condition_since.
+func (r *Repository) BeginPending(ctx context.Context, s corenotification.State) (corenotification.State, error) {
+	const op = "notification.Repository.BeginPending"
+	if err := r.upsertState(ctx, op, s, ` WHERE notification_state.state = 'ok'`); err != nil {
+		return corenotification.State{}, err
+	}
+	stored, found, err := r.GetState(ctx, s.Trigger, s.NodeID, s.Subject)
+	if err != nil {
+		return corenotification.State{}, err
+	}
+	if !found {
+		return corenotification.State{}, errs.New(errs.CodeUnavailable, "the notification state was deleted concurrently").WithOp(op)
+	}
+	return stored, nil
+}
+
 // UpsertState records the evaluator state for its (trigger, node, subject).
 func (r *Repository) UpsertState(ctx context.Context, s corenotification.State) error {
-	const op = "notification.Repository.UpsertState"
+	return r.upsertState(ctx, "notification.Repository.UpsertState", s, "")
+}
 
+// upsertState writes s; guard, when set, is appended to the ON CONFLICT
+// branch and limits which existing rows may be replaced.
+func (r *Repository) upsertState(ctx context.Context, op string, s corenotification.State, guard string) error {
 	baseline := s.Baseline
 	if baseline == nil {
 		baseline = map[string]any{}
@@ -271,7 +331,7 @@ func (r *Repository) UpsertState(ctx context.Context, s corenotification.State) 
 			last_notified_at = EXCLUDED.last_notified_at, last_notified_kind = EXCLUDED.last_notified_kind,
 			flap_count = EXCLUDED.flap_count, flap_window_start = EXCLUDED.flap_window_start,
 			baseline = EXCLUDED.baseline, updated_at = now()`
-	if _, err := r.pool.Exec(ctx, q, string(s.Trigger), s.NodeID, s.Subject, string(s.State), string(s.Severity),
+	if _, err := r.pool.Exec(ctx, q+guard, string(s.Trigger), s.NodeID, s.Subject, string(s.State), string(s.Severity),
 		s.Value, s.ConditionSince, s.StateSince, s.LastNotifiedAt, string(s.LastNotifiedKind), s.FlapCount,
 		s.FlapWindowStart, raw); err != nil {
 		return errs.Wrap(err, errs.CodeUnavailable, "could not record the notification state").WithOp(op)
@@ -317,12 +377,20 @@ type execer interface {
 // as they were — a mute ending is not itself a notification, so there is
 // nothing new to record there, and leaving them is simplest where
 // nothing requires otherwise.
+//
+// container_restart rows also drop last_restarts, whatever their state: the
+// counter kept moving while the node was muted, and comparing against the
+// pre-mute value would announce those restarts as if they had just happened.
+// The next observation sets it again without firing.
 func resetNodeStates(ctx context.Context, exec execer, nodeID string) error {
 	const q = `
 		UPDATE notification_state SET
 			state = 'ok', severity = '', value = NULL, condition_since = NULL,
-			state_since = now(), flap_count = 0, flap_window_start = NULL, updated_at = now()
-		WHERE node_id = $1 AND state <> 'ok'`
+			state_since = CASE WHEN state <> 'ok' THEN now() ELSE state_since END,
+			flap_count = 0, flap_window_start = NULL, updated_at = now(),
+			baseline = CASE WHEN trigger = 'container_restart' THEN baseline - 'last_restarts' ELSE baseline END
+		WHERE node_id = $1
+		  AND (state <> 'ok' OR (trigger = 'container_restart' AND baseline ? 'last_restarts'))`
 	_, err := exec.Exec(ctx, q, nodeID)
 	return err
 }

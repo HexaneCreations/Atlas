@@ -3,6 +3,8 @@ package notification
 import (
 	"context"
 	"errors"
+	"maps"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -263,8 +265,9 @@ func (f *fakeRuleStore) EffectiveRule(_ context.Context, trigger Trigger, nodeID
 type stateKey struct{ trigger, nodeID, subject string }
 
 type fakeStateStore struct {
-	mu     sync.Mutex
-	states map[stateKey]State
+	mu      sync.Mutex
+	states  map[stateKey]State
+	upserts int
 	// nodes lets EndMuteAfterExpiry perform its guarded clear against the
 	// same node record the harness's NodeStore serves — wired by
 	// newHarness, mirroring how the real Repository.EndMuteAfterExpiry
@@ -290,7 +293,39 @@ func (f *fakeStateStore) GetState(_ context.Context, trigger Trigger, nodeID, su
 func (f *fakeStateStore) UpsertState(_ context.Context, s State) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.upserts++
 	f.states[stateKey{string(s.Trigger), s.NodeID, s.Subject}] = s
+	return nil
+}
+
+func (f *fakeStateStore) ListNodeStates(_ context.Context, nodeID string, triggers ...Trigger) ([]State, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := []State{}
+	for k, s := range f.states {
+		if k.nodeID == nodeID && slices.Contains(triggers, Trigger(k.trigger)) {
+			out = append(out, s)
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeStateStore) BeginPending(_ context.Context, s State) (State, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	k := stateKey{string(s.Trigger), s.NodeID, s.Subject}
+	if stored, ok := f.states[k]; ok && stored.State != StateOK {
+		return stored, nil
+	}
+	f.upserts++
+	f.states[k] = s
+	return s, nil
+}
+
+func (f *fakeStateStore) DeleteState(_ context.Context, trigger Trigger, nodeID, subject string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.states, stateKey{string(trigger), nodeID, subject})
 	return nil
 }
 
@@ -302,7 +337,15 @@ func (f *fakeStateStore) ResetNodeStates(_ context.Context, nodeID string) error
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	for k, s := range f.states {
-		if k.nodeID != nodeID || s.State == StateOK {
+		if k.nodeID != nodeID {
+			continue
+		}
+		if k.trigger == string(TriggerContainerRestart) && s.Baseline != nil {
+			s.Baseline = maps.Clone(s.Baseline)
+			delete(s.Baseline, baselineLastRestarts)
+			f.states[k] = s
+		}
+		if s.State == StateOK {
 			continue
 		}
 		s.State, s.Severity, s.Value = StateOK, "", nil
@@ -415,12 +458,16 @@ func (f *fakeEvalNodeStore) alertsMutedUntil(nodeID string) *time.Time {
 type fakeMetricSource struct {
 	mu      sync.Mutex
 	samples map[string][]MetricSample
+	errs    map[string]error
 	now     func() time.Time
 }
 
 func (f *fakeMetricSource) LatestForMetric(_ context.Context, metric string, within time.Duration) ([]MetricSample, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err := f.errs[metric]; err != nil {
+		return nil, err
+	}
 	now := f.now()
 	out := []MetricSample{}
 	for _, s := range f.samples[metric] {
@@ -459,8 +506,7 @@ func (f *fakeNotifier) all() []Notification {
 	return append([]Notification{}, f.sent...)
 }
 
-// defaultRules builds the three triggers this step covers, matching
-// migration 0024's seeded defaults: disk 80/90/5, ram 85/95/5, node_down
+// defaultRules builds a rule per trigger, matching migration 0024's seeded defaults: disk 80/90/5, ram 85/95/5, node_down
 // 480s hold (NodeDownAfter, 120s, is the condition itself, separate from
 // this hold).
 func defaultRules() map[Trigger]Rule {
@@ -473,6 +519,12 @@ func defaultRules() map[Trigger]Rule {
 			ForSeconds: 300, RecoverySeconds: 120, Hysteresis: 5, SendRecovery: true},
 		TriggerNodeDown: {Trigger: TriggerNodeDown, Enabled: true,
 			ForSeconds: 480, RecoverySeconds: 120, SendRecovery: true},
+		TriggerContainerExit: {Trigger: TriggerContainerExit, Enabled: true,
+			RecoverySeconds: 120, CooldownSeconds: 1800, SendRecovery: true},
+		TriggerContainerRestart: {Trigger: TriggerContainerRestart, Enabled: true,
+			RecoverySeconds: 120, CooldownSeconds: 1800, SendRecovery: true},
+		TriggerServiceFailed: {Trigger: TriggerServiceFailed, Enabled: true,
+			ForSeconds: 300, RecoverySeconds: 120, CooldownSeconds: 1800, SendRecovery: true},
 	}
 }
 
@@ -500,6 +552,7 @@ func newHarness(t *testing.T, nodes []EvalNode, localNodeID string) *evalHarness
 	h.eval = NewEvaluator(EvaluatorOptions{
 		Rules: h.rules, States: h.states, Nodes: h.nodes, Metrics: h.metrics, Notifier: h.notifier,
 		Now: h.clock.now, LocalNodeID: localNodeID,
+		ContainerCollectorInterval: 30 * time.Second, ServiceCollectorInterval: 60 * time.Second,
 	})
 	return h
 }

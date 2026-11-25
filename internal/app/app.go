@@ -109,7 +109,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*App, error) {
 	}
 
 	incidentPipe := newIncidentPipeline(logger, pool)
-	notificationPipe := newNotificationPipeline(logger, pool, notificationKey, identity.NodeID)
+	notificationPipe := newNotificationPipeline(logger, pool, notificationKey, identity.NodeID, cfg.Collection.DefaultInterval)
 	// Alert transitions reach the incident correlator only. They no longer
 	// produce notifications: the notification evaluator replaces that path.
 	onTransition := func(ctx context.Context, entry corealert.HistoryEntry) {

@@ -14,9 +14,8 @@ import (
 )
 
 // notificationPipeline owns the notification subsystem's lifecycle: the
-// evaluator that watches disk_pct, ram_pct and node_down (container and
-// service triggers are step 9b and are not wired in) and the background
-// dispatcher that turns what it queues into sent messages.
+// evaluator that watches every trigger and the background dispatcher that
+// turns what it queues into sent messages.
 type notificationPipeline struct {
 	logger *slog.Logger
 	pool   *postgres.Pool
@@ -30,14 +29,17 @@ type notificationPipeline struct {
 	// same way the local collection pipeline is the one writing its data
 	// in the first place. See evaluator.go's EvalNode doc comment.
 	localNodeID string
+	// defaultInterval is collection.default_interval, which a collector
+	// declaring no interval of its own runs at.
+	defaultInterval time.Duration
 
 	mu        sync.RWMutex
 	engine    *corenotification.Engine
 	evaluator *corenotification.Evaluator
 }
 
-func newNotificationPipeline(logger *slog.Logger, pool *postgres.Pool, key *secretbox.Key, localNodeID string) *notificationPipeline {
-	return &notificationPipeline{logger: logger, pool: pool, key: key, localNodeID: localNodeID}
+func newNotificationPipeline(logger *slog.Logger, pool *postgres.Pool, key *secretbox.Key, localNodeID string, defaultInterval time.Duration) *notificationPipeline {
+	return &notificationPipeline{logger: logger, pool: pool, key: key, localNodeID: localNodeID, defaultInterval: defaultInterval}
 }
 
 func (p *notificationPipeline) Name() string { return "notification.pipeline" }
@@ -47,6 +49,11 @@ func (p *notificationPipeline) Start(ctx context.Context) error {
 		p.logger.WarnContext(ctx, "notifications are disabled: ATLAS_NOTIFICATIONS_ENCRYPTION_KEY is not set; "+
 			"channel endpoints answer 503 and no notification is sent")
 		return nil
+	}
+
+	intervals, err := registeredIntervals(ctx, p.defaultInterval, p.logger)
+	if err != nil {
+		return err
 	}
 
 	repo := storagenotification.NewRepository(p.pool.DB(), p.key)
@@ -64,6 +71,9 @@ func (p *notificationPipeline) Start(ctx context.Context) error {
 		Nodes:       evaluatorNodeAdapter{repo: metricRepo},
 		Metrics:     evaluatorMetricAdapter{repo: metricRepo},
 		LocalNodeID: p.localNodeID,
+
+		ContainerCollectorInterval: intervals[containerCollectorID],
+		ServiceCollectorInterval:   intervals[serviceCollectorID],
 	})
 
 	p.mu.Lock()

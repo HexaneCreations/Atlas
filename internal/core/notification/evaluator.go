@@ -100,6 +100,16 @@ type StateStore interface {
 	// nothing ever cleared it — wiping out any new transition the node
 	// started since the mute ended, so the node could never alert again).
 	EndMuteAfterExpiry(ctx context.Context, nodeID string, now time.Time) (did bool, err error)
+	// ListNodeStates returns every state row of one node for the given
+	// triggers.
+	ListNodeStates(ctx context.Context, nodeID string, triggers ...Trigger) ([]State, error)
+	// BeginPending records s (a pending state) unless the stored row has
+	// already left ok, and returns the row as it then stands: s, or whatever
+	// a concurrent evaluator recorded first. Both evaluators therefore
+	// continue from one ConditionSince and build the same event id.
+	BeginPending(ctx context.Context, s State) (State, error)
+	// DeleteState removes one state row; a missing row is not an error.
+	DeleteState(ctx context.Context, trigger Trigger, nodeID, subject string) error
 }
 
 // NodeStore is what the evaluator needs from the node repository: every
@@ -110,7 +120,7 @@ type NodeStore interface {
 	ListNodes(ctx context.Context) ([]EvalNode, error)
 }
 
-// MetricSource is the evaluator's read path for disk and RAM usage.
+// MetricSource is the evaluator's read path for every metric it watches.
 // Satisfied by an adapter over [metric.Repository.LatestForMetric].
 type MetricSource interface {
 	// LatestForMetric returns the freshest sample per (node, labels) for
@@ -149,6 +159,12 @@ type EvaluatorOptions struct {
 	// RAMCollectorInterval overrides DefaultRAMCollectorInterval — see its
 	// doc comment.
 	RAMCollectorInterval time.Duration
+	// ContainerCollectorInterval and ServiceCollectorInterval are the
+	// registered intervals of the collectors behind docker.container.* and
+	// service.*. There is no default: with one unset, its triggers are not
+	// evaluated rather than evaluated against an assumed staleness window.
+	ContainerCollectorInterval time.Duration
+	ServiceCollectorInterval   time.Duration
 
 	// LocalNodeID is this server's own node id — the same value
 	// internal/platform/hostid.Resolve already produces at startup and
@@ -158,8 +174,8 @@ type EvaluatorOptions struct {
 }
 
 // Evaluator is the periodic rule evaluator for disk_pct, ram_pct and
-// node_down (step 9a; container and service triggers are step 9b and do
-// not exist here).
+// node_down, and (evaluator_workloads.go) container_exit,
+// container_restart and service_failed.
 //
 // Every tick it reads current data, resolves each trigger's effective
 // rule (global merged with any per-node override, through [MergeRule]),
@@ -176,6 +192,9 @@ type Evaluator struct {
 	interval    time.Duration
 	ramInterval time.Duration
 	localNodeID string
+
+	containerInterval time.Duration
+	serviceInterval   time.Duration
 
 	mu     sync.Mutex
 	stopCh chan struct{}
@@ -199,7 +218,8 @@ func NewEvaluator(opts EvaluatorOptions) *Evaluator {
 	return &Evaluator{
 		rules: opts.Rules, states: opts.States, nodes: opts.Nodes, metrics: opts.Metrics, notifier: opts.Notifier,
 		logger: opts.Logger, now: opts.Now, interval: opts.Interval, ramInterval: opts.RAMCollectorInterval,
-		localNodeID: opts.LocalNodeID,
+		localNodeID:       opts.LocalNodeID,
+		containerInterval: opts.ContainerCollectorInterval, serviceInterval: opts.ServiceCollectorInterval,
 	}
 }
 
@@ -273,13 +293,19 @@ func (e *Evaluator) EvaluateOnce(ctx context.Context) {
 		ramByNode[s.NodeID] = s
 	}
 
-	now := e.now()
+	workloads := e.readWorkloads(ctx)
+
+	// Microseconds are what the state table stores. A finer now could read
+	// back later than itself, and a zero-second hold would not have elapsed.
+	now := e.now().Truncate(time.Microsecond)
 	for _, n := range nodes {
-		e.evaluateNode(ctx, n, diskByNode[n.NodeID], ramByNode[n.NodeID], now)
+		e.evaluateNode(ctx, n, diskByNode[n.NodeID], ramByNode[n.NodeID], workloads[n.NodeID], now)
 	}
 }
 
-func (e *Evaluator) evaluateNode(ctx context.Context, n EvalNode, disk []MetricSample, ram MetricSample, now time.Time) {
+func (e *Evaluator) evaluateNode(
+	ctx context.Context, n EvalNode, disk []MetricSample, ram MetricSample, workloads *nodeWorkloads, now time.Time,
+) {
 	// Skip entirely, touching no state at all — item 3 of the brief.
 	if n.NodeID == e.localNodeID {
 		return
@@ -304,7 +330,7 @@ func (e *Evaluator) evaluateNode(ctx context.Context, n EvalNode, disk []MetricS
 	}
 
 	nodeDownFiring := e.evaluateNodeDown(ctx, n, now)
-	// While node_down is firing, disk and ram are suppressed entirely —
+	// While node_down is firing, every other trigger is suppressed entirely —
 	// item 2. This also satisfies "re-evaluate fresh data before sending
 	// recovered": once node_down stops firing, disk/ram resume from
 	// whatever is actually fresh at that moment (staleness, handled
@@ -317,6 +343,7 @@ func (e *Evaluator) evaluateNode(ctx context.Context, n EvalNode, disk []MetricS
 	if ram.NodeID != "" {
 		e.evaluateRAM(ctx, n.NodeID, ram.Value, now)
 	}
+	e.evaluateWorkloads(ctx, n.NodeID, workloads, now)
 }
 
 // endExpiredMute ends a mute whose alerts_muted_until the evaluator just
@@ -447,7 +474,7 @@ func (e *Evaluator) evaluateThreshold(
 	}
 
 	v := value
-	e.evaluateSubjectWithTitle(ctx, rule, trigger, nodeID, subject, current, found, conditionTrue, &v, severityOf, now, titleMessage)
+	e.evaluateSubjectWithTitle(ctx, rule, trigger, nodeID, subject, current, found, conditionTrue, &v, severityOf, now, titleMessage, nil)
 }
 
 // thresholdSeverity resolves warn vs critical for a true condition.
@@ -484,7 +511,7 @@ func (e *Evaluator) evaluateSubject(
 		return StateOK // unknown; never suppress on the strength of an error we could not even read past
 	}
 	return e.evaluateSubjectWithTitle(ctx, rule, trigger, nodeID, subject, current, found, conditionTrue, value,
-		severityOf, now, func(Severity) (string, string) { return title, message })
+		severityOf, now, func(Severity) (string, string) { return title, message }, nil)
 }
 
 // evaluateSubjectWithTitle runs the shared state machine (computeTransition)
@@ -492,15 +519,25 @@ func (e *Evaluator) evaluateSubject(
 // strictly before persisting the new state — see the report's restart-
 // safety section for why that order, not the reverse, is what item 4
 // needs.
+//
+// track, when not nil, returns the baseline to store alongside the state
+// this tick arrived at. A row that would be written back exactly as it was
+// read is not written.
 func (e *Evaluator) evaluateSubjectWithTitle(
 	ctx context.Context, rule Rule, trigger Trigger, nodeID, subject string, current State, found bool,
 	conditionTrue bool, value *float64, severityOf func(*float64) Severity, now time.Time,
-	titleMessage func(Severity) (string, string),
+	titleMessage func(Severity) (string, string), track func(StateKind) map[string]any,
 ) StateKind {
 	next, kind, notifySeverity := computeTransition(rule, current, found, conditionTrue, value, severityOf, now)
 	next.Trigger, next.NodeID, next.Subject = trigger, nodeID, subject
+	if track != nil {
+		next.Baseline = track(next.State)
+	}
 
-	save := found || next.State != StateOK
+	save := next.State != StateOK || len(next.Baseline) > 0
+	if found {
+		save = !sameState(current, next)
+	}
 	if kind != "" {
 		title, message := titleMessage(notifySeverity)
 		n := Notification{
