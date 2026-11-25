@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"log/slog"
+	"sync"
 
 	corenotification "github.com/hexane/atlas/internal/core/notification"
 	"github.com/hexane/atlas/internal/platform/postgres"
@@ -10,15 +11,21 @@ import (
 	storagenotification "github.com/hexane/atlas/internal/storage/notification"
 )
 
-// notificationPipeline owns the notification subsystem's lifecycle. Nothing
-// produces notifications yet: the old alert-transition path is gone, and the
-// evaluator and dispatcher that replace it are not wired in. Today it only
-// reports, once, whether notifications are enabled.
+// notificationPipeline owns the notification subsystem's lifecycle: the
+// background dispatcher that turns queued notification_deliveries rows
+// into sent messages. The evaluator that decides when to queue one (step
+// 9) is not wired in yet; this pipeline only drains whatever already
+// lands in the queue (today, nothing does).
 type notificationPipeline struct {
 	logger *slog.Logger
 	pool   *postgres.Pool
-	// key encrypts channel secrets. Nil disables notifications entirely.
+	// key encrypts channel secrets. Nil disables notifications entirely —
+	// the dispatcher never starts, and there is nowhere safe to keep a
+	// channel's secret, so none is ever read or sent.
 	key *secretbox.Key
+
+	mu     sync.RWMutex
+	engine *corenotification.Engine
 }
 
 func newNotificationPipeline(logger *slog.Logger, pool *postgres.Pool, key *secretbox.Key) *notificationPipeline {
@@ -33,11 +40,35 @@ func (p *notificationPipeline) Start(ctx context.Context) error {
 			"channel endpoints answer 503 and no notification is sent")
 		return nil
 	}
+
+	repo := storagenotification.NewRepository(p.pool.DB(), p.key)
+	engine := corenotification.NewEngine(corenotification.Options{
+		Channels: repo, Deliveries: repo, Logger: p.logger,
+		Senders: map[corenotification.ChannelType]corenotification.Sender{
+			corenotification.ChannelTeams:   corenotification.NewTeamsSender(),
+			corenotification.ChannelWebhook: corenotification.NewWebhookSender(),
+		},
+	})
+
+	p.mu.Lock()
+	p.engine = engine
+	p.mu.Unlock()
+
+	go engine.Run(ctx)
+
 	p.logger.InfoContext(ctx, "notifications ready", slog.String("encryption_key_id", p.key.ID()))
 	return nil
 }
 
-func (p *notificationPipeline) Stop(context.Context) error { return nil }
+func (p *notificationPipeline) Stop(ctx context.Context) error {
+	p.mu.RLock()
+	engine := p.engine
+	p.mu.RUnlock()
+	if engine != nil {
+		engine.Stop(ctx)
+	}
+	return nil
+}
 
 // lazyNotificationStore defers repository construction to call time, for
 // the same reason as [lazyInventoryStore].

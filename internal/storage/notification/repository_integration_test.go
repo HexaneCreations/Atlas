@@ -708,11 +708,18 @@ func TestMarkRetryAndExhaustedStoreARedactedTruncatedError(t *testing.T) {
 	}
 }
 
+// Delivered rows get 30 days; failed rows get 90 — a failure is exactly
+// what an operator still wants to see weeks after a success has stopped
+// mattering. "recent-failed" (40 days) is the case that exercises that
+// difference: under a single 30-day window for both statuses it would be
+// deleted; it must survive here.
 func TestSweepDeliveriesAppliesRetention(t *testing.T) {
 	repo, pool := newRepository(t)
 	ctx := context.Background()
 	c, _ := repo.CreateChannel(ctx, channelInput("a", nil))
-	for _, evt := range []string{"old-delivered", "recent-delivered", "old-failed", "stale-pending", "fresh-pending"} {
+	for _, evt := range []string{
+		"old-delivered", "recent-delivered", "old-failed", "recent-failed", "stale-pending", "fresh-pending",
+	} {
 		if _, err := repo.Enqueue(ctx, notificationFor(evt), []corenotification.Channel{c}); err != nil {
 			t.Fatal(err)
 		}
@@ -720,7 +727,8 @@ func TestSweepDeliveriesAppliesRetention(t *testing.T) {
 	for _, q := range []string{
 		`UPDATE notification_deliveries SET status = 'delivered', created_at = now() - interval '31 days' WHERE event_id = 'old-delivered'`,
 		`UPDATE notification_deliveries SET status = 'delivered', created_at = now() - interval '29 days' WHERE event_id = 'recent-delivered'`,
-		`UPDATE notification_deliveries SET status = 'failed', created_at = now() - interval '40 days' WHERE event_id = 'old-failed'`,
+		`UPDATE notification_deliveries SET status = 'failed', created_at = now() - interval '91 days' WHERE event_id = 'old-failed'`,
+		`UPDATE notification_deliveries SET status = 'failed', created_at = now() - interval '40 days' WHERE event_id = 'recent-failed'`,
 		`UPDATE notification_deliveries SET created_at = now() - interval '25 hours' WHERE event_id = 'stale-pending'`,
 		`UPDATE notification_deliveries SET created_at = now() - interval '1 hour' WHERE event_id = 'fresh-pending'`,
 	} {
@@ -751,6 +759,7 @@ func TestSweepDeliveriesAppliesRetention(t *testing.T) {
 	}
 	want := map[string][2]string{
 		"recent-delivered": {"delivered", ""},
+		"recent-failed":    {"failed", ""},
 		"stale-pending":    {"failed", "expired"},
 		"fresh-pending":    {"pending", ""},
 	}

@@ -92,12 +92,13 @@ func (f *fakeDeliveryStore) Enqueue(_ context.Context, n Notification, channels 
 	return inserted, nil
 }
 
-func (f *fakeDeliveryStore) DueDeliveries(_ context.Context, now time.Time, limit int) ([]Delivery, error) {
+func (f *fakeDeliveryStore) ClaimDue(_ context.Context, now, lease time.Time, limit int) ([]Delivery, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	var out []Delivery
 	for _, d := range f.deliveries {
 		if d.Status == StatusPending && !d.NextAttemptAt.After(now) {
+			d.NextAttemptAt = lease
 			out = append(out, *d)
 			if len(out) >= limit {
 				break
@@ -105,6 +106,38 @@ func (f *fakeDeliveryStore) DueDeliveries(_ context.Context, now time.Time, limi
 		}
 	}
 	return out, nil
+}
+
+func (f *fakeDeliveryStore) ClaimByEvent(_ context.Context, eventID, channelID string, lease time.Time) (Delivery, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, d := range f.deliveries {
+		if d.EventID == eventID && d.ChannelID == channelID && d.Status == StatusPending {
+			d.NextAttemptAt = lease
+			return *d, true, nil
+		}
+	}
+	return Delivery{}, false, nil
+}
+
+func (f *fakeDeliveryStore) SweepDeliveries(_ context.Context, now time.Time) (SweepResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var res SweepResult
+	for id, d := range f.deliveries {
+		switch {
+		case d.Status == StatusDelivered && d.CreatedAt.Before(now.Add(-30*24*time.Hour)):
+			delete(f.deliveries, id)
+			res.Deleted++
+		case d.Status == StatusFailed && d.CreatedAt.Before(now.Add(-90*24*time.Hour)):
+			delete(f.deliveries, id)
+			res.Deleted++
+		case d.Status == StatusPending && d.CreatedAt.Before(now.Add(-24*time.Hour)):
+			d.Status, d.LastError = StatusFailed, "expired"
+			res.Expired++
+		}
+	}
+	return res, nil
 }
 
 func (f *fakeDeliveryStore) MarkDelivered(_ context.Context, id string, at time.Time) error {
