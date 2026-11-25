@@ -61,6 +61,8 @@ func notificationActions() []struct {
 		{guardAction{"get channel", http.MethodGet, "/notifications/channels/chan-1", ""}, http.StatusOK},
 		{guardAction{"update channel", http.MethodPut, "/notifications/channels/chan-1", body}, http.StatusOK},
 		{guardAction{"delete channel", http.MethodDelete, "/notifications/channels/chan-1", ""}, http.StatusNoContent},
+		{guardAction{"test channel", http.MethodPost, "/notifications/channels/chan-1/test", ""}, http.StatusOK},
+		{guardAction{"test draft", http.MethodPost, "/notifications/channels/test", draftBody("https://hooks.example.com/x")}, http.StatusOK},
 		{guardAction{"list deliveries", http.MethodGet, "/notifications/deliveries", ""}, http.StatusOK},
 	}
 }

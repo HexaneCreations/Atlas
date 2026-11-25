@@ -7,6 +7,7 @@ import (
 	"time"
 
 	corenotification "github.com/hexane/atlas/internal/core/notification"
+	"github.com/hexane/atlas/internal/platform/errs"
 	"github.com/hexane/atlas/internal/platform/postgres"
 	"github.com/hexane/atlas/internal/platform/secretbox"
 	"github.com/hexane/atlas/internal/storage/metric"
@@ -104,6 +105,34 @@ func (p *notificationPipeline) Stop(ctx context.Context) error {
 	return nil
 }
 
+// runningEngine returns the dispatcher, or a 503 before Start.
+func (p *notificationPipeline) runningEngine() (*corenotification.Engine, error) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.engine == nil {
+		return nil, errs.New(errs.CodeUnavailable, "notifications are not running").WithOp("app.notificationPipeline")
+	}
+	return p.engine, nil
+}
+
+// SendTest implements [v1.NotificationTester].
+func (p *notificationPipeline) SendTest(ctx context.Context, channelID string) (corenotification.SendTestOutcome, error) {
+	engine, err := p.runningEngine()
+	if err != nil {
+		return corenotification.SendTestOutcome{}, err
+	}
+	return engine.SendTest(ctx, channelID)
+}
+
+// PrepareDraftTest implements [v1.NotificationTester].
+func (p *notificationPipeline) PrepareDraftTest(ctx context.Context, in corenotification.ChannelInput, channelID string) (*corenotification.DraftTest, error) {
+	engine, err := p.runningEngine()
+	if err != nil {
+		return nil, err
+	}
+	return engine.PrepareDraftTest(ctx, in, channelID)
+}
+
 // evaluatorNodeAdapter adapts [*metric.Repository] to [corenotification.
 // NodeStore] — the three lines that keep core/notification from depending
 // on storage/metric, the same pattern [metricSourceAdapter] in alert.go
@@ -169,4 +198,16 @@ func (l lazyNotificationStore) DeleteChannel(ctx context.Context, id string) err
 }
 func (l lazyNotificationStore) ListDeliveries(ctx context.Context, filter corenotification.DeliveryFilter) (corenotification.DeliveryPage, error) {
 	return l.repo().ListDeliveries(ctx, filter)
+}
+func (l lazyNotificationStore) MuteNode(ctx context.Context, nodeID string, until time.Time) (corenotification.NodeAlerts, error) {
+	return l.repo().MuteNode(ctx, nodeID, until)
+}
+func (l lazyNotificationStore) EndMuteExplicitly(ctx context.Context, nodeID string) (bool, error) {
+	return l.repo().EndMuteExplicitly(ctx, nodeID)
+}
+func (l lazyNotificationStore) ArchiveNode(ctx context.Context, nodeID string, at time.Time) (corenotification.NodeAlerts, error) {
+	return l.repo().ArchiveNode(ctx, nodeID, at)
+}
+func (l lazyNotificationStore) UnarchiveNode(ctx context.Context, nodeID string) error {
+	return l.repo().UnarchiveNode(ctx, nodeID)
 }

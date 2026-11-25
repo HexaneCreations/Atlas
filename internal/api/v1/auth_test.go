@@ -601,7 +601,7 @@ func TestContainerLogsFollowRejectsAnUnauthenticatedUpgrade(t *testing.T) {
 // notifications_test.go, same package) rather than a second fake — the
 // concrete risk described in review is registering a channel through
 // exactly that store.
-func newWriteEndpointTestServer(t *testing.T, seedUser user.User, authz v1.Authorizer, notifications *fakeNotificationStore) *httptest.Server {
+func newWriteEndpointTestServer(t *testing.T, seedUser user.User, authz v1.Authorizer, notifications *fakeNotificationStore, opts ...func(*api.Deps)) *httptest.Server {
 	t.Helper()
 
 	users := &memUserStore{byUsername: map[string]user.User{seedUser.Username: seedUser}}
@@ -625,6 +625,10 @@ func newWriteEndpointTestServer(t *testing.T, seedUser user.User, authz v1.Autho
 	// with no notifications encryption key.
 	if notifications != nil {
 		deps.NotificationStore = notifications
+		deps.NotificationTester = newFakeTester(notifications, &recordingSender{})
+	}
+	for _, opt := range opts {
+		opt(&deps)
 	}
 	handler := api.New(deps)
 

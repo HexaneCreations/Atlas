@@ -2,12 +2,13 @@ package v1
 
 import (
 	"encoding/json"
-	"github.com/hexane/atlas/internal/core/pageauthz"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"time"
 
 	"github.com/hexane/atlas/internal/core/notification"
+	"github.com/hexane/atlas/internal/core/pageauthz"
 	"github.com/hexane/atlas/internal/core/user"
 	"github.com/hexane/atlas/internal/platform/errs"
 	"github.com/hexane/atlas/internal/platform/httpx"
@@ -147,6 +148,8 @@ func (h *Handler) CreateNotificationChannel(w http.ResponseWriter, r *http.Reque
 	if err != nil {
 		return err
 	}
+	logAdminAction(r, "notification channel created",
+		slog.String("channel_id", created.ID), slog.String("channel_type", string(created.Type)))
 	httpx.JSON(w, r, http.StatusCreated, presentChannel(created))
 	return nil
 }
@@ -175,6 +178,9 @@ func (h *Handler) UpdateNotificationChannel(w http.ResponseWriter, r *http.Reque
 	if err != nil {
 		return err
 	}
+	logAdminAction(r, "notification channel updated",
+		slog.String("channel_id", updated.ID), slog.String("channel_type", string(updated.Type)),
+		slog.Bool("secret_replaced", in.Secret != nil))
 	httpx.JSON(w, r, http.StatusOK, presentChannel(updated))
 	return nil
 }
@@ -191,9 +197,11 @@ func (h *Handler) DeleteNotificationChannel(w http.ResponseWriter, r *http.Reque
 		return err
 	}
 
-	if err := store.DeleteChannel(r.Context(), r.PathValue("channelID")); err != nil {
+	channelID := r.PathValue("channelID")
+	if err := store.DeleteChannel(r.Context(), channelID); err != nil {
 		return err
 	}
+	logAdminAction(r, "notification channel deleted", slog.String("channel_id", channelID))
 	w.WriteHeader(http.StatusNoContent)
 	return nil
 }

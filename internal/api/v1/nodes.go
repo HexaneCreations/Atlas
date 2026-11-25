@@ -52,6 +52,14 @@ type NodeResponse struct {
 	// "network" inventory snapshot. Populated only on the single-node
 	// endpoint, not the list.
 	Addresses []metric.NodeAddress `json:"addresses,omitempty"`
+
+	// AlertsMutedUntil is when the node's notification mute ends, null when
+	// it is not muted now. [notification.MutedIndefinitely] means "until
+	// unmuted".
+	AlertsMutedUntil *time.Time `json:"alerts_muted_until"`
+	// ArchivedAt is when the node was retired from notifications, null when
+	// it is not archived.
+	ArchivedAt *time.Time `json:"archived_at"`
 }
 
 // ListNodesResponse is the node collection.
@@ -200,6 +208,8 @@ func (h *Handler) presentNode(n metric.Node, now time.Time) NodeResponse {
 		ClockSkewSeconds: n.ClockSkewSeconds,
 		PublicIP:         n.PublicIP,
 		HardwareUUID:     n.HardwareUUID,
+		AlertsMutedUntil: presentMute(n.AlertsMutedUntil, now),
+		ArchivedAt:       utcPtr(n.ArchivedAt),
 	}
 }
 

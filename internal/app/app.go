@@ -100,6 +100,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*App, error) {
 	// checked the key's shape; the error here deliberately carries no detail.
 	var notificationKey *secretbox.Key
 	var notificationStore v1.NotificationStore
+	var notificationTester v1.NotificationTester
 	if raw := cfg.Notifications.EncryptionKey.Reveal(); raw != "" {
 		notificationKey, err = secretbox.ParseKey(raw)
 		if err != nil {
@@ -110,6 +111,9 @@ func New(cfg *config.Config, logger *slog.Logger) (*App, error) {
 
 	incidentPipe := newIncidentPipeline(logger, pool)
 	notificationPipe := newNotificationPipeline(logger, pool, notificationKey, identity.NodeID, cfg.Collection.DefaultInterval)
+	if notificationKey != nil {
+		notificationTester = notificationPipe
+	}
 	// Alert transitions reach the incident correlator only. They no longer
 	// produce notifications: the notification evaluator replaces that path.
 	onTransition := func(ctx context.Context, entry corealert.HistoryEntry) {
@@ -156,17 +160,21 @@ func New(cfg *config.Config, logger *slog.Logger) (*App, error) {
 		SLO:               sloEngine,
 		SLOStore:          lazySLOStore{pool: pool},
 		NotificationStore: notificationStore,
-		Users:             lazyUserStore{pool: pool},
-		Sessions:          lazyUserStore{pool: pool},
-		Authz:             lazyAuthorizer{pool: pool},
-		UserAdmin:         lazyUserStore{pool: pool},
-		PageAuthz:         lazyPageAuthorizer{pool: pool},
-		PageAdmin:         lazyPageAdmin{pool: pool},
-		LoginLimiter:      coreuser.NewLoginLimiter(),
-		InstallCodes:      lazyInstallCodeStore{pool: pool},
-		InstallTargets:    installTargets{cfg: cfg, fleet: fleetPipe},
-		RedeemLimiter:     corefleet.NewRedeemLimiter(corefleet.RedeemPerIPPerMinute, corefleet.RedeemGlobalPerMinute),
-		Logger:            logger,
+
+		NotificationTester: notificationTester,
+		NodeAlerts:         lazyNotificationStore{pool: pool, key: notificationKey},
+
+		Users:          lazyUserStore{pool: pool},
+		Sessions:       lazyUserStore{pool: pool},
+		Authz:          lazyAuthorizer{pool: pool},
+		UserAdmin:      lazyUserStore{pool: pool},
+		PageAuthz:      lazyPageAuthorizer{pool: pool},
+		PageAdmin:      lazyPageAdmin{pool: pool},
+		LoginLimiter:   coreuser.NewLoginLimiter(),
+		InstallCodes:   lazyInstallCodeStore{pool: pool},
+		InstallTargets: installTargets{cfg: cfg, fleet: fleetPipe},
+		RedeemLimiter:  corefleet.NewRedeemLimiter(corefleet.RedeemPerIPPerMinute, corefleet.RedeemGlobalPerMinute),
+		Logger:         logger,
 	})
 	server := httpx.NewServer(cfg.Server, handler, logger)
 

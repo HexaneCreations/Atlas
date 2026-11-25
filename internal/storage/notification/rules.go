@@ -468,14 +468,17 @@ func (r *Repository) EndMuteAfterExpiry(ctx context.Context, nodeID string, now 
 	return true, nil
 }
 
-// EndMuteExplicitly is the early-unmute path: alerts_muted_until is
-// cleared unconditionally, because the caller — the step 10 unmute API,
-// which has no route yet; this method exists so that route can call it
-// directly — is the one ending the mute on purpose, right now, not
-// reacting to an expiry someone else might have raced ahead of. The same
-// transaction resets state, so a reset failure rolls the clear back too:
-// a node is never left reading unmuted with stale non-ok rows still on
-// it. ok is false only if nodeID does not exist.
+// EndMuteExplicitly is the early-unmute path, DELETE
+// /nodes/{nodeID}/alerts-mute: alerts_muted_until is cleared whatever it
+// holds, because the caller is the one ending the mute on purpose, right
+// now, not reacting to an expiry someone else might have raced ahead of.
+// The same transaction resets state, so a reset failure rolls the clear
+// back too: a node is never left reading unmuted with stale non-ok rows
+// still on it.
+//
+// A node that is not muted is left alone: its states are live, and
+// resetting them would silence an alert that is firing right now. ok is
+// false only if nodeID does not exist.
 func (r *Repository) EndMuteExplicitly(ctx context.Context, nodeID string) (bool, error) {
 	const op = "notification.Repository.EndMuteExplicitly"
 	tx, err := r.pool.Begin(ctx)
@@ -484,15 +487,79 @@ func (r *Repository) EndMuteExplicitly(ctx context.Context, nodeID string) (bool
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	ok, err := endMute(ctx, tx, nodeID, "")
+	var muted bool
+	err = tx.QueryRow(ctx, `SELECT alerts_muted_until IS NOT NULL FROM nodes WHERE node_id = $1 FOR NO KEY UPDATE`, nodeID).Scan(&muted)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
 	if err != nil {
 		return false, errs.Wrap(err, errs.CodeUnavailable, "could not end the node's mute").WithOp(op)
 	}
-	if !ok {
-		return false, nil
+	if !muted {
+		return true, nil
+	}
+	if _, err := endMute(ctx, tx, nodeID, ""); err != nil {
+		return false, errs.Wrap(err, errs.CodeUnavailable, "could not end the node's mute").WithOp(op)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return false, errs.Wrap(err, errs.CodeUnavailable, "could not end the node's mute").WithOp(op)
 	}
 	return true, nil
+}
+
+// MuteNode sets nodeID's mute window, replacing any existing one.
+func (r *Repository) MuteNode(ctx context.Context, nodeID string, until time.Time) (corenotification.NodeAlerts, error) {
+	const op = "notification.Repository.MuteNode"
+	return updateNodeAlerts(ctx, r.pool, op, `alerts_muted_until = $2`, nodeID, until)
+}
+
+// ArchiveNode retires nodeID from evaluation and silently resets its
+// non-ok states, in one transaction. Archiving an archived node keeps the
+// original time.
+func (r *Repository) ArchiveNode(ctx context.Context, nodeID string, at time.Time) (corenotification.NodeAlerts, error) {
+	const op = "notification.Repository.ArchiveNode"
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return corenotification.NodeAlerts{}, errs.Wrap(err, errs.CodeUnavailable, "could not begin archiving the node").WithOp(op)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	out, err := updateNodeAlerts(ctx, tx, op, `archived_at = COALESCE(archived_at, $2)`, nodeID, at)
+	if err != nil {
+		return corenotification.NodeAlerts{}, err
+	}
+	if err := resetNodeStates(ctx, tx, nodeID); err != nil {
+		return corenotification.NodeAlerts{}, errs.Wrap(err, errs.CodeUnavailable, "could not reset the node's notification state").WithOp(op)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return corenotification.NodeAlerts{}, errs.Wrap(err, errs.CodeUnavailable, "could not archive the node").WithOp(op)
+	}
+	return out, nil
+}
+
+// UnarchiveNode returns nodeID to evaluation. Its states were reset when it
+// was archived, so nothing is reset here.
+func (r *Repository) UnarchiveNode(ctx context.Context, nodeID string) error {
+	const op = "notification.Repository.UnarchiveNode"
+	_, err := updateNodeAlerts(ctx, r.pool, op, `archived_at = NULL`, nodeID)
+	return err
+}
+
+type rowQuerier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+// updateNodeAlerts applies set (a constant fragment) to one node; a missing
+// node is CodeNotFound.
+func updateNodeAlerts(ctx context.Context, q rowQuerier, op, set, nodeID string, args ...any) (corenotification.NodeAlerts, error) {
+	var out corenotification.NodeAlerts
+	err := q.QueryRow(ctx, `UPDATE nodes SET `+set+` WHERE node_id = $1 RETURNING alerts_muted_until, archived_at`,
+		append([]any{nodeID}, args...)...).Scan(&out.MutedUntil, &out.ArchivedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return out, errs.New(errs.CodeNotFound, "node not found").WithOp(op).WithDetail("node_id", nodeID)
+	}
+	if err != nil {
+		return out, errs.Wrap(err, errs.CodeUnavailable, "could not update the node").WithOp(op)
+	}
+	return out, nil
 }

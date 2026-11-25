@@ -121,6 +121,15 @@ type Deps struct {
 	// Nil disables the endpoints rather than crashing them, the same
 	// convention as the others above.
 	NotificationStore NotificationStore
+	// NotificationTester sends test notifications. Nil, like
+	// NotificationStore, makes its endpoints answer 503.
+	NotificationTester NotificationTester
+	// NotificationTestLimiter bounds test sends. Nil uses
+	// [notification.NewTestLimiter]: test sends are never unthrottled.
+	NotificationTestLimiter *notification.TestLimiter
+	// NodeAlerts mutes and archives nodes. It needs no encryption key. Nil
+	// makes its endpoints answer 503.
+	NodeAlerts NodeAlertStore
 	// Users, Sessions and Authz back human-user authentication and
 	// authorization (see internal/core/user). Nil disables login and leaves
 	// every node-scoped read unauthenticated, the same convention as the
@@ -268,7 +277,12 @@ type Handler struct {
 }
 
 // NewHandler builds the v1 handler.
-func NewHandler(deps Deps) *Handler { return &Handler{deps: deps} }
+func NewHandler(deps Deps) *Handler {
+	if deps.NotificationTestLimiter == nil {
+		deps.NotificationTestLimiter = notification.NewTestLimiter(time.Now)
+	}
+	return &Handler{deps: deps}
+}
 
 // Mount registers every v1 route on mux.
 //
@@ -308,6 +322,10 @@ func (h *Handler) Mount(mux Registrar) {
 
 	mux.Handle("GET "+Prefix+"/nodes", httpx.Handler(h.ListNodes))
 	mux.Handle("GET "+Prefix+"/nodes/{nodeID}", httpx.Handler(h.GetNode))
+	mux.Handle("PUT "+Prefix+"/nodes/{nodeID}/alerts-mute", httpx.Handler(h.MuteNodeAlerts))
+	mux.Handle("DELETE "+Prefix+"/nodes/{nodeID}/alerts-mute", httpx.Handler(h.UnmuteNodeAlerts))
+	mux.Handle("POST "+Prefix+"/nodes/{nodeID}/archive", httpx.Handler(h.ArchiveNode))
+	mux.Handle("DELETE "+Prefix+"/nodes/{nodeID}/archive", httpx.Handler(h.UnarchiveNode))
 
 	mux.Handle("GET "+Prefix+"/metrics", httpx.Handler(h.QueryMetrics))
 	mux.Handle("GET "+Prefix+"/metrics/latest", httpx.Handler(h.LatestMetrics))
@@ -352,6 +370,8 @@ func (h *Handler) Mount(mux Registrar) {
 	mux.Handle("GET "+Prefix+"/notifications/channels/{channelID}", httpx.Handler(h.GetNotificationChannel))
 	mux.Handle("PUT "+Prefix+"/notifications/channels/{channelID}", httpx.Handler(h.UpdateNotificationChannel))
 	mux.Handle("DELETE "+Prefix+"/notifications/channels/{channelID}", httpx.Handler(h.DeleteNotificationChannel))
+	mux.Handle("POST "+Prefix+"/notifications/channels/test", httpx.Handler(h.TestNotificationDraft))
+	mux.Handle("POST "+Prefix+"/notifications/channels/{channelID}/test", httpx.Handler(h.TestNotificationChannel))
 	mux.Handle("GET "+Prefix+"/notifications/deliveries", httpx.Handler(h.ListNotificationDeliveries))
 
 	mux.Handle("GET "+Prefix+"/containers", httpx.Handler(h.ListContainers))

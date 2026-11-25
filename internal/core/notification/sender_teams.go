@@ -147,7 +147,7 @@ func (s *TeamsSender) Send(ctx context.Context, channel Channel, secret string, 
 		return ErrRedirectRefused
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("teams destination returned status %d: %s", resp.StatusCode, Redact(string(snippet)))
+		return statusError("teams destination", resp.StatusCode, snippet)
 	}
 	return nil
 }

@@ -2,6 +2,7 @@ package notification
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
@@ -392,7 +393,7 @@ func (e *Engine) dispatchDue(ctx context.Context) {
 func (e *Engine) send(ctx context.Context, channel Channel, d Delivery, onFailure func(context.Context, Delivery, error)) error {
 	sender, ok := e.senders[channel.Type]
 	if !ok {
-		err := fmt.Errorf("no sender registered for channel type %q", channel.Type)
+		err := noSenderError(channel.Type)
 		e.exhaust(ctx, d, err)
 		return err
 	}
@@ -425,8 +426,8 @@ func (e *Engine) send(ctx context.Context, channel Channel, d Delivery, onFailur
 // SendTestOutcome is the result of one [Engine.SendTest] call.
 type SendTestOutcome struct {
 	Delivered bool
-	// Error is empty when Delivered is true; otherwise a redacted message
-	// safe to return to an API caller — see [Redact].
+	// Error is empty when Delivered is true; otherwise a fixed category
+	// message safe to return to an API caller — see [SendErrorCategory].
 	Error string
 }
 
@@ -451,15 +452,8 @@ func (e *Engine) SendTest(ctx context.Context, channelID string) (SendTestOutcom
 		return SendTestOutcome{}, err
 	}
 
-	// Unique per call (unlike a real event's EventID, which is meant to
-	// dedupe repeats): two test sends must both actually send, not have
-	// the second silently absorbed by Enqueue's ON CONFLICT DO NOTHING.
-	eventID := "test-" + id.New()
-	n := Notification{
-		EventID: eventID, Kind: KindTest,
-		Title:   "Atlas test notification",
-		Message: fmt.Sprintf("This is a test of the %q notification channel.", channel.Name),
-	}
+	n := testNotification(channel.Name)
+	eventID := n.EventID
 	if _, err := e.deliveries.Enqueue(ctx, n, []Channel{channel}); err != nil {
 		return SendTestOutcome{}, err
 	}
@@ -473,14 +467,28 @@ func (e *Engine) SendTest(ctx context.Context, channelID string) (SendTestOutcom
 		// this exact, just-inserted row in the instant between Enqueue and
 		// here. The test notification is not lost — whatever claimed it
 		// will still send it — just not synchronously to this caller.
-		return SendTestOutcome{}, fmt.Errorf("%s: the test delivery was claimed by the background dispatcher "+
-			"before it could be sent synchronously; check the delivery log", op)
+		return SendTestOutcome{}, fmt.Errorf("%s: %w", op, ErrTestClaimed)
 	}
 
-	if sendErr := e.send(ctx, channel, d, e.exhaust); sendErr != nil {
-		return SendTestOutcome{Error: Redact(sendErr.Error())}, nil
+	// A test's failure is recorded and logged as its category only: the
+	// full text quotes the destination's response.
+	exhaust := func(ctx context.Context, d Delivery, sendErr error) {
+		e.exhaust(ctx, d, errors.New(SendErrorCategory(sendErr)))
+	}
+	if sendErr := e.send(ctx, channel, d, exhaust); sendErr != nil {
+		return SendTestOutcome{Error: SendErrorCategory(sendErr)}, nil
 	}
 	return SendTestOutcome{Delivered: true}, nil
+}
+
+// testNotification is the message every test sends. Its EventID is unique
+// per call: two tests must both send.
+func testNotification(channelName string) Notification {
+	return Notification{
+		EventID: "test-" + id.New(), Kind: KindTest,
+		Title:   "Atlas test notification",
+		Message: fmt.Sprintf("This is a test of the %q notification channel.", channelName),
+	}
 }
 
 // sweep deletes finished deliveries past their retention window and marks

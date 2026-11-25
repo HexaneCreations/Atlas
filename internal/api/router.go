@@ -21,6 +21,7 @@ import (
 	coregoldensignals "github.com/hexane/atlas/internal/core/goldensignals"
 	corehealthscore "github.com/hexane/atlas/internal/core/healthscore"
 	coreinventory "github.com/hexane/atlas/internal/core/inventory"
+	corenotification "github.com/hexane/atlas/internal/core/notification"
 	coreslo "github.com/hexane/atlas/internal/core/slo"
 	"github.com/hexane/atlas/internal/platform/config"
 	"github.com/hexane/atlas/internal/platform/eventbus"
@@ -55,6 +56,12 @@ type Deps struct {
 	SLO               *coreslo.Engine
 	SLOStore          v1.SLOStore
 	NotificationStore v1.NotificationStore
+	// NotificationTester and NodeAlerts back the test-send and the mute and
+	// archive endpoints; nil answers 503 there. NotificationTestLimiter nil
+	// uses the default limits.
+	NotificationTester      v1.NotificationTester
+	NotificationTestLimiter *corenotification.TestLimiter
+	NodeAlerts              v1.NodeAlertStore
 	// Users, Sessions and Authz back human-user authentication and
 	// authorization (see internal/core/user and internal/api/v1's auth
 	// endpoints). Nil disables login entirely rather than crashing it — the
@@ -115,17 +122,22 @@ func New(deps Deps) http.Handler {
 		SLO:               deps.SLO,
 		SLOStore:          deps.SLOStore,
 		NotificationStore: deps.NotificationStore,
-		Users:             deps.Users,
-		Sessions:          deps.Sessions,
-		Authz:             deps.Authz,
-		UserAdmin:         deps.UserAdmin,
-		PageAuthz:         deps.PageAuthz,
-		PageAdmin:         deps.PageAdmin,
-		LoginLimiter:      deps.LoginLimiter,
-		InstallCodes:      deps.InstallCodes,
-		InstallTargets:    deps.InstallTargets,
-		RedeemLimiter:     deps.RedeemLimiter,
-		SessionSecure:     deps.Config.Environment.IsProduction(),
+
+		NotificationTester:      deps.NotificationTester,
+		NotificationTestLimiter: deps.NotificationTestLimiter,
+		NodeAlerts:              deps.NodeAlerts,
+
+		Users:          deps.Users,
+		Sessions:       deps.Sessions,
+		Authz:          deps.Authz,
+		UserAdmin:      deps.UserAdmin,
+		PageAuthz:      deps.PageAuthz,
+		PageAdmin:      deps.PageAdmin,
+		LoginLimiter:   deps.LoginLimiter,
+		InstallCodes:   deps.InstallCodes,
+		InstallTargets: deps.InstallTargets,
+		RedeemLimiter:  deps.RedeemLimiter,
+		SessionSecure:  deps.Config.Environment.IsProduction(),
 	}).Mount(mux)
 
 	requestTimeout := deps.Config.Server.WriteTimeout - time.Second

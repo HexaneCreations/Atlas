@@ -52,15 +52,13 @@ type Node struct {
 	HardwareUUID string `json:"hardware_uuid,omitempty"`
 
 	// ArchivedAt retires a node from monitoring without deleting its
-	// history. Set by no API or UI yet (migration 0024's own comment); read
-	// by the notification evaluator (internal/core/notification), which
-	// skips an archived node entirely. Not serialised to the public nodes
-	// API — presentNode in internal/api/v1/nodes.go builds that response
-	// field by field and simply does not include it.
+	// history. Set by POST /nodes/{nodeID}/archive; the notification
+	// evaluator (internal/core/notification) skips an archived node
+	// entirely.
 	ArchivedAt *time.Time `json:"-"`
-	// AlertsMutedUntil is nil when alerts are on, or a future time while
-	// muted. Same story as ArchivedAt: no setter yet, evaluator-only, not
-	// part of the public API.
+	// AlertsMutedUntil is nil when alerts are on, or when the current mute
+	// ends. A past time is a mute the evaluator has not ended yet. Set by
+	// PUT /nodes/{nodeID}/alerts-mute.
 	AlertsMutedUntil *time.Time `json:"-"`
 }
 

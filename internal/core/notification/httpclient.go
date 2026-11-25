@@ -183,7 +183,15 @@ func embeddedIPv4(ip net.IP) net.IP {
 // credential (a Teams sig=, a Slack or Discord path-embedded token) never
 // appears. The inner cause passes through [Redact] as a second line of
 // defense regardless.
+//
+// The result is a [*SendError]: besides that text it carries the fixed
+// category [SendErrorCategory] reports, decided here while the cause is
+// still typed.
 func wrapSendError(op string, err error) error {
+	return &SendError{msg: sendErrorText(op, err), category: transportCategory(err)}
+}
+
+func sendErrorText(op string, err error) string {
 	var urlErr *url.Error
 	if errors.As(err, &urlErr) {
 		host := ""
@@ -191,11 +199,11 @@ func wrapSendError(op string, err error) error {
 			host = u.Host
 		}
 		if host != "" {
-			return fmt.Errorf("%s: %s %s: %s", op, urlErr.Op, host, Redact(urlErr.Err.Error()))
+			return fmt.Sprintf("%s: %s %s: %s", op, urlErr.Op, host, Redact(urlErr.Err.Error()))
 		}
-		return fmt.Errorf("%s: %s: %s", op, urlErr.Op, Redact(urlErr.Err.Error()))
+		return fmt.Sprintf("%s: %s: %s", op, urlErr.Op, Redact(urlErr.Err.Error()))
 	}
-	return fmt.Errorf("%s: %s", op, Redact(err.Error()))
+	return fmt.Sprintf("%s: %s", op, Redact(err.Error()))
 }
 
 // readLimitedResponse reads up to limit bytes of resp's body and discards

@@ -226,7 +226,7 @@ func (s *WebhookSender) Send(ctx context.Context, channel Channel, secret string
 	if err := tmpl.Execute(&buf, map[string]string{
 		"msg": msg, "eventJSON": eventJSON, "nodeJSON": nodeJSON, "ruleJSON": ruleJSON,
 	}); err != nil {
-		return fmt.Errorf("render webhook template: %w", err)
+		return &SendError{msg: "render webhook template: " + err.Error(), category: categoryTemplate}
 	}
 	// Checked after rendering, against the rendered size — a template this
 	// package already bounded at MaxTemplateLength can still produce a
@@ -256,7 +256,7 @@ func (s *WebhookSender) Send(ctx context.Context, channel Channel, secret string
 		return ErrRedirectRefused
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("webhook destination returned status %d: %s", resp.StatusCode, Redact(string(snippet)))
+		return statusError("webhook destination", resp.StatusCode, snippet)
 	}
 	return nil
 }

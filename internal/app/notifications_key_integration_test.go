@@ -42,6 +42,8 @@ var notificationEndpoints = []struct{ method, path, body string }{
 	{http.MethodGet, "/api/v1/notifications/channels/missing", ""},
 	{http.MethodPut, "/api/v1/notifications/channels/missing", `{"name":"it-nokey","type":"teams"}`},
 	{http.MethodDelete, "/api/v1/notifications/channels/missing", ""},
+	{http.MethodPost, "/api/v1/notifications/channels/missing/test", ""},
+	{http.MethodPost, "/api/v1/notifications/channels/test", `{"name":"it-nokey","type":"teams"}`},
 	{http.MethodGet, "/api/v1/notifications/deliveries", ""},
 }
 

@@ -349,6 +349,9 @@ func TestNotificationEndingAMuteRebaselinesRestarts(t *testing.T) {
 			ctx := context.Background()
 			f.container("web", 1, 3, 0)
 			f.evaluate()
+			if _, err := f.repo.MuteNode(ctx, workloadNode, time.Now().Add(-time.Second)); err != nil {
+				t.Fatal(err)
+			}
 			f.container("web", 1, 8, 0) // during the mute
 			if ok, err := end(ctx, f.repo); err != nil || !ok {
 				t.Fatalf("end mute: %v %v", ok, err)
