@@ -29,6 +29,11 @@ const (
 type ChannelStore interface {
 	ListChannels(ctx context.Context) ([]Channel, error)
 	GetChannel(ctx context.Context, id string) (Channel, error)
+	// ChannelSecret returns a channel's decrypted secret. dispatchDue calls
+	// this immediately before Send, never caches the result across
+	// deliveries, and passes it to the Sender as a plain argument that goes
+	// out of scope when Send returns — see [Sender].
+	ChannelSecret(ctx context.Context, channelID string) (string, error)
 }
 
 // DeliveryStore is the durable retry queue [Engine] drains.
@@ -121,9 +126,19 @@ func (e *Engine) Notify(ctx context.Context, n Notification) error {
 
 	enabled := make([]Channel, 0, len(channels))
 	for _, c := range channels {
-		if c.Enabled {
-			enabled = append(enabled, c)
+		if !c.Enabled {
+			continue
 		}
+		// A test notification always reaches every enabled channel,
+		// regardless of min_severity: it exists to prove the channel's
+		// destination and credentials work, not to exercise severity
+		// routing. Every other kind — including recovered, whose
+		// Severity is the severity of the alert it resolves — is filtered
+		// the same way: below the channel's min_severity, it is not sent.
+		if n.Kind != KindTest && severityRank(n.Severity) < severityRank(c.MinSeverity) {
+			continue
+		}
+		enabled = append(enabled, c)
 	}
 	if len(enabled) == 0 {
 		return nil
@@ -196,7 +211,20 @@ func (e *Engine) dispatchDue(ctx context.Context) {
 			continue
 		}
 
-		if err := sender.Send(ctx, channel, d); err != nil {
+		// Decrypted here, immediately before Send, and nowhere else: not
+		// cached in channelCache alongside the channel (which spans the
+		// whole batch), not read until this exact delivery needs it. A
+		// missing or unusable key — [corenotification.ErrSecretUnreadable],
+		// or no key configured at all — fails this one delivery through the
+		// same retry/backoff path as a transport error; it is never a
+		// plaintext fallback and never a panic.
+		secret, err := e.channels.ChannelSecret(ctx, channel.ID)
+		if err != nil {
+			e.fail(ctx, d, err)
+			continue
+		}
+
+		if err := sender.Send(ctx, channel, secret, d); err != nil {
 			e.fail(ctx, d, err)
 			continue
 		}
@@ -223,8 +251,13 @@ func (e *Engine) fail(ctx context.Context, d Delivery, sendErr error) {
 }
 
 func (e *Engine) exhaust(ctx context.Context, d Delivery, sendErr error) {
+	// Logged separately from the stored last_error (which [DeliveryStore]
+	// sanitises on its own way into the database): this is a log line, not
+	// a column, and would otherwise carry sendErr's raw text verbatim —
+	// including a Teams URL's sig= or a custom header value a Sender
+	// returned unredacted.
 	e.logger.WarnContext(ctx, "notification delivery exhausted its retries",
-		slog.String("delivery_id", d.ID), slog.String("channel_id", d.ChannelID), slog.String("error", sendErr.Error()))
+		slog.String("delivery_id", d.ID), slog.String("channel_id", d.ChannelID), slog.String("error", Redact(sendErr.Error())))
 	if err := e.deliveries.MarkExhausted(ctx, d.ID, d.Attempts+1, sendErr.Error()); err != nil {
 		e.logger.ErrorContext(ctx, "could not record a notification failure",
 			slog.String("delivery_id", d.ID), slog.String("error", err.Error()))

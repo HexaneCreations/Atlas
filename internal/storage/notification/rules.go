@@ -67,6 +67,21 @@ func (r *Repository) SetRule(ctx context.Context, spec corenotification.RuleSpec
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	// Serialise every SetRule for this trigger before reading anything.
+	// Without this, the global branch's FOR UPDATE locks only the
+	// override rows that already exist, and the override branch's FOR
+	// SHARE locks only the global row — different rows, so a global
+	// change and a brand-new override for the same trigger can each read
+	// a state the other hasn't written yet, each validate cleanly against
+	// what they read, and both commit: a global row and an override row
+	// that are individually valid but whose merge (MergeRule) is not,
+	// with nothing left to catch it afterwards. One advisory lock per
+	// trigger, held for the whole transaction, makes the read-validate-
+	// write sequence atomic regardless of which row either call touches.
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, string(spec.Trigger)); err != nil {
+		return errs.Wrap(err, errs.CodeUnavailable, "could not lock the notification rule for update").WithOp(op)
+	}
+
 	if spec.IsGlobal() {
 		// Every existing override must still merge cleanly over the new global.
 		overrides, err := rulesWhere(ctx, tx, `trigger = $1 AND node_id IS NOT NULL FOR UPDATE`, string(spec.Trigger))

@@ -11,6 +11,15 @@ import (
 type fakeChannelStore struct {
 	mu       sync.Mutex
 	channels map[string]Channel
+	// secrets is keyed by channel id, matching the real decrypted secret a
+	// Sender decodes. Absent (zero value "") for channels no test cares
+	// about the secret's content.
+	secrets map[string]string
+	// secretErr, when set, is what ChannelSecret always returns instead —
+	// a stand-in for a wrong or missing encryption key, which the real
+	// Repository.ChannelSecret reports the same way: an error, never a
+	// plaintext fallback.
+	secretErr error
 }
 
 func newFakeChannelStore(channels ...Channel) *fakeChannelStore {
@@ -18,7 +27,7 @@ func newFakeChannelStore(channels ...Channel) *fakeChannelStore {
 	for _, c := range channels {
 		m[c.ID] = c
 	}
-	return &fakeChannelStore{channels: m}
+	return &fakeChannelStore{channels: m, secrets: map[string]string{}}
 }
 
 func (f *fakeChannelStore) ListChannels(context.Context) ([]Channel, error) {
@@ -39,6 +48,15 @@ func (f *fakeChannelStore) GetChannel(_ context.Context, id string) (Channel, er
 		return Channel{}, errors.New("not found")
 	}
 	return c, nil
+}
+
+func (f *fakeChannelStore) ChannelSecret(_ context.Context, id string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.secretErr != nil {
+		return "", f.secretErr
+	}
+	return f.secrets[id], nil
 }
 
 type fakeDeliveryStore struct {
@@ -135,7 +153,7 @@ type fakeSender struct {
 	err   error
 }
 
-func (f *fakeSender) Send(context.Context, Channel, Delivery) error {
+func (f *fakeSender) Send(context.Context, Channel, string, Delivery) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++
@@ -297,5 +315,52 @@ func TestJitterStaysWithinBound(t *testing.T) {
 		if got < 0 || got > 10*time.Millisecond {
 			t.Fatalf("jitter out of bounds: %v", got)
 		}
+	}
+}
+
+// TestNotifyEnforcesChannelMinSeverity covers fix 1: a channel must not
+// receive a notification below its min_severity, except a test
+// notification, which always reaches every enabled channel.
+func TestNotifyEnforcesChannelMinSeverity(t *testing.T) {
+	warnChan := Channel{ID: "warn-chan", Name: "warn-chan", Type: ChannelTeams, Enabled: true, MinSeverity: SeverityWarning}
+	critChan := Channel{ID: "crit-chan", Name: "crit-chan", Type: ChannelTeams, Enabled: true, MinSeverity: SeverityCritical}
+
+	for _, tc := range []struct {
+		name         string
+		kind         Kind
+		severity     Severity
+		wantChannels []string
+	}{
+		{"warning reaches only the warning channel", KindFiring, SeverityWarning, []string{"warn-chan"}},
+		{"critical reaches both channels", KindFiring, SeverityCritical, []string{"warn-chan", "crit-chan"}},
+		{"recovered follows the severity of the alert it resolves", KindRecovered, SeverityWarning, []string{"warn-chan"}},
+		{"recovered at critical reaches both", KindRecovered, SeverityCritical, []string{"warn-chan", "crit-chan"}},
+		{"test always reaches every enabled channel regardless of severity", KindTest, SeverityWarning, []string{"warn-chan", "crit-chan"}},
+		{"test with no severity set still reaches every enabled channel", KindTest, "", []string{"warn-chan", "crit-chan"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			channels := newFakeChannelStore(warnChan, critChan)
+			deliveries := newFakeDeliveryStore()
+			e := NewEngine(Options{Channels: channels, Deliveries: deliveries})
+
+			if err := e.Notify(context.Background(), Notification{
+				EventID: "evt-" + tc.name, Kind: tc.kind, Trigger: TriggerNodeDown, Severity: tc.severity,
+			}); err != nil {
+				t.Fatalf("notify: %v", err)
+			}
+
+			got := map[string]bool{}
+			for _, d := range deliveries.all() {
+				got[d.ChannelID] = true
+			}
+			if len(got) != len(tc.wantChannels) {
+				t.Fatalf("delivered to %v, want exactly %v", got, tc.wantChannels)
+			}
+			for _, want := range tc.wantChannels {
+				if !got[want] {
+					t.Errorf("delivered to %v, want it to include %q", got, want)
+				}
+			}
+		})
 	}
 }

@@ -139,7 +139,7 @@ func TestChannelInputValidate(t *testing.T) {
 	}
 	for name, in := range map[string]ChannelInput{
 		"no name":      {Type: ChannelEmail, MinSeverity: SeverityWarning},
-		"webhook type": {Name: "x", Type: "webhook", MinSeverity: SeverityWarning},
+		"unknown type": {Name: "x", Type: "slack", MinSeverity: SeverityWarning},
 		"bad severity": {Name: "x", Type: ChannelEmail, MinSeverity: "info"},
 	} {
 		if err := in.Validate(); err == nil {

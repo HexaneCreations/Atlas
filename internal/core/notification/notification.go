@@ -19,12 +19,17 @@ import (
 type ChannelType string
 
 const (
-	ChannelEmail ChannelType = "email"
-	ChannelTeams ChannelType = "teams"
+	ChannelEmail   ChannelType = "email"
+	ChannelTeams   ChannelType = "teams"
+	ChannelWebhook ChannelType = "webhook"
 )
 
 // KnownChannelTypes are the channel types a channel may be created with.
-var KnownChannelTypes = map[ChannelType]bool{ChannelEmail: true, ChannelTeams: true}
+// email has no [Sender] registered yet (step 7 built teams and webhook
+// only); a channel created with it enqueues normally and fails every
+// delivery with "no sender registered for channel type", the same way an
+// unregistered type always has.
+var KnownChannelTypes = map[ChannelType]bool{ChannelEmail: true, ChannelTeams: true, ChannelWebhook: true}
 
 // Severity orders how serious a notification is.
 type Severity string
@@ -36,6 +41,21 @@ const (
 
 // Valid reports whether s is a known severity.
 func (s Severity) Valid() bool { return s == SeverityWarning || s == SeverityCritical }
+
+// severityRank orders Severity for a channel's min_severity comparison:
+// critical outranks warning. An unrecognised value ranks below every known
+// severity, so [Engine.Notify] filters it out rather than treating it as
+// meeting an unknown channel's threshold.
+func severityRank(s Severity) int {
+	switch s {
+	case SeverityCritical:
+		return 1
+	case SeverityWarning:
+		return 0
+	default:
+		return -1
+	}
+}
 
 // ErrSecretUnreadable is returned (wrapped) when a stored channel secret
 // cannot be decrypted with the configured key. Its message never carries
@@ -76,7 +96,7 @@ func (in ChannelInput) Validate() error {
 	case strings.TrimSpace(in.Name) == "":
 		return errs.New(errs.CodeInvalidArgument, "a name is required").WithOp(op)
 	case !KnownChannelTypes[in.Type]:
-		return errs.New(errs.CodeInvalidArgument, "unknown channel type %q (want email or teams)", in.Type).WithOp(op)
+		return errs.New(errs.CodeInvalidArgument, "unknown channel type %q (want email, teams, or webhook)", in.Type).WithOp(op)
 	case !in.MinSeverity.Valid():
 		return errs.New(errs.CodeInvalidArgument, "min_severity must be warning or critical").WithOp(op)
 	}
