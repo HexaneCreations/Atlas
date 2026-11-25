@@ -202,8 +202,8 @@ func TestEvaluatorFullCycleOKToFiringToRecovered(t *testing.T) {
 // first UpsertState call that would persist a firing transition (the one
 // immediately after a successful Notify sets LastNotifiedKind to
 // KindFiring) — a stand-in for a crash between that successful Notify and
-// the state write that would have advanced past it. GetState and
-// ResetNodeStates always delegate untouched.
+// the state write that would have advanced past it. Every other method
+// always delegates untouched.
 type failOnceStateStore struct {
 	repo   *notification.Repository
 	mu     sync.Mutex
@@ -225,6 +225,10 @@ func (f *failOnceStateStore) UpsertState(ctx context.Context, s corenotification
 		return errors.New("simulated crash between a successful Notify and the state write that would follow it")
 	}
 	return f.repo.UpsertState(ctx, s)
+}
+
+func (f *failOnceStateStore) EndMuteAfterExpiry(ctx context.Context, nodeID string, now time.Time) (bool, error) {
+	return f.repo.EndMuteAfterExpiry(ctx, nodeID, now)
 }
 
 func (f *failOnceStateStore) ResetNodeStates(ctx context.Context, nodeID string) error {

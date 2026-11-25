@@ -87,11 +87,19 @@ type RuleStore interface {
 type StateStore interface {
 	GetState(ctx context.Context, trigger Trigger, nodeID, subject string) (State, bool, error)
 	UpsertState(ctx context.Context, s State) error
-	// ResetNodeStates sets every non-ok state row for nodeID to ok, in one
-	// statement, without going through the notifier — see
-	// [Evaluator.resetFrozenByMute] and the fix-round report for why a
-	// mute's end must never itself produce a notification.
-	ResetNodeStates(ctx context.Context, nodeID string) error
+	// EndMuteAfterExpiry ends nodeID's mute — clearing alerts_muted_until
+	// and silently resetting every non-ok state row for the node to ok,
+	// without going through the notifier — but only if the mute still
+	// reads as expired (not after now) at the moment of the write. did is
+	// false, with nothing cleared and nothing reset, when a concurrent
+	// re-mute's own alerts_muted_until won that race; see
+	// [Evaluator.endExpiredMute] and the second fix-round's report for why
+	// this has to be one atomic, guarded operation rather than the bare,
+	// unconditional reset the first fix round shipped (it ran every tick
+	// for as long as the column stayed in the past — forever, since
+	// nothing ever cleared it — wiping out any new transition the node
+	// started since the mute ended, so the node could never alert again).
+	EndMuteAfterExpiry(ctx context.Context, nodeID string, now time.Time) (did bool, err error)
 }
 
 // NodeStore is what the evaluator needs from the node repository: every
@@ -284,11 +292,15 @@ func (e *Evaluator) evaluateNode(ctx context.Context, n EvalNode, disk []MetricS
 			return // muted: not read, not written, full stop
 		}
 		// Not muted now, but was at some point (the column is still set,
-		// just in the past): every state frozen by that mute, under every
-		// subject, is reset to ok silently before normal evaluation
-		// resumes. It only catches a mute ending by expiry, not one
-		// cleared early — see resetFrozenByMute's own comment.
-		e.resetFrozenByMute(ctx, n)
+		// just in the past): end the mute — clearing the column and
+		// resetting every frozen state silently, atomically — before
+		// normal evaluation resumes. If that does not happen this tick
+		// (an error, or a concurrent re-mute got there first), the node
+		// must not be evaluated against states that may still need to
+		// stay frozen.
+		if !e.endExpiredMute(ctx, n, now) {
+			return
+		}
 	}
 
 	nodeDownFiring := e.evaluateNodeDown(ctx, n, now)
@@ -307,39 +319,45 @@ func (e *Evaluator) evaluateNode(ctx context.Context, n EvalNode, disk []MetricS
 	}
 }
 
-// resetFrozenByMute silently clears every non-ok notification_state row
-// for a node whose mute has just ended by natural expiry (alerts_muted_
-// until is set, but now in the past): one statement, covering every
-// trigger and subject the node has a row for. This call site is only
-// reached before this tick has evaluated anything else for n (see
-// evaluateNode), so every non-ok row it can see here was necessarily
-// written before the mute started — the node was skipped entirely for
-// the whole mute, nothing else could have touched it since — and is safe
-// to reset unconditionally, with no per-row timestamp check needed.
+// endExpiredMute ends a mute whose alerts_muted_until the evaluator just
+// read as non-nil and not after now: clearing the column and resetting
+// every non-ok notification_state row for the node to ok, under every
+// trigger and subject, both in the one transaction EndMuteAfterExpiry
+// runs. This must happen at most once *per mute*, not once per tick: a
+// previous version of this code ran an unconditional, unguarded reset
+// (then called resetNodeStates) on every single tick for as long as
+// alerts_muted_until stayed in the past — which, since nothing in that
+// version ever cleared the column, was forever. Any new pending
+// transition the node started after the mute truly ended was wiped back
+// to ok on the very next tick before it could ever complete its hold, so
+// the node could never alert again after being muted once. That version's
+// own comment called this "idempotent," which was true only in the
+// narrow sense that it found nothing to reset once the node was all-ok;
+// it was not idempotent against the node's own ability to alert again,
+// which is what actually mattered and what the fix round's tests had not
+// exercised (they only ever ran one tick past expiry).
 //
-// An earlier version of this reset enumerated only {node_down, disk_pct,
-// ram_pct} under subject "", which left disk_pct's mountpoint-subject
-// rows frozen forever: they would survive the mute and could still
-// produce a late, spurious recovered message whenever that mountpoint
-// next recovered for real. ResetNodeStates' single UPDATE has no such
-// gap — every subject of every trigger for this node, in one statement.
+// The fix is structural, not a guard added on top: EndMuteAfterExpiry
+// clears alerts_muted_until as part of the very same write that resets
+// state, so after it succeeds the column reads NULL and the next tick's
+// own "AlertsMutedUntil != nil" check above is false — this whole branch
+// is simply never reached again for that mute. Nothing needs to
+// remember "already did this one."
 //
-// Idempotent: once every row is ok, the UPDATE matches nothing, so
-// calling this every tick after the mute ends costs one query and finds
-// nothing to do.
-//
-// An *early*, explicit unmute (alerts_muted_until cleared back to NULL
-// before its own time) is not detected here: once the column reads NULL
-// there is no record left of when that mute ended, so nothing short of
-// the unmute action itself can know a reset is due. ResetNodeStates is
-// exported for exactly that — the step 10 unmute API is expected to call
-// it directly, in the same transaction that clears the column, instead
-// of this evaluator ever needing to notice a NULL lazily.
-func (e *Evaluator) resetFrozenByMute(ctx context.Context, n EvalNode) {
-	if err := e.states.ResetNodeStates(ctx, n.NodeID); err != nil {
-		e.logger.ErrorContext(ctx, "could not reset notification state after a mute ended",
-			slog.String("node_id", n.NodeID))
+// did is false, with nothing cleared or reset, in two cases the caller
+// must treat identically — do not evaluate this node this tick: a
+// concurrent re-mute's own, later alerts_muted_until won the race against
+// this call (EndMuteAfterExpiry's own guard is what catches that), or the
+// write itself failed (logged here; the node is simply skipped rather
+// than evaluated against states that may still need to stay frozen).
+func (e *Evaluator) endExpiredMute(ctx context.Context, n EvalNode, now time.Time) (did bool) {
+	did, err := e.states.EndMuteAfterExpiry(ctx, n.NodeID, now)
+	if err != nil {
+		e.logger.ErrorContext(ctx, "could not end a node's expired mute; skipping it this tick",
+			slog.String("node_id", n.NodeID), slog.String("error", err.Error()))
+		return false
 	}
+	return did
 }
 
 func (e *Evaluator) evaluateNodeDown(ctx context.Context, n EvalNode, now time.Time) (firing bool) {

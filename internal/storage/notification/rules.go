@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"time"
 
 	corenotification "github.com/hexane/atlas/internal/core/notification"
 	"github.com/hexane/atlas/internal/platform/errs"
@@ -326,13 +327,104 @@ func resetNodeStates(ctx context.Context, exec execer, nodeID string) error {
 	return err
 }
 
-// ResetNodeStates is [resetNodeStates] over the repository's own pool —
-// see corenotification.StateStore, which the evaluator's mute-ended reset
-// calls through.
+// ResetNodeStates is [resetNodeStates] over the repository's own pool: a
+// standalone reset with no accompanying nodes-table write. The evaluator
+// itself no longer calls this directly — see [Repository.EndMuteAfterExpiry],
+// which the mute-ended case needs instead so the reset and the column
+// clear it depends on commit together.
 func (r *Repository) ResetNodeStates(ctx context.Context, nodeID string) error {
 	const op = "notification.Repository.ResetNodeStates"
 	if err := resetNodeStates(ctx, r.pool, nodeID); err != nil {
 		return errs.Wrap(err, errs.CodeUnavailable, "could not reset the node's notification state").WithOp(op)
 	}
 	return nil
+}
+
+// endMute clears nodes.alerts_muted_until for nodeID and, only if that
+// clear actually matched a row, resets every non-ok notification_state
+// row for it in the same statement's transaction — see resetNodeStates.
+// A guard clause (e.g. "alerts_muted_until IS NULL OR alerts_muted_until
+// <= $2", with guardArgs supplying $2 on) narrows which row the clear
+// may touch; an empty guard clears unconditionally. Either way, nothing
+// is reset unless the clear itself matched — see the two exported
+// wrappers below for what each guard means and who calls it.
+func endMute(ctx context.Context, exec execer, nodeID, guard string, guardArgs ...any) (bool, error) {
+	q := `UPDATE nodes SET alerts_muted_until = NULL WHERE node_id = $1`
+	args := append([]any{nodeID}, guardArgs...)
+	if guard != "" {
+		q += " AND (" + guard + ")"
+	}
+	tag, err := exec.Exec(ctx, q, args...)
+	if err != nil {
+		return false, err
+	}
+	if tag.RowsAffected() == 0 {
+		return false, nil
+	}
+	if err := resetNodeStates(ctx, exec, nodeID); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// EndMuteAfterExpiry is the evaluator's own path for a mute it has just
+// found expired (alerts_muted_until non-nil and not after its own now):
+// it clears the column and resets state in one transaction, but only if
+// alerts_muted_until still reads as expired at the moment of the write —
+// the guard protects against a concurrent re-mute that set a *later*
+// alerts_muted_until in the gap between the evaluator's read and this
+// call. did is false, with nothing cleared and nothing reset, exactly
+// when that race happened; the caller must then treat the node as still
+// muted for this tick (see [corenotification.Evaluator]'s own doc for
+// why — this is what replaced the fix round's unconditional, unguarded
+// reset that ran every tick forever and could never let a node alert
+// again after being muted once).
+func (r *Repository) EndMuteAfterExpiry(ctx context.Context, nodeID string, now time.Time) (bool, error) {
+	const op = "notification.Repository.EndMuteAfterExpiry"
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return false, errs.Wrap(err, errs.CodeUnavailable, "could not begin ending the node's mute").WithOp(op)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	did, err := endMute(ctx, tx, nodeID, "alerts_muted_until IS NULL OR alerts_muted_until <= $2", now)
+	if err != nil {
+		return false, errs.Wrap(err, errs.CodeUnavailable, "could not end the node's mute").WithOp(op)
+	}
+	if !did {
+		return false, nil
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, errs.Wrap(err, errs.CodeUnavailable, "could not end the node's mute").WithOp(op)
+	}
+	return true, nil
+}
+
+// EndMuteExplicitly is the early-unmute path: alerts_muted_until is
+// cleared unconditionally, because the caller — the step 10 unmute API,
+// which has no route yet; this method exists so that route can call it
+// directly — is the one ending the mute on purpose, right now, not
+// reacting to an expiry someone else might have raced ahead of. The same
+// transaction resets state, so a reset failure rolls the clear back too:
+// a node is never left reading unmuted with stale non-ok rows still on
+// it. ok is false only if nodeID does not exist.
+func (r *Repository) EndMuteExplicitly(ctx context.Context, nodeID string) (bool, error) {
+	const op = "notification.Repository.EndMuteExplicitly"
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return false, errs.Wrap(err, errs.CodeUnavailable, "could not begin ending the node's mute").WithOp(op)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	ok, err := endMute(ctx, tx, nodeID, "")
+	if err != nil {
+		return false, errs.Wrap(err, errs.CodeUnavailable, "could not end the node's mute").WithOp(op)
+	}
+	if !ok {
+		return false, nil
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, errs.Wrap(err, errs.CodeUnavailable, "could not end the node's mute").WithOp(op)
+	}
+	return true, nil
 }

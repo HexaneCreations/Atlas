@@ -265,6 +265,17 @@ type stateKey struct{ trigger, nodeID, subject string }
 type fakeStateStore struct {
 	mu     sync.Mutex
 	states map[stateKey]State
+	// nodes lets EndMuteAfterExpiry perform its guarded clear against the
+	// same node record the harness's NodeStore serves — wired by
+	// newHarness, mirroring how the real Repository.EndMuteAfterExpiry
+	// reaches across to the nodes table in the same transaction as its
+	// own notification_state reset.
+	nodes *fakeEvalNodeStore
+	// endMuteOverride, when set, replaces EndMuteAfterExpiry's normal
+	// guarded-clear-then-reset behaviour outright — a test's way to force
+	// exactly the "did=false" outcome (a concurrent re-mute, or a write
+	// failure) without needing a real race.
+	endMuteOverride func(nodeID string, now time.Time) (bool, error)
 }
 
 func newFakeStateStore() *fakeStateStore { return &fakeStateStore{states: map[stateKey]State{}} }
@@ -311,9 +322,95 @@ func (f *fakeStateStore) all() map[stateKey]State {
 	return out
 }
 
-type fakeEvalNodeStore struct{ nodes []EvalNode }
+// EndMuteAfterExpiry mirrors the real Repository.EndMuteAfterExpiry: it
+// clears the node's mute only if, right now, it is still the one that
+// was found expired (nodes.clearMuteIfExpired carries the same guard the
+// real UPDATE's WHERE clause does), and resets state only if that clear
+// actually happened — see the fix round's own report for why these two
+// must be tied together rather than the bare reset the first fix round
+// shipped.
+func (f *fakeStateStore) EndMuteAfterExpiry(ctx context.Context, nodeID string, now time.Time) (bool, error) {
+	if f.endMuteOverride != nil {
+		return f.endMuteOverride(nodeID, now)
+	}
+	if f.nodes == nil || !f.nodes.clearMuteIfExpired(nodeID, now) {
+		return false, nil
+	}
+	if err := f.ResetNodeStates(ctx, nodeID); err != nil {
+		return false, err
+	}
+	return true, nil
+}
 
-func (f fakeEvalNodeStore) ListNodes(context.Context) ([]EvalNode, error) { return f.nodes, nil }
+// fakeEvalNodeStore is keyed and mutable (unlike a plain slice) so a
+// test can simulate the column actually clearing — and a concurrent
+// re-mute racing ahead of that clear — the same way the real nodes table
+// would.
+type fakeEvalNodeStore struct {
+	mu    sync.Mutex
+	nodes map[string]*EvalNode
+}
+
+func newFakeEvalNodeStore(nodes []EvalNode) *fakeEvalNodeStore {
+	m := make(map[string]*EvalNode, len(nodes))
+	for i := range nodes {
+		n := nodes[i]
+		m[n.NodeID] = &n
+	}
+	return &fakeEvalNodeStore{nodes: m}
+}
+
+func (f *fakeEvalNodeStore) ListNodes(context.Context) ([]EvalNode, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]EvalNode, 0, len(f.nodes))
+	for _, n := range f.nodes {
+		out = append(out, *n)
+	}
+	return out, nil
+}
+
+// clearMuteIfExpired is the fake's counterpart to the real repository's
+// guarded UPDATE: it clears AlertsMutedUntil to nil only if the node
+// exists and, right now, its mute is nil or not after now — exactly the
+// condition that must hold for the clear to be the one the caller is
+// still trying to end, not a newer one a concurrent re-mute set first.
+func (f *fakeEvalNodeStore) clearMuteIfExpired(nodeID string, now time.Time) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n, ok := f.nodes[nodeID]
+	if !ok {
+		return false
+	}
+	if n.AlertsMutedUntil != nil && n.AlertsMutedUntil.After(now) {
+		return false
+	}
+	n.AlertsMutedUntil = nil
+	return true
+}
+
+// setMuted lets a test simulate a concurrent re-mute landing between the
+// evaluator's own read of a node (via ListNodes) and its end-mute call.
+func (f *fakeEvalNodeStore) setMuted(nodeID string, until time.Time) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if n, ok := f.nodes[nodeID]; ok {
+		n.AlertsMutedUntil = &until
+	}
+}
+
+// alertsMutedUntil reports the node's current column value, for a test
+// to assert against directly rather than only through its side effects.
+func (f *fakeEvalNodeStore) alertsMutedUntil(nodeID string) *time.Time {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n, ok := f.nodes[nodeID]
+	if !ok || n.AlertsMutedUntil == nil {
+		return nil
+	}
+	v := *n.AlertsMutedUntil
+	return &v
+}
 
 type fakeMetricSource struct {
 	mu      sync.Mutex
@@ -395,9 +492,10 @@ func newHarness(t *testing.T, nodes []EvalNode, localNodeID string) *evalHarness
 		clock:    newFakeClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)),
 		rules:    &fakeRuleStore{rules: defaultRules()},
 		states:   newFakeStateStore(),
-		nodes:    &fakeEvalNodeStore{nodes: nodes},
+		nodes:    newFakeEvalNodeStore(nodes),
 		notifier: &fakeNotifier{},
 	}
+	h.states.nodes = h.nodes
 	h.metrics = &fakeMetricSource{samples: map[string][]MetricSample{}, now: h.clock.now}
 	h.eval = NewEvaluator(EvaluatorOptions{
 		Rules: h.rules, States: h.states, Nodes: h.nodes, Metrics: h.metrics, Notifier: h.notifier,
@@ -565,6 +663,146 @@ func TestEvaluatorMuteEndedResetsEveryDiskSubject(t *testing.T) {
 	}
 	if len(h.notifier.all()) != 0 {
 		t.Errorf("sent %d notifications for the mute-ended reset, want 0", len(h.notifier.all()))
+	}
+}
+
+// TestEvaluatorMuteEndedResetHappensExactlyOnceAcrossMultipleTicks is the
+// second fix round's own regression test for its blocker: a bare,
+// unguarded reset run on every tick (what the first fix round shipped)
+// still "passes" a single-tick test like the two above, since one tick
+// never reveals that the column never actually got cleared. Running
+// several ticks here, all with the condition false, proves the reset
+// really happens exactly once — the column reads nil afterwards, and the
+// row is never flipped to recovering/recovered along the way, since it
+// was never firing for real after the first tick reset it.
+func TestEvaluatorMuteEndedResetHappensExactlyOnceAcrossMultipleTicks(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	muteEnded := now.Add(-time.Hour)
+	frozenAt := muteEnded.Add(-time.Hour)
+
+	h := newHarness(t, []EvalNode{{NodeID: "n1", LastSeenAt: now, AlertsMutedUntil: &muteEnded}}, "")
+	h.states.UpsertState(context.Background(), State{
+		Trigger: TriggerDiskPct, NodeID: "n1", Subject: "/data", State: StateFiring, Severity: SeverityWarning,
+		StateSince: frozenAt, UpdatedAt: frozenAt,
+	})
+
+	for i := 0; i < 5; i++ {
+		h.metrics.set(MetricDiskUsage, []MetricSample{diskSample("n1", "/data", 10, h.clock.now())})
+		h.eval.EvaluateOnce(context.Background())
+		h.clock.advance(30 * time.Second)
+	}
+
+	got, found, _ := h.states.GetState(context.Background(), TriggerDiskPct, "n1", "/data")
+	if !found || got.State != StateOK {
+		t.Fatalf("disk_pct state after 5 ticks past expiry = %+v (found=%v), want ok", got, found)
+	}
+	if sent := h.notifier.all(); len(sent) != 0 {
+		t.Errorf("sent = %+v, want nothing: a mute ending is never a real recovery", sent)
+	}
+	if until := h.nodes.alertsMutedUntil("n1"); until != nil {
+		t.Errorf("alerts_muted_until = %v, want nil after the mute ended", until)
+	}
+}
+
+// TestEvaluatorNodeCanAlertAgainAfterAMuteEnds is the blocker itself,
+// reproduced directly: with the first fix round's bare, unconditional
+// reset, alerts_muted_until never cleared, so resetFrozenByMute ran on
+// every single tick for as long as it stayed in the past — forever. A
+// disk_pct condition that went true right after the mute ended would get
+// wiped back to ok before its for_seconds hold could complete, reset to
+// pending with a brand new ConditionSince on the very next tick, wiped
+// again, and so on without end: the node could never alert again after
+// being muted once. This test fails against that code (disk_pct never
+// reaches firing) and must pass against the fix (EndMuteAfterExpiry
+// clears the column in the same write as its reset, so this branch is
+// never reached a second time for this mute).
+func TestEvaluatorNodeCanAlertAgainAfterAMuteEnds(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	muteEnded := now.Add(-time.Second) // already expired as of the very first tick
+	h := newHarness(t, []EvalNode{{NodeID: "n1", LastSeenAt: now, AlertsMutedUntil: &muteEnded}}, "")
+
+	// Four ticks, 100s apart: the mute ends on the first one, then a
+	// disk_pct condition holds true across the rest of its 300s
+	// for_seconds.
+	for i := 0; i < 4; i++ {
+		h.metrics.set(MetricDiskUsage, []MetricSample{diskSample("n1", "/data", 85, h.clock.now())})
+		h.eval.EvaluateOnce(context.Background())
+		if i < 3 {
+			h.clock.advance(100 * time.Second)
+		}
+	}
+
+	got, found, _ := h.states.GetState(context.Background(), TriggerDiskPct, "n1", "/data")
+	if !found || got.State != StateFiring {
+		t.Fatalf("disk_pct state after a full hold past the mute's expiry = %+v (found=%v), want firing", got, found)
+	}
+	sent := h.notifier.all()
+	if len(sent) != 1 || sent[0].Kind != KindFiring {
+		t.Fatalf("sent = %+v, want exactly one KindFiring", sent)
+	}
+	if until := h.nodes.alertsMutedUntil("n1"); until != nil {
+		t.Errorf("alerts_muted_until = %v, want nil after the mute ended", until)
+	}
+}
+
+// TestEvaluatorConditionTrueNotResetBetweenConsecutiveTicksPastExpiry
+// isolates the same guarantee down to its smallest case: once the mute
+// has ended, a condition's own ConditionSince must survive untouched
+// from one tick to the very next, not just across the four ticks of the
+// fuller test above.
+func TestEvaluatorConditionTrueNotResetBetweenConsecutiveTicksPastExpiry(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	muteEnded := now.Add(-time.Second)
+	h := newHarness(t, []EvalNode{{NodeID: "n1", LastSeenAt: now, AlertsMutedUntil: &muteEnded}}, "")
+
+	h.metrics.set(MetricDiskUsage, []MetricSample{diskSample("n1", "/data", 85, h.clock.now())})
+	h.eval.EvaluateOnce(context.Background()) // mute ends; disk goes ok -> pending
+
+	first, found, _ := h.states.GetState(context.Background(), TriggerDiskPct, "n1", "/data")
+	if !found || first.State != StatePending || first.ConditionSince == nil {
+		t.Fatalf("after the first tick past expiry, disk_pct = %+v (found=%v), want pending with ConditionSince set", first, found)
+	}
+
+	h.clock.advance(50 * time.Second)
+	h.metrics.set(MetricDiskUsage, []MetricSample{diskSample("n1", "/data", 85, h.clock.now())})
+	h.eval.EvaluateOnce(context.Background())
+
+	second, found, _ := h.states.GetState(context.Background(), TriggerDiskPct, "n1", "/data")
+	if !found || second.State != StatePending {
+		t.Fatalf("after the second consecutive tick, disk_pct = %+v (found=%v), want still pending", second, found)
+	}
+	if !second.ConditionSince.Equal(*first.ConditionSince) {
+		t.Errorf("ConditionSince moved from %v to %v across two consecutive ticks — the mute-ended reset must not run again",
+			*first.ConditionSince, *second.ConditionSince)
+	}
+}
+
+// TestEvaluatorConcurrentRemuteLeavesNodeMutedAndStatesUntouched covers
+// the required-safe outcome of EndMuteAfterExpiry's own guard losing a
+// race: a concurrent re-mute's later alerts_muted_until won in the gap
+// between the evaluator's read and this call, so the guarded clear
+// matches nothing, nothing is reset, and the node must be treated as
+// still muted for this tick — no evaluation, no notification.
+func TestEvaluatorConcurrentRemuteLeavesNodeMutedAndStatesUntouched(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	muteEnded := now.Add(-time.Second)
+	h := newHarness(t, []EvalNode{{NodeID: "n1", LastSeenAt: now, AlertsMutedUntil: &muteEnded}}, "")
+	frozenAt := now.Add(-time.Hour)
+	h.states.UpsertState(context.Background(), State{
+		Trigger: TriggerNodeDown, NodeID: "n1", State: StateFiring, Severity: SeverityCritical,
+		StateSince: frozenAt, UpdatedAt: frozenAt,
+	})
+
+	h.states.endMuteOverride = func(string, time.Time) (bool, error) { return false, nil }
+
+	h.eval.EvaluateOnce(context.Background())
+
+	got, found, _ := h.states.GetState(context.Background(), TriggerNodeDown, "n1", "")
+	if !found || got.State != StateFiring {
+		t.Fatalf("node_down state = %+v (found=%v), want untouched firing: a lost race must reset nothing", got, found)
+	}
+	if sent := h.notifier.all(); len(sent) != 0 {
+		t.Errorf("sent = %+v, want nothing: the node must be treated as still muted this tick", sent)
 	}
 }
 
