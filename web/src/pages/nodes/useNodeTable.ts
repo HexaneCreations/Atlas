@@ -6,6 +6,7 @@ export type SortKey =
   | "status"
   | "environment"
   | "platform"
+  | "ip"
   | "cores"
   | "uptime"
   | "lastSeen";
@@ -64,18 +65,7 @@ export function useNodeTable(nodes: Node[]) {
       }
       if (filters.platform !== "all" && n.platform !== filters.platform) return false;
       if (!q) return true;
-      // The node id is searchable as well as the hostname: it is what appears
-      // in logs and in metric queries, and is often the only identifier
-      // somebody has to hand.
-      return (
-        n.hostname.toLowerCase().includes(q) ||
-        n.node_id.toLowerCase().includes(q) ||
-        (n.platform?.toLowerCase().includes(q) ?? false) ||
-        (n.os?.toLowerCase().includes(q) ?? false) ||
-        (n.kernel?.toLowerCase().includes(q) ?? false) ||
-        (n.architecture?.toLowerCase().includes(q) ?? false) ||
-        (n.environment?.toLowerCase().includes(q) ?? false)
-      );
+      return matchesSearch(n, q);
     });
   }, [nodes, filters]);
 
@@ -102,7 +92,8 @@ export function useNodeTable(nodes: Node[]) {
     // Text sorts ascending; magnitudes and "worst first" sort descending —
     // except status, whose ascending order is already down → stale → up.
     setDirection(
-      key === "hostname" || key === "environment" || key === "platform" || key === "status"
+      key === "hostname" || key === "environment" || key === "platform" || key === "ip" ||
+        key === "status"
         ? "asc"
         : "desc",
     );
@@ -117,7 +108,9 @@ export function useNodeTable(nodes: Node[]) {
 /** Worst first, so the default sort surfaces what needs attention. */
 const STATUS_RANK: Record<NodeStatus, number> = { down: 0, stale: 1, up: 2 };
 
-function compare(a: Node, b: Node, key: SortKey): number {
+/** Exported for its own tests: a pure function is worth checking directly,
+ *  the same way [untaggedLast] and [countByStatus] are. */
+export function compare(a: Node, b: Node, key: SortKey): number {
   switch (key) {
     case "hostname":
       // The "Node" column shows node_id as its primary label, so it sorts by
@@ -129,6 +122,12 @@ function compare(a: Node, b: Node, key: SortKey): number {
       return (a.environment ?? UNTAGGED).localeCompare(b.environment ?? UNTAGGED);
     case "platform":
       return (a.platform ?? "").localeCompare(b.platform ?? "");
+    case "ip":
+      // An unobserved IP (empty string) sorts first ascending, same as an
+      // unset platform — "nothing observed yet" is not the same fact as any
+      // real address, but it has to land somewhere, and first-ascending
+      // groups every node with no address at the edge nearest the toggle.
+      return (a.public_ip ?? "").localeCompare(b.public_ip ?? "");
     case "cores":
       return (a.cpu_cores ?? 0) - (b.cpu_cores ?? 0);
     case "uptime":
@@ -138,6 +137,26 @@ function compare(a: Node, b: Node, key: SortKey): number {
       // out-of-date node first.
       return a.seconds_since_seen - b.seconds_since_seen;
   }
+}
+
+/**
+ * Whether node matches a lowercased, already-trimmed search query.
+ *
+ * Exported for its own tests, and so the page's placeholder text
+ * ("Search hostname, node ID, IP, platform, or kernel…") has one place it
+ * has to stay true to.
+ */
+export function matchesSearch(n: Node, q: string): boolean {
+  return (
+    n.hostname.toLowerCase().includes(q) ||
+    n.node_id.toLowerCase().includes(q) ||
+    (n.public_ip?.toLowerCase().includes(q) ?? false) ||
+    (n.platform?.toLowerCase().includes(q) ?? false) ||
+    (n.os?.toLowerCase().includes(q) ?? false) ||
+    (n.kernel?.toLowerCase().includes(q) ?? false) ||
+    (n.architecture?.toLowerCase().includes(q) ?? false) ||
+    (n.environment?.toLowerCase().includes(q) ?? false)
+  );
 }
 
 export function untaggedLast(a: string, b: string): number {

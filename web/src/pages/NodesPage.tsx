@@ -18,6 +18,7 @@ import { EnvironmentComparison } from "./nodes/EnvironmentComparison";
 import { InstallCodesPanel } from "./nodes/InstallCodes";
 import { NodeComparison } from "./nodes/NodeComparison";
 import { NodeInspector } from "./nodes/NodeInspector";
+import { CopyButton } from "./processes/ProcessInspector";
 import { readVitals } from "./nodes/nodeMetrics";
 import { DEFAULT_FILTERS, UNTAGGED, countByStatus, useNodeTable, type SortKey } from "./nodes/useNodeTable";
 
@@ -172,7 +173,7 @@ export function NodesPage() {
               <SearchInput
                 value={filters.search}
                 onChange={(v) => { setFilters((f) => ({ ...f, search: v })); }}
-                placeholder="Search hostname, node ID, platform, or kernel…"
+                placeholder="Search hostname, node ID, IP, platform, or kernel…"
               />
               <FilterSelect
                 value={filters.status}
@@ -232,6 +233,7 @@ export function NodesPage() {
                     <SortableTh label="Status" col="status" {...{ sortKey, direction, toggleSort }} />
                     <SortableTh label="Environment" col="environment" {...{ sortKey, direction, toggleSort }} />
                     <SortableTh label="Platform" col="platform" {...{ sortKey, direction, toggleSort }} />
+                    <SortableTh label="IP" col="ip" {...{ sortKey, direction, toggleSort }} />
                     <SortableTh label="Cores" col="cores" align="right" {...{ sortKey, direction, toggleSort }} />
                     {selected ? null : (
                       <th className="px-3 py-2.5 text-left text-[11px] font-semibold tracking-wider text-text-muted uppercase">
@@ -359,6 +361,24 @@ function NodeRow({
         )}
       </td>
       <td className="px-3 py-2 text-xs text-text-muted">{n.platform ?? "—"}</td>
+      <td className="px-3 py-2 text-xs">
+        {n.public_ip ? (
+          <span
+            className="flex items-center gap-1"
+            onClick={(e) => { e.stopPropagation(); }}
+          >
+            <span className="font-mono tabular-nums text-text-muted">{n.public_ip}</span>
+            <CopyButton value={n.public_ip} label="IP" />
+          </span>
+        ) : (
+          <span
+            className="text-text-subtle"
+            title="Not observed (local node, or no connection yet)"
+          >
+            —
+          </span>
+        )}
+      </td>
       <td className="px-3 py-2 text-right text-xs tabular-nums text-text-muted">
         {n.cpu_cores ?? "—"}
       </td>

@@ -414,6 +414,12 @@ export interface Node {
   last_seen_at: string;
   seconds_since_seen: number;
   clock_skew_seconds?: number;
+  /** The source address the control plane observed this node's most recent
+   *  connection from — server-observed, not agent-reported. Absent for the
+   *  local node Atlas runs on, and for a node that has not connected over a
+   *  path that captures it. For a node behind NAT, this is the NAT egress
+   *  address, not the host's own address. */
+  public_ip?: string;
 }
 
 export interface ListNodesResponse {
