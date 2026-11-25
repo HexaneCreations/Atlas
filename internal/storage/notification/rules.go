@@ -9,6 +9,7 @@ import (
 	"github.com/hexane/atlas/internal/platform/errs"
 	"github.com/hexane/atlas/internal/platform/id"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 const ruleColumns = `trigger, COALESCE(node_id, ''), enabled, warn_threshold, crit_threshold, for_seconds,
@@ -299,4 +300,39 @@ func (r *Repository) ListActiveStates(ctx context.Context) ([]corenotification.S
 		return nil, errs.Wrap(err, errs.CodeUnavailable, "could not list active notification states").WithOp(op)
 	}
 	return states, nil
+}
+
+// execer is the subset of *pgxpool.Pool and pgx.Tx that resetNodeStates
+// needs — satisfied by either, so the same statement can run standalone
+// (ResetNodeStates) or as part of a larger transaction (the step 10
+// unmute API, clearing alerts_muted_until and resetting state together).
+type execer interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
+
+// resetNodeStates sets every non-ok notification_state row for nodeID to
+// ok, in one statement: state_since now, severity and value cleared, the
+// flap counters cleared. last_notified_at / last_notified_kind are left
+// as they were — a mute ending is not itself a notification, so there is
+// nothing new to record there, and leaving them is simplest where
+// nothing requires otherwise.
+func resetNodeStates(ctx context.Context, exec execer, nodeID string) error {
+	const q = `
+		UPDATE notification_state SET
+			state = 'ok', severity = '', value = NULL, condition_since = NULL,
+			state_since = now(), flap_count = 0, flap_window_start = NULL, updated_at = now()
+		WHERE node_id = $1 AND state <> 'ok'`
+	_, err := exec.Exec(ctx, q, nodeID)
+	return err
+}
+
+// ResetNodeStates is [resetNodeStates] over the repository's own pool —
+// see corenotification.StateStore, which the evaluator's mute-ended reset
+// calls through.
+func (r *Repository) ResetNodeStates(ctx context.Context, nodeID string) error {
+	const op = "notification.Repository.ResetNodeStates"
+	if err := resetNodeStates(ctx, r.pool, nodeID); err != nil {
+		return errs.Wrap(err, errs.CodeUnavailable, "could not reset the node's notification state").WithOp(op)
+	}
+	return nil
 }

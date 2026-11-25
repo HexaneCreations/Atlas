@@ -186,8 +186,10 @@ func TestComputeTransitionRecoveryInterrupted(t *testing.T) {
 }
 
 // TestComputeTransitionCooldown proves cooldown_seconds withholds a fresh
-// firing notification (the state still transitions) when the last
-// notification was too recent, but never withholds an escalation.
+// firing's own "firing" notification (the state still transitions) when
+// the last notification was too recent, sending "flapping" in its place
+// (fix-round item 2) rather than nothing — and never withholds an
+// escalation.
 func TestComputeTransitionCooldown(t *testing.T) {
 	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	rule := percentRule()
@@ -198,12 +200,25 @@ func TestComputeTransitionCooldown(t *testing.T) {
 		State: StatePending, StateSince: t0.Add(-300 * time.Second), ConditionSince: ptr(t0.Add(-300 * time.Second)),
 		LastNotifiedAt: &lastNotified,
 	}
-	next, kind, _ := computeTransition(rule, pending, true, true, ptr(85.0), severityForPercentRule(rule, ""), t0)
+	next, kind, sev := computeTransition(rule, pending, true, true, ptr(85.0), severityForPercentRule(rule, ""), t0)
 	if next.State != StateFiring {
-		t.Fatalf("state = %v, want firing even though the notification is suppressed", next.State)
+		t.Fatalf("state = %v, want firing even though the firing notification is suppressed", next.State)
 	}
+	if kind != KindFlapping {
+		t.Errorf("kind = %v, want KindFlapping: a real second incident must never go completely silent", kind)
+	}
+	if sev != SeverityWarning {
+		t.Errorf("flapping severity = %q, want warning (85 is below crit 90)", sev)
+	}
+	if next.FlapCount != 1 {
+		t.Errorf("flap_count = %d, want 1 after the flapping notification", next.FlapCount)
+	}
+
+	// The very next tick, still firing at the same severity: nothing more
+	// is sent — one flapping per cycle, not a repeat every tick.
+	next, kind, _ = computeTransition(rule, next, true, true, ptr(85.0), severityForPercentRule(rule, SeverityWarning), t0.Add(time.Minute))
 	if kind != "" {
-		t.Errorf("kind = %v, want none: within cooldown of the last notification", kind)
+		t.Errorf("kind = %v on the following tick, want none: flapping already said this cycle re-fired", kind)
 	}
 
 	// Escalation is never gated by cooldown.
@@ -265,6 +280,24 @@ func (f *fakeStateStore) UpsertState(_ context.Context, s State) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.states[stateKey{string(s.Trigger), s.NodeID, s.Subject}] = s
+	return nil
+}
+
+// ResetNodeStates mirrors the real repository's single-statement reset:
+// every non-ok row for nodeID, across every trigger and subject, becomes
+// ok with its severity and counters cleared, without touching any other
+// node's rows.
+func (f *fakeStateStore) ResetNodeStates(_ context.Context, nodeID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for k, s := range f.states {
+		if k.nodeID != nodeID || s.State == StateOK {
+			continue
+		}
+		s.State, s.Severity, s.Value = StateOK, "", nil
+		s.ConditionSince, s.FlapCount, s.FlapWindowStart = nil, 0, nil
+		f.states[k] = s
+	}
 	return nil
 }
 
@@ -502,6 +535,204 @@ func TestEvaluatorMuteEndedResetsStateSilently(t *testing.T) {
 	}
 }
 
+// TestEvaluatorMuteEndedResetsEveryDiskSubject covers fix-round item 3's
+// bug fix directly: the previous version's reset only ever looked at
+// subject "", so a disk_pct row frozen under a mountpoint subject
+// survived a mute and could still send a late, spurious recovered
+// message once that mountpoint's real data resumed. ResetNodeStates
+// covers every subject in one statement, so both mountpoints below must
+// come back ok, silently, in the same tick the mute ends.
+func TestEvaluatorMuteEndedResetsEveryDiskSubject(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	muteEnded := now.Add(-time.Hour)
+	frozenAt := muteEnded.Add(-time.Hour)
+
+	h := newHarness(t, []EvalNode{{NodeID: "n1", LastSeenAt: now, AlertsMutedUntil: &muteEnded}}, "")
+	for _, subject := range []string{"/", "/data"} {
+		h.states.UpsertState(context.Background(), State{
+			Trigger: TriggerDiskPct, NodeID: "n1", Subject: subject, State: StateFiring, Severity: SeverityWarning,
+			StateSince: frozenAt, UpdatedAt: frozenAt,
+		})
+	}
+
+	h.eval.EvaluateOnce(context.Background())
+
+	for _, subject := range []string{"/", "/data"} {
+		got, found, _ := h.states.GetState(context.Background(), TriggerDiskPct, "n1", subject)
+		if !found || got.State != StateOK {
+			t.Errorf("disk_pct[%q] after the mute ended = %+v, want silently reset to ok", subject, got)
+		}
+	}
+	if len(h.notifier.all()) != 0 {
+		t.Errorf("sent %d notifications for the mute-ended reset, want 0", len(h.notifier.all()))
+	}
+}
+
+// TestResetNodeStatesSupportsAnEarlyUnmute covers fix-round item 3's other
+// half directly: the evaluator cannot detect an early, explicit unmute on
+// its own (once alerts_muted_until reads NULL there is no record of when
+// it changed), so that case is "supported" by exposing ResetNodeStates
+// for the future unmute API to call itself — this proves the primitive
+// those callers would use actually clears a frozen state silently, the
+// same as the natural-expiry path above.
+func TestResetNodeStatesSupportsAnEarlyUnmute(t *testing.T) {
+	h := newHarness(t, []EvalNode{{NodeID: "n1", LastSeenAt: time.Now()}}, "")
+	frozenAt := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	h.states.UpsertState(context.Background(), State{
+		Trigger: TriggerNodeDown, NodeID: "n1", State: StateFiring, Severity: SeverityCritical, StateSince: frozenAt,
+	})
+	// A second node's state must never be touched by the first node's reset.
+	h.states.UpsertState(context.Background(), State{
+		Trigger: TriggerNodeDown, NodeID: "n2", State: StateFiring, Severity: SeverityCritical, StateSince: frozenAt,
+	})
+
+	if err := h.states.ResetNodeStates(context.Background(), "n1"); err != nil {
+		t.Fatalf("ResetNodeStates: %v", err)
+	}
+
+	got, found, _ := h.states.GetState(context.Background(), TriggerNodeDown, "n1", "")
+	if !found || got.State != StateOK || got.Severity != "" {
+		t.Errorf("n1 after an early unmute's reset = %+v, want ok with severity cleared", got)
+	}
+	other, _, _ := h.states.GetState(context.Background(), TriggerNodeDown, "n2", "")
+	if other.State != StateFiring {
+		t.Errorf("n2 state = %v, want untouched firing — ResetNodeStates must be scoped to its own node", other.State)
+	}
+	if len(h.notifier.all()) != 0 {
+		t.Errorf("sent %d notifications from ResetNodeStates, want 0: a mute ending is never itself a notification", len(h.notifier.all()))
+	}
+}
+
+// --- Cooldown-suppressed firing sends flapping, not silence (item 2) ---
+
+// TestEvaluatorCooldownSuppressedFiringSendsFlappingThenRecovered drives a
+// full cycle: fire normally, recover, re-fire again quickly enough to
+// land inside cooldown_seconds of that recovery and have the firing
+// itself suppressed, then fully recover again. Exactly one flapping must
+// stand in for the suppressed firing, and the eventual recovered message
+// still goes out as always.
+func TestEvaluatorCooldownSuppressedFiringSendsFlappingThenRecovered(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	h := newHarness(t, []EvalNode{{NodeID: "n1", LastSeenAt: now}}, "")
+	rule := h.rules.rules[TriggerDiskPct]
+	rule.CooldownSeconds = 1800
+	h.rules.rules[TriggerDiskPct] = rule
+	ctx := context.Background()
+
+	// Seed straight past the hold, the same shortcut
+	// TestEvaluatorRestartMidPending uses, since this test is about
+	// cooldown and flapping, not re-deriving the for_seconds wait with a
+	// real clock (which would also run the sample stale across a 300s
+	// jump).
+	seedPastHold := func(lastNotifiedAt *time.Time) {
+		since := h.clock.now().Add(-300 * time.Second)
+		h.states.UpsertState(ctx, State{
+			Trigger: TriggerDiskPct, NodeID: "n1", Subject: "/data", State: StatePending,
+			StateSince: since, ConditionSince: &since, LastNotifiedAt: lastNotifiedAt,
+		})
+	}
+
+	seedPastHold(nil)
+	h.metrics.set(MetricDiskUsage, []MetricSample{diskSample("n1", "/data", 85, h.clock.now())})
+	h.eval.EvaluateOnce(ctx) // pending -> firing (first ever activation, sends firing)
+
+	if s, _, _ := h.states.GetState(ctx, TriggerDiskPct, "n1", "/data"); s.State != StateFiring {
+		t.Fatalf("state after the hold = %v, want firing", s.State)
+	}
+
+	// -> recovering -> ok (recovered): the condition clears and
+	// recovery_seconds (120s) elapses.
+	h.metrics.set(MetricDiskUsage, []MetricSample{diskSample("n1", "/data", 10, h.clock.now())})
+	h.eval.EvaluateOnce(ctx) // firing -> recovering
+	h.clock.advance(120 * time.Second)
+	h.metrics.set(MetricDiskUsage, []MetricSample{diskSample("n1", "/data", 10, h.clock.now())})
+	h.eval.EvaluateOnce(ctx) // recovering -> ok, sends recovered
+
+	firstRound := h.notifier.all()
+	if len(firstRound) != 2 || firstRound[0].Kind != KindFiring || firstRound[1].Kind != KindRecovered {
+		t.Fatalf("first round sent = %+v, want exactly [firing recovered]", firstRound)
+	}
+	okState, _, _ := h.states.GetState(ctx, TriggerDiskPct, "n1", "/data")
+
+	// Re-fire immediately, carrying forward the LastNotifiedAt the
+	// recovered notification just set — exactly what a real OK->pending
+	// transition does on its own (see computeTransition's StateOK case),
+	// just without waiting out the hold a second time. Well inside the
+	// 1800s cooldown measured from that recovered notification.
+	seedPastHold(okState.LastNotifiedAt)
+	h.metrics.set(MetricDiskUsage, []MetricSample{diskSample("n1", "/data", 85, h.clock.now())})
+	h.eval.EvaluateOnce(ctx)
+
+	afterRefire := h.notifier.all()
+	if len(afterRefire) != 3 || afterRefire[2].Kind != KindFlapping {
+		t.Fatalf("after the suppressed re-fire, sent = %+v, want exactly one more: flapping", afterRefire)
+	}
+	if s, _, _ := h.states.GetState(ctx, TriggerDiskPct, "n1", "/data"); s.State != StateFiring {
+		t.Fatalf("state after the suppressed re-fire = %v, want firing (the state still transitions)", s.State)
+	}
+
+	// A second tick, still firing, nothing changed: no further flapping.
+	h.eval.EvaluateOnce(ctx)
+	if len(h.notifier.all()) != 3 {
+		t.Fatalf("sent %d after a no-op tick while still firing, want still 3: at most one flapping per cycle", len(h.notifier.all()))
+	}
+
+	// Finally recover for real: the eventual recovered message still goes out.
+	h.metrics.set(MetricDiskUsage, []MetricSample{diskSample("n1", "/data", 10, h.clock.now())})
+	h.eval.EvaluateOnce(ctx) // firing -> recovering
+	h.clock.advance(120 * time.Second)
+	h.metrics.set(MetricDiskUsage, []MetricSample{diskSample("n1", "/data", 10, h.clock.now())})
+	h.eval.EvaluateOnce(ctx) // recovering -> ok, sends recovered
+
+	final := h.notifier.all()
+	if len(final) != 4 || final[3].Kind != KindRecovered {
+		t.Fatalf("final sent = %+v, want exactly one more: recovered", final)
+	}
+}
+
+// TestEvaluatorRefireAfterCooldownFiresNormally proves cooldown is a
+// window, not a permanent downgrade: once cooldown_seconds has actually
+// elapsed since the last notification, a fresh activation sends a normal
+// firing, not flapping.
+func TestEvaluatorRefireAfterCooldownFiresNormally(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	h := newHarness(t, []EvalNode{{NodeID: "n1", LastSeenAt: now}}, "")
+	rule := h.rules.rules[TriggerDiskPct]
+	rule.CooldownSeconds = 60
+	h.rules.rules[TriggerDiskPct] = rule
+	ctx := context.Background()
+
+	seedPastHold := func(lastNotifiedAt *time.Time) {
+		since := h.clock.now().Add(-300 * time.Second)
+		h.states.UpsertState(ctx, State{
+			Trigger: TriggerDiskPct, NodeID: "n1", Subject: "/data", State: StatePending,
+			StateSince: since, ConditionSince: &since, LastNotifiedAt: lastNotifiedAt,
+		})
+	}
+
+	seedPastHold(nil)
+	h.metrics.set(MetricDiskUsage, []MetricSample{diskSample("n1", "/data", 85, h.clock.now())})
+	h.eval.EvaluateOnce(ctx) // -> firing (first activation, sends firing)
+
+	h.metrics.set(MetricDiskUsage, []MetricSample{diskSample("n1", "/data", 10, h.clock.now())})
+	h.eval.EvaluateOnce(ctx) // -> recovering
+	h.clock.advance(120 * time.Second)
+	h.metrics.set(MetricDiskUsage, []MetricSample{diskSample("n1", "/data", 10, h.clock.now())})
+	h.eval.EvaluateOnce(ctx) // -> ok, sends recovered
+	okState, _, _ := h.states.GetState(ctx, TriggerDiskPct, "n1", "/data")
+
+	// Well past the 60s cooldown by the time it re-fires.
+	h.clock.advance(100 * time.Second)
+	seedPastHold(okState.LastNotifiedAt)
+	h.metrics.set(MetricDiskUsage, []MetricSample{diskSample("n1", "/data", 85, h.clock.now())})
+	h.eval.EvaluateOnce(ctx)
+
+	sent := h.notifier.all()
+	if len(sent) != 3 || sent[2].Kind != KindFiring {
+		t.Fatalf("sent = %+v, want the third notification to be a normal KindFiring", sent)
+	}
+}
+
 // TestEvaluatorRestartMidPending and TestEvaluatorRestartMidFiring cover
 // item 4: a fresh Evaluator instance (a stand-in for a server restart,
 // since all state lives in the StateStore, not the Evaluator itself) must
@@ -560,10 +791,14 @@ func TestEvaluatorRestartMidFiring(t *testing.T) {
 	}
 }
 
-// TestEvaluatorDeterministicEventIDs covers item 4's mechanism directly:
-// the same (trigger, node, subject, state_since, kind) always produces
-// the same event id, so a crash-and-retry of the same transition
-// reproduces it exactly rather than minting a new one Enqueue cannot dedupe.
+// TestEvaluatorDeterministicEventIDs covers fix-round item 1 directly:
+// retrying the exact same pre-transition (trigger, node, subject) state
+// produces the same event id even when the clock has moved on in
+// between — proving the id is anchored on current (pre-transition), not
+// next.StateSince (the previous version's bug: that field is set to the
+// tick's own now on a firing transition, so a retry at a later now used
+// to mint a different id every time, which Enqueue's
+// UNIQUE(event_id, channel_id) could never dedupe).
 func TestEvaluatorDeterministicEventIDs(t *testing.T) {
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	h := newHarness(t, []EvalNode{{NodeID: "n1", LastSeenAt: now}}, "")
@@ -586,7 +821,10 @@ func TestEvaluatorDeterministicEventIDs(t *testing.T) {
 	}
 
 	// Simulate a crash before the state write landed: re-seed the exact
-	// same pre-transition state and evaluate again.
+	// same pre-transition state, advance the clock (a real restart would
+	// not resume at the same instant), and evaluate again.
+	h.clock.advance(5 * time.Minute)
+	h.metrics.set(MetricDiskUsage, []MetricSample{diskSample("n1", "/data", 85, h.clock.now())})
 	seed()
 	h.eval.EvaluateOnce(context.Background())
 	second := h.notifier.all()
@@ -594,7 +832,36 @@ func TestEvaluatorDeterministicEventIDs(t *testing.T) {
 		t.Fatalf("second attempt total = %d, want 2 (one more call to Notify)", len(second))
 	}
 	if second[0].EventID != second[1].EventID {
-		t.Errorf("event ids differ across the replay: %q vs %q, want identical", second[0].EventID, second[1].EventID)
+		t.Errorf("event ids differ across the replay despite the clock moving on: %q vs %q, want identical",
+			second[0].EventID, second[1].EventID)
+	}
+}
+
+// TestEventAnchorUsesThePreTransitionState covers eventAnchor directly:
+// for every kind, the anchor must come from current (what was true before
+// this tick), never from a field computeTransition only set this tick.
+func TestEventAnchorUsesThePreTransitionState(t *testing.T) {
+	conditionSince := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	stateSince := conditionSince.Add(time.Hour)
+
+	firingAnchor := eventAnchor(KindFiring, State{State: StatePending, StateSince: stateSince, ConditionSince: &conditionSince})
+	if !firingAnchor.Equal(conditionSince) {
+		t.Errorf("firing anchor = %v, want the pending state's own ConditionSince %v", firingAnchor, conditionSince)
+	}
+
+	flappingAnchor := eventAnchor(KindFlapping, State{State: StatePending, StateSince: stateSince, ConditionSince: &conditionSince})
+	if !flappingAnchor.Equal(conditionSince) {
+		t.Errorf("flapping anchor = %v, want the same ConditionSince firing would use", flappingAnchor)
+	}
+
+	escalatedAnchor := eventAnchor(KindEscalated, State{State: StateFiring, StateSince: stateSince})
+	if !escalatedAnchor.Equal(stateSince) {
+		t.Errorf("escalated anchor = %v, want the firing state's own StateSince %v", escalatedAnchor, stateSince)
+	}
+
+	recoveredAnchor := eventAnchor(KindRecovered, State{State: StateRecovering, StateSince: stateSince})
+	if !recoveredAnchor.Equal(stateSince) {
+		t.Errorf("recovered anchor = %v, want the recovering state's own StateSince %v", recoveredAnchor, stateSince)
 	}
 }
 

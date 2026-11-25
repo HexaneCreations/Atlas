@@ -87,6 +87,11 @@ type RuleStore interface {
 type StateStore interface {
 	GetState(ctx context.Context, trigger Trigger, nodeID, subject string) (State, bool, error)
 	UpsertState(ctx context.Context, s State) error
+	// ResetNodeStates sets every non-ok state row for nodeID to ok, in one
+	// statement, without going through the notifier — see
+	// [Evaluator.resetFrozenByMute] and the fix-round report for why a
+	// mute's end must never itself produce a notification.
+	ResetNodeStates(ctx context.Context, nodeID string) error
 }
 
 // NodeStore is what the evaluator needs from the node repository: every
@@ -279,13 +284,11 @@ func (e *Evaluator) evaluateNode(ctx context.Context, n EvalNode, disk []MetricS
 			return // muted: not read, not written, full stop
 		}
 		// Not muted now, but was at some point (the column is still set,
-		// just in the past): any state frozen by that mute is reset to ok
-		// silently before normal evaluation resumes. See the report for
-		// why comparing against AlertsMutedUntil itself, rather than a
-		// time-since-now window, is what makes this self-limiting without
-		// any extra bookkeeping — and why it only catches a mute ending by
-		// expiry, not one cleared early (there is no clear action yet).
-		e.resetFrozenByMute(ctx, n, now)
+		// just in the past): every state frozen by that mute, under every
+		// subject, is reset to ok silently before normal evaluation
+		// resumes. It only catches a mute ending by expiry, not one
+		// cleared early — see resetFrozenByMute's own comment.
+		e.resetFrozenByMute(ctx, n)
 	}
 
 	nodeDownFiring := e.evaluateNodeDown(ctx, n, now)
@@ -304,37 +307,38 @@ func (e *Evaluator) evaluateNode(ctx context.Context, n EvalNode, disk []MetricS
 	}
 }
 
-// resetFrozenByMute silently clears any state left non-ok by a mute that
-// has since ended, for every trigger/subject this node has a row for.
-// Idempotent: once a row is ok, the comparison that found it stops
-// matching, so calling this every tick after the mute ends costs one
-// query and finds nothing to do.
-func (e *Evaluator) resetFrozenByMute(ctx context.Context, n EvalNode, now time.Time) {
-	for _, trigger := range []Trigger{TriggerNodeDown, TriggerDiskPct, TriggerRAMPct} {
-		// node_down and ram_pct have no subject; disk_pct's subjects are
-		// not enumerable without a fresh sample, which a muted node may
-		// not have had in a long time. "" covers node_down/ram_pct
-		// directly; a disk_pct row frozen under some other subject is
-		// caught the moment that mountpoint next reports, via the normal
-		// found-but-stale-baseline path in evaluateDisk — not silently,
-		// but also not as a false recovery, since resetting to ok first
-		// is exactly what evaluateDisk would do with a state this old
-		// relative to AlertsMutedUntil anyway. See the report.
-		current, found, err := e.states.GetState(ctx, trigger, n.NodeID, "")
-		if err != nil || !found || current.State == StateOK {
-			continue
-		}
-		if n.AlertsMutedUntil == nil || current.UpdatedAt.After(*n.AlertsMutedUntil) {
-			continue // not frozen by this mute — already touched since it ended
-		}
-		reset := State{
-			Trigger: trigger, NodeID: n.NodeID, Subject: "",
-			State: StateOK, StateSince: now, UpdatedAt: now,
-		}
-		if err := e.states.UpsertState(ctx, reset); err != nil {
-			e.logger.ErrorContext(ctx, "could not reset notification state after a mute ended",
-				slog.String("trigger", string(trigger)), slog.String("node_id", n.NodeID))
-		}
+// resetFrozenByMute silently clears every non-ok notification_state row
+// for a node whose mute has just ended by natural expiry (alerts_muted_
+// until is set, but now in the past): one statement, covering every
+// trigger and subject the node has a row for. This call site is only
+// reached before this tick has evaluated anything else for n (see
+// evaluateNode), so every non-ok row it can see here was necessarily
+// written before the mute started — the node was skipped entirely for
+// the whole mute, nothing else could have touched it since — and is safe
+// to reset unconditionally, with no per-row timestamp check needed.
+//
+// An earlier version of this reset enumerated only {node_down, disk_pct,
+// ram_pct} under subject "", which left disk_pct's mountpoint-subject
+// rows frozen forever: they would survive the mute and could still
+// produce a late, spurious recovered message whenever that mountpoint
+// next recovered for real. ResetNodeStates' single UPDATE has no such
+// gap — every subject of every trigger for this node, in one statement.
+//
+// Idempotent: once every row is ok, the UPDATE matches nothing, so
+// calling this every tick after the mute ends costs one query and finds
+// nothing to do.
+//
+// An *early*, explicit unmute (alerts_muted_until cleared back to NULL
+// before its own time) is not detected here: once the column reads NULL
+// there is no record left of when that mute ended, so nothing short of
+// the unmute action itself can know a reset is due. ResetNodeStates is
+// exported for exactly that — the step 10 unmute API is expected to call
+// it directly, in the same transaction that clears the column, instead
+// of this evaluator ever needing to notice a NULL lazily.
+func (e *Evaluator) resetFrozenByMute(ctx context.Context, n EvalNode) {
+	if err := e.states.ResetNodeStates(ctx, n.NodeID); err != nil {
+		e.logger.ErrorContext(ctx, "could not reset notification state after a mute ended",
+			slog.String("node_id", n.NodeID))
 	}
 }
 
@@ -482,7 +486,10 @@ func (e *Evaluator) evaluateSubjectWithTitle(
 	if kind != "" {
 		title, message := titleMessage(notifySeverity)
 		n := Notification{
-			EventID: eventID(trigger, nodeID, subject, next.StateSince, kind),
+			// current, not next: see eventAnchor and the fix-round report's
+			// item 1 for why the id must be built only from a timestamp this
+			// tick did not just compute.
+			EventID: eventID(trigger, nodeID, subject, eventAnchor(kind, current), kind, notifySeverity),
 			Kind:    kind,
 			Trigger: trigger,
 			NodeID:  nodeID,
@@ -592,7 +599,17 @@ func computeTransition(
 		}
 		next.State, next.StateSince, next.Severity = StateFiring, now, severityOf(value)
 		if withinCooldown(current.LastNotifiedAt, rule.CooldownSeconds, now) {
-			return next, "", next.Severity
+			// A real second incident, suppressed: silence here would mean
+			// the operator never learns this fired at all until (if ever)
+			// it later recovers. Send one kind flapping instead, saying so
+			// — never itself gated by cooldown — and count it, so a
+			// consumer of flap_count has something real to read. This
+			// pending->firing transition runs exactly once per entry into
+			// firing (the next tick lands in the StateFiring case below,
+			// never back here), so "at most once per cycle" falls out of
+			// the state machine's own shape with no extra guard needed.
+			next.FlapCount++
+			return next, KindFlapping, next.Severity
 		}
 		return next, KindFiring, next.Severity
 
@@ -625,23 +642,57 @@ func computeTransition(
 	return next, "", next.Severity
 }
 
-// withinCooldown reports whether a new firing notification should be
-// withheld: cooldown_seconds bounds how often a *fresh* firing episode may
-// re-announce itself, not how long a continuously firing one stays quiet
-// (that is for_seconds/recovery_seconds's job, and v1 sends no periodic
-// reminder at all — see the report). Escalated and recovered are not
-// gated by this: an escalation is new information by definition, and a
-// recovery is the one-time counterpart to a firing the operator already
-// knows about.
+// withinCooldown reports whether a *fresh* firing episode's own
+// notification should be withheld: cooldown_seconds bounds how often a
+// new activation may re-announce itself, not how long a continuously
+// firing one stays quiet (that is for_seconds/recovery_seconds's job, and
+// v1 sends no periodic reminder at all — see the report). A suppressed
+// firing still sends a one-time kind flapping instead of nothing — see
+// computeTransition's StatePending case. Escalated and recovered are
+// never gated by this: an escalation is new information by definition,
+// and a recovery is the one-time counterpart to a firing the operator
+// already knows about (flapping included — it is still an activation the
+// operator was told about).
 func withinCooldown(lastNotifiedAt *time.Time, cooldownSeconds int, now time.Time) bool {
 	return lastNotifiedAt != nil && now.Sub(*lastNotifiedAt) < time.Duration(cooldownSeconds)*time.Second
 }
 
+// eventAnchor is the timestamp eventID must be built from for kind: always
+// a field of current, the pre-transition state, never anything this tick
+// just computed into next. That is what makes the id survive a retry of
+// the same transition intact — a crash between a successful Notify and
+// the UpsertState that would have advanced current to next leaves current
+// exactly as it was, so the next tick recomputes the identical anchor and
+// Enqueue's UNIQUE(event_id, channel_id) absorbs the repeat (fix-round
+// item 1; the previous version anchored on next.StateSince, which is set
+// to that tick's own now on a firing transition and so changed on every
+// retry, defeating the dedupe entirely).
+//
+//   - firing and flapping both come from the StatePending case: anchored
+//     on the pending state's own ConditionSince, which does not move again
+//     until the next full recovery to ok.
+//   - escalated comes from the StateFiring case: anchored on that firing
+//     state's StateSince, which stays fixed for the rest of the firing
+//     cycle — kind's severity is folded into eventID too, since more than
+//     one escalation (critical, demoted, critical again) can share that
+//     same anchor within one firing cycle.
+//   - recovered comes from the StateRecovering case: anchored on that
+//     recovering state's own StateSince.
+func eventAnchor(kind Kind, current State) time.Time {
+	switch kind {
+	case KindFiring, KindFlapping:
+		if current.ConditionSince != nil {
+			return *current.ConditionSince
+		}
+	case KindEscalated, KindRecovered:
+		return current.StateSince
+	}
+	return current.StateSince
+}
+
 // eventID is deterministic per transition: the same (trigger, node,
-// subject, state_since, kind) always produces the same id, so a restart
-// that re-evaluates an in-progress transition re-enqueues the identical
-// id and Enqueue's UNIQUE(event_id, channel_id) absorbs the repeat — item
-// 4 of the brief.
-func eventID(trigger Trigger, nodeID, subject string, stateSince time.Time, kind Kind) string {
-	return fmt.Sprintf("notif-%s-%s-%s-%d-%s", trigger, nodeID, subject, stateSince.Unix(), kind)
+// subject, anchor, kind, severity) always produces the same id — see
+// eventAnchor for what anchor must be to make that survive a retry.
+func eventID(trigger Trigger, nodeID, subject string, anchor time.Time, kind Kind, severity Severity) string {
+	return fmt.Sprintf("notif-%s-%s-%s-%d-%s-%s", trigger, nodeID, subject, anchor.Unix(), kind, severity)
 }

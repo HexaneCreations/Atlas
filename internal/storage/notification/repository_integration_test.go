@@ -567,6 +567,68 @@ func TestStateUpsertGetAndListActive(t *testing.T) {
 	}
 }
 
+// TestResetNodeStatesClearsEveryNonOkRowForNode covers the fix round's
+// item 3: ResetNodeStates must reset every trigger and subject for its
+// node in one statement — not just subject "" as an earlier version of
+// the evaluator's own mute-ended reset mistakenly did — while leaving an
+// already-ok row and any other node's rows completely untouched.
+func TestResetNodeStatesClearsEveryNonOkRowForNode(t *testing.T) {
+	repo, pool := newRepository(t)
+	ctx := context.Background()
+	seedNode(t, pool, "node-1")
+	seedNode(t, pool, "node-2")
+	frozenAt := time.Now().UTC().Add(-time.Hour).Truncate(time.Microsecond)
+
+	firing := func(nodeID, subject string) corenotification.State {
+		return corenotification.State{
+			Trigger: corenotification.TriggerDiskPct, NodeID: nodeID, Subject: subject,
+			State: corenotification.StateFiring, Severity: corenotification.SeverityCritical,
+			Value: ptr(93.5), ConditionSince: &frozenAt, StateSince: frozenAt, FlapCount: 2,
+			FlapWindowStart: &frozenAt,
+		}
+	}
+	for _, s := range []corenotification.State{
+		firing("node-1", "/"),
+		firing("node-1", "/data"),
+		{Trigger: corenotification.TriggerNodeDown, NodeID: "node-1", State: corenotification.StateOK, StateSince: frozenAt},
+		firing("node-2", "/"),
+	} {
+		if err := repo.UpsertState(ctx, s); err != nil {
+			t.Fatalf("seed UpsertState(%s/%s): %v", s.NodeID, s.Subject, err)
+		}
+	}
+
+	if err := repo.ResetNodeStates(ctx, "node-1"); err != nil {
+		t.Fatalf("ResetNodeStates: %v", err)
+	}
+
+	for _, subject := range []string{"/", "/data"} {
+		got, found, err := repo.GetState(ctx, corenotification.TriggerDiskPct, "node-1", subject)
+		if err != nil || !found {
+			t.Fatalf("GetState(node-1, %q): found=%v err=%v", subject, found, err)
+		}
+		if got.State != corenotification.StateOK || got.Severity != "" || got.Value != nil ||
+			got.ConditionSince != nil || got.FlapCount != 0 || got.FlapWindowStart != nil {
+			t.Errorf("node-1/%q after reset = %+v, want ok with severity/value/condition_since/flap counters cleared", subject, got)
+		}
+		if !got.StateSince.After(frozenAt) {
+			t.Errorf("node-1/%q state_since = %v, want refreshed to the reset time, not left at %v", subject, got.StateSince, frozenAt)
+		}
+	}
+
+	// Already ok before the reset: untouched (state_since does not move).
+	okBefore, _, _ := repo.GetState(ctx, corenotification.TriggerNodeDown, "node-1", "")
+	if !okBefore.StateSince.Equal(frozenAt) {
+		t.Errorf("node-1's already-ok node_down state_since = %v, want untouched at %v", okBefore.StateSince, frozenAt)
+	}
+
+	// A different node's firing row must survive node-1's reset entirely.
+	other, _, _ := repo.GetState(ctx, corenotification.TriggerDiskPct, "node-2", "/")
+	if other.State != corenotification.StateFiring || other.Severity != corenotification.SeverityCritical {
+		t.Errorf("node-2 state = %+v, want untouched firing/critical — ResetNodeStates must be scoped to its own node", other)
+	}
+}
+
 // --- deliveries ---------------------------------------------------------------
 
 func notificationFor(eventID string) corenotification.Notification {
