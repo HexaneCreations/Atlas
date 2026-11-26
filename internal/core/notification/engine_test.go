@@ -3,6 +3,8 @@ package notification
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -393,6 +395,98 @@ func TestNotifyEnforcesChannelMinSeverity(t *testing.T) {
 				if !got[want] {
 					t.Errorf("delivered to %v, want it to include %q", got, want)
 				}
+			}
+		})
+	}
+}
+
+type recordingSender struct {
+	mu   sync.Mutex
+	sent []Delivery
+}
+
+func (s *recordingSender) Send(_ context.Context, _ Channel, _ string, d Delivery) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sent = append(s.sent, d)
+	return nil
+}
+
+type fakeNodeInfo struct {
+	mu    sync.Mutex
+	nodes map[string][2]string
+	err   error
+	calls int
+}
+
+func (f *fakeNodeInfo) NodeInfo(_ context.Context, nodeID string) (string, string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	if f.err != nil {
+		return "", "", f.err
+	}
+	n := f.nodes[nodeID]
+	return n[0], n[1], nil
+}
+
+func dispatchWithNodeInfo(t *testing.T, info NodeInfoSource, nodeIDs ...string) (*recordingSender, *fakeDeliveryStore) {
+	t.Helper()
+	deliveries := newFakeDeliveryStore()
+	sender := &recordingSender{}
+	e := NewEngine(Options{Channels: newFakeChannelStore(testChannel("c1")), Deliveries: deliveries,
+		Senders: map[ChannelType]Sender{ChannelTeams: sender}, NodeInfo: info})
+	ctx := context.Background()
+	for i, nodeID := range nodeIDs {
+		if err := e.Notify(ctx, Notification{EventID: fmt.Sprintf("evt-%d", i), NodeID: nodeID, Kind: KindFiring,
+			Severity: SeverityCritical}); err != nil {
+			t.Fatalf("notify: %v", err)
+		}
+	}
+	e.dispatchDue(ctx)
+	return sender, deliveries
+}
+
+func TestDispatchFillsNodeNameAndAddressBeforeSend(t *testing.T) {
+	info := &fakeNodeInfo{nodes: map[string][2]string{"n1": {"web-01", "203.0.113.7"}}}
+	sender, deliveries := dispatchWithNodeInfo(t, info, "n1", "n1")
+	if len(sender.sent) != 2 {
+		t.Fatalf("sent %d, want 2", len(sender.sent))
+	}
+	for _, d := range sender.sent {
+		if d.NodeName != "web-01" || d.NodeAddress != "203.0.113.7" {
+			t.Errorf("sent delivery node = %q/%q, want web-01/203.0.113.7", d.NodeName, d.NodeAddress)
+		}
+	}
+	if info.calls != 1 {
+		t.Errorf("node looked up %d times in one batch, want 1", info.calls)
+	}
+	for _, d := range deliveries.all() {
+		if d.NodeName != "" || d.NodeAddress != "" || d.Status != StatusDelivered {
+			t.Errorf("stored delivery = %+v, want delivered with no node name or address", d)
+		}
+	}
+}
+
+func TestDispatchFallsBackToTheNodeIDWhenLookupFails(t *testing.T) {
+	for name, info := range map[string]*fakeNodeInfo{
+		"error":   {err: errors.New("database unavailable")},
+		"unknown": {nodes: map[string][2]string{}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			sender, deliveries := dispatchWithNodeInfo(t, info, "n1")
+			if len(sender.sent) != 1 {
+				t.Fatalf("sent %d, want 1", len(sender.sent))
+			}
+			d := sender.sent[0]
+			if d.NodeID != "n1" || d.NodeName != "" || d.NodeAddress != "" {
+				t.Errorf("sent delivery = %+v, want the id with no name or address", d)
+			}
+			if got := adaptiveCard(d); !strings.Contains(fmt.Sprint(got), "n1") {
+				t.Errorf("card does not show the node id: %v", got)
+			}
+			if deliveries.all()[0].Status != StatusDelivered {
+				t.Errorf("delivery not delivered: %+v", deliveries.all()[0])
 			}
 		})
 	}

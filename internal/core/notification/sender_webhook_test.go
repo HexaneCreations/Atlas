@@ -200,3 +200,55 @@ func TestWebhookSenderNeverPutsTheURLInAnError(t *testing.T) {
 		t.Errorf("error leaked the url: %v", err)
 	}
 }
+
+func renderWebhook(t *testing.T, template string, d Delivery) []byte {
+	t.Helper()
+	var body []byte
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	sender := &WebhookSender{client: srv.Client()}
+	channel := Channel{Type: ChannelWebhook, Config: map[string]any{"template": template}}
+	if err := sender.Send(context.Background(), channel, webhookSecretJSON(t, srv.URL, nil), d); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	return body
+}
+
+func TestWebhookNodeJSONCarriesNameAndAddress(t *testing.T) {
+	t.Parallel()
+	d := Delivery{EventID: "evt-1", Kind: KindFiring, Trigger: TriggerContainerExit, NodeID: "node-3",
+		NodeName: "web-01", NodeAddress: "203.0.113.7", Title: "Container exited", Message: "m"}
+	body := renderWebhook(t, `{{.nodeJSON}}`, d)
+	if want := `{"node_id":"node-3","name":"web-01","address":"203.0.113.7"}`; string(body) != want {
+		t.Errorf("nodeJSON = %s, want %s", body, want)
+	}
+
+	d.NodeName, d.NodeAddress = "", ""
+	body = renderWebhook(t, `{{.nodeJSON}}`, d)
+	if want := `{"node_id":"node-3","name":"","address":""}`; string(body) != want {
+		t.Errorf("unresolved nodeJSON = %s, want %s", body, want)
+	}
+}
+
+// A template written against the old {"node_id"} shape still renders and
+// still finds node_id.
+func TestWebhookTemplateUsingOnlyOldNodeFieldsStillRenders(t *testing.T) {
+	t.Parallel()
+	d := Delivery{EventID: "evt-1", Kind: KindFiring, Trigger: TriggerRAMPct, NodeID: "node-3",
+		NodeName: "web-01", Title: "RAM usage warning", Message: "RAM is at 92.0%"}
+	body := renderWebhook(t, `{"text": {{.msg}}, "node": {{.nodeJSON}}, "rule": {{.ruleJSON}}}`, d)
+	var decoded struct {
+		Text string            `json:"text"`
+		Node map[string]string `json:"node"`
+		Rule map[string]string `json:"rule"`
+	}
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		t.Fatalf("body is not JSON: %v\n%s", err, body)
+	}
+	if decoded.Text != d.Message || decoded.Node["node_id"] != "node-3" || decoded.Rule["trigger"] != "ram_pct" {
+		t.Errorf("decoded = %+v", decoded)
+	}
+}

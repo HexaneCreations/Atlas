@@ -137,21 +137,21 @@ func (e *Evaluator) evaluateWorkloads(ctx context.Context, nodeID string, w *nod
 			trigger: TriggerContainerExit, severity: SeverityCritical, onChange: true,
 			family: w.up, window: StaleFactor * e.containerInterval,
 			judge: func(subject string, up MetricSample, b map[string]any) verdict {
-				return judgeContainerExit(nodeID, subject, up, w.exitCode, b)
+				return judgeContainerExit(subject, up, w.exitCode, b)
 			},
 		},
 		{
 			trigger: TriggerContainerRestart, severity: SeverityWarning, onChange: true,
 			family: w.restarts, window: StaleFactor * e.containerInterval,
 			judge: func(subject string, restarts MetricSample, b map[string]any) verdict {
-				return judgeContainerRestart(nodeID, subject, restarts, b)
+				return judgeContainerRestart(subject, restarts, b)
 			},
 		},
 		{
 			trigger: TriggerServiceFailed, severity: SeverityCritical,
 			family: w.units, window: StaleFactor * e.serviceInterval,
 			judge: func(subject string, up MetricSample, b map[string]any) verdict {
-				return judgeServiceFailed(nodeID, subject, up, b)
+				return judgeServiceFailed(subject, up, b)
 			},
 		},
 	} {
@@ -215,7 +215,7 @@ func (e *Evaluator) evaluateTrigger(ctx context.Context, t workloadTrigger, node
 			current, found = begun, true
 		}
 		e.evaluateSubjectWithTitle(ctx, rule, t.trigger, nodeID, subject, current, found, v.condition, v.value, severityOf, now,
-			func(Severity) (string, string) { return v.title, v.message }, track)
+			func(Kind, Severity) (string, string) { return v.title, v.message }, track)
 	}
 }
 
@@ -299,7 +299,7 @@ func trackSeenUp(up bool) func(map[string]any, StateKind) {
 	}
 }
 
-func judgeContainerExit(nodeID, subject string, up MetricSample, exitCodes map[string]MetricSample, b map[string]any) verdict {
+func judgeContainerExit(subject string, up MetricSample, exitCodes map[string]MetricSample, b map[string]any) verdict {
 	name := containerName(subject, up.Labels)
 	v := verdict{title: "Container exited", track: trackSeenUp(up.Value != 0)}
 
@@ -307,11 +307,11 @@ func judgeContainerExit(nodeID, subject string, up MetricSample, exitCodes map[s
 	switch {
 	case exited:
 		v.condition, v.value = seenUp(b), &code
-		v.message = fmt.Sprintf("%s on %s exited with code %s", name, nodeID, exitCodeText(int(code)))
+		v.message = fmt.Sprintf("%s exited with code %s", name, exitCodeText(int(code)))
 	case up.Value != 0:
-		v.message = fmt.Sprintf("%s on %s is running", name, nodeID)
+		v.message = fmt.Sprintf("%s is running", name)
 	default:
-		v.message = fmt.Sprintf("%s on %s is stopped with no error exit code", name, nodeID)
+		v.message = fmt.Sprintf("%s is stopped with no error exit code", name)
 	}
 	return v
 }
@@ -333,18 +333,18 @@ func containerExited(subject string, up MetricSample, exitCodes map[string]Metri
 	return exit.Value, true
 }
 
-func judgeContainerRestart(nodeID, subject string, restarts MetricSample, b map[string]any) verdict {
+func judgeContainerRestart(subject string, restarts MetricSample, b map[string]any) verdict {
 	name := containerName(subject, restarts.Labels)
 	total := restarts.Value
 	last, known := b[baselineLastRestarts].(float64)
 	v := verdict{
 		title: "Container restarted", value: &total,
-		message:   fmt.Sprintf("%s on %s has not restarted again (%.0f in total)", name, nodeID, total),
+		message:   fmt.Sprintf("%s has not restarted again (%.0f in total)", name, total),
 		condition: known && total > last,
 	}
 	if v.condition {
-		v.message = fmt.Sprintf("%s on %s restarted %.0f time(s) since the previous observation (%.0f in total)",
-			name, nodeID, total-last, total)
+		v.message = fmt.Sprintf("%s restarted %.0f time(s) since the previous observation (%.0f in total)",
+			name, total-last, total)
 	}
 	v.track = func(b map[string]any, next StateKind) {
 		// While pending, the increase has not been announced yet. Moving the
@@ -362,14 +362,14 @@ func judgeContainerRestart(nodeID, subject string, restarts MetricSample, b map[
 // cannot tell failed from stopped, inactive or never started. Requiring that
 // the unit was once observed up is what keeps units that are simply not meant
 // to run from alerting; a unit stopped on purpose still does.
-func judgeServiceFailed(nodeID, subject string, up MetricSample, b map[string]any) verdict {
+func judgeServiceFailed(subject string, up MetricSample, b map[string]any) verdict {
 	v := verdict{title: "Service down", track: trackSeenUp(up.Value != 0)}
 	if up.Value != 0 {
-		v.message = fmt.Sprintf("%s on %s is running", subject, nodeID)
+		v.message = fmt.Sprintf("service %s is running", subject)
 		return v
 	}
 	v.condition = seenUp(b)
-	v.message = fmt.Sprintf("%s on %s is not running (failed or stopped)", subject, nodeID)
+	v.message = fmt.Sprintf("service %s is not running (failed or stopped)", subject)
 	return v
 }
 

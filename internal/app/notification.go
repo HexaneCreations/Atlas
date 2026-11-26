@@ -58,15 +58,16 @@ func (p *notificationPipeline) Start(ctx context.Context) error {
 	}
 
 	repo := storagenotification.NewRepository(p.pool.DB(), p.key)
+	metricRepo := metric.NewRepository(p.pool.DB())
 	engine := corenotification.NewEngine(corenotification.Options{
 		Channels: repo, Deliveries: repo, Logger: p.logger,
+		NodeInfo: nodeInfoAdapter{repo: metricRepo},
 		Senders: map[corenotification.ChannelType]corenotification.Sender{
 			corenotification.ChannelTeams:   corenotification.NewTeamsSender(),
 			corenotification.ChannelWebhook: corenotification.NewWebhookSender(),
 		},
 	})
 
-	metricRepo := metric.NewRepository(p.pool.DB())
 	evaluator := corenotification.NewEvaluator(corenotification.EvaluatorOptions{
 		Rules: repo, States: repo, Notifier: engine, Logger: p.logger,
 		Nodes:       evaluatorNodeAdapter{repo: metricRepo},
@@ -152,6 +153,18 @@ func (a evaluatorNodeAdapter) ListNodes(ctx context.Context) ([]corenotification
 		})
 	}
 	return out, nil
+}
+
+// nodeInfoAdapter adapts [*metric.Repository] to [corenotification.
+// NodeInfoSource]: the node's hostname and its observed public address.
+type nodeInfoAdapter struct{ repo *metric.Repository }
+
+func (a nodeInfoAdapter) NodeInfo(ctx context.Context, nodeID string) (string, string, error) {
+	n, err := a.repo.GetNode(ctx, nodeID)
+	if err != nil {
+		return "", "", err
+	}
+	return n.Hostname, n.PublicIP, nil
 }
 
 // evaluatorMetricAdapter adapts [*metric.Repository] to [corenotification.

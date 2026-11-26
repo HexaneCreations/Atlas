@@ -325,17 +325,21 @@ type Notification struct {
 
 // Delivery is one (event, channel) delivery record.
 type Delivery struct {
-	ID            string
-	EventID       string
-	ChannelID     string
-	ChannelType   ChannelType
-	Kind          Kind
-	Trigger       Trigger
-	NodeID        string
-	Subject       string
-	Severity      Severity
-	Title         string
-	Message       string
+	ID          string
+	EventID     string
+	ChannelID   string
+	ChannelType ChannelType
+	Kind        Kind
+	Trigger     Trigger
+	NodeID      string
+	Subject     string
+	Severity    Severity
+	Title       string
+	Message     string
+	// NodeName and NodeAddress are resolved by [Engine] just before Send
+	// and never stored; "" when unknown.
+	NodeName      string
+	NodeAddress   string
 	Status        Status
 	Attempts      int
 	NextAttemptAt time.Time

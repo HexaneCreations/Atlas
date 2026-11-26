@@ -52,6 +52,19 @@ type ChannelStore interface {
 	ChannelSecret(ctx context.Context, channelID string) (string, error)
 }
 
+// NodeInfoSource resolves a node's display name and address for a
+// notification at send time. Nothing it returns is stored: a retry
+// resolves again.
+type NodeInfoSource interface {
+	// NodeInfo returns the node's hostname and observed address, either
+	// of which may be "". An unknown node is an error or empty values.
+	NodeInfo(ctx context.Context, nodeID string) (name, address string, err error)
+}
+
+// nodeInfoTimeout bounds one lookup so a slow database never holds a
+// claimed delivery's lease much longer than its send.
+const nodeInfoTimeout = 2 * time.Second
+
 // SweepResult reports what one [DeliveryStore.SweepDeliveries] call changed.
 type SweepResult struct {
 	// Deleted is how many finished (delivered or failed) rows were removed.
@@ -110,6 +123,7 @@ type Engine struct {
 	channels   ChannelStore
 	deliveries DeliveryStore
 	senders    map[ChannelType]Sender
+	nodeInfo   NodeInfoSource
 	logger     *slog.Logger
 
 	maxAttempts       int
@@ -139,7 +153,10 @@ type Options struct {
 	// registered sender fails its deliveries immediately with that fact as
 	// the error, rather than retrying something that can never succeed.
 	Senders map[ChannelType]Sender
-	Logger  *slog.Logger
+	// NodeInfo, when set, fills [Delivery.NodeName] and
+	// [Delivery.NodeAddress] just before each send.
+	NodeInfo NodeInfoSource
+	Logger   *slog.Logger
 
 	MaxAttempts      int
 	BackoffBase      time.Duration
@@ -185,7 +202,7 @@ func NewEngine(opts Options) *Engine {
 		opts.RetentionInterval = DefaultRetentionInterval
 	}
 	return &Engine{
-		channels: opts.Channels, deliveries: opts.Deliveries, senders: opts.Senders, logger: opts.Logger,
+		channels: opts.Channels, deliveries: opts.Deliveries, senders: opts.Senders, nodeInfo: opts.NodeInfo, logger: opts.Logger,
 		maxAttempts: opts.MaxAttempts, backoffBase: opts.BackoffBase, backoffMax: opts.BackoffMax,
 		dispatchInterval: opts.DispatchInterval, batchSize: opts.BatchSize, concurrency: opts.Concurrency,
 		lease: opts.Lease, retentionInterval: opts.RetentionInterval,
@@ -359,6 +376,8 @@ func (e *Engine) dispatchDue(ctx context.Context) {
 		return c, nil
 	}
 
+	nodes := newNodeInfoCache()
+
 	// Bounded by a buffered channel used as a semaphore: at most
 	// e.concurrency sends in flight at once, however large the claimed
 	// batch is. dispatchDue (and so Stop, which waits for Run, which waits
@@ -376,10 +395,58 @@ func (e *Engine) dispatchDue(ctx context.Context) {
 		go func(channel Channel, d Delivery) {
 			defer wg.Done()
 			defer func() { <-sem }()
+			e.resolveNode(ctx, &d, nodes)
 			_ = e.send(ctx, channel, d, e.fail)
 		}(channel, d)
 	}
 	wg.Wait()
+}
+
+// nodeInfoCache holds one dispatch batch's node lookups, so a batch that
+// names the same node many times queries it once, even concurrently.
+type nodeInfoCache struct {
+	mu    sync.Mutex
+	known map[string]*nodeInfoEntry
+}
+
+type nodeInfoEntry struct {
+	once          sync.Once
+	name, address string
+}
+
+func newNodeInfoCache() *nodeInfoCache { return &nodeInfoCache{known: map[string]*nodeInfoEntry{}} }
+
+func (c *nodeInfoCache) entry(nodeID string) *nodeInfoEntry {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	en, ok := c.known[nodeID]
+	if !ok {
+		en = &nodeInfoEntry{}
+		c.known[nodeID] = en
+	}
+	return en
+}
+
+// resolveNode fills d's node name and address. It never fails the
+// delivery: on any error the fields stay empty and the sender falls back
+// to the node id.
+func (e *Engine) resolveNode(ctx context.Context, d *Delivery, cache *nodeInfoCache) {
+	if e.nodeInfo == nil || d.NodeID == "" {
+		return
+	}
+	en := cache.entry(d.NodeID)
+	en.once.Do(func() {
+		lookupCtx, cancel := context.WithTimeout(ctx, nodeInfoTimeout)
+		defer cancel()
+		name, address, err := e.nodeInfo.NodeInfo(lookupCtx, d.NodeID)
+		if err != nil {
+			e.logger.DebugContext(ctx, "could not resolve a notification's node; sending with its id",
+				slog.String("node_id", d.NodeID), slog.String("error", Redact(err.Error())))
+			return
+		}
+		en.name, en.address = name, address
+	})
+	d.NodeName, d.NodeAddress = en.name, en.address
 }
 
 // send attempts one delivery against its already-resolved channel: looks

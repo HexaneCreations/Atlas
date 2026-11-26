@@ -3,6 +3,7 @@ package notification
 import (
 	"context"
 	"errors"
+	"time"
 )
 
 // DraftTest is a validated, not yet sent, test of a channel that may never
@@ -33,7 +34,7 @@ func (d *DraftTest) Send(ctx context.Context) SendTestOutcome {
 	if err == nil {
 		n := testNotification(d.channel.Name)
 		err = d.sender.Send(ctx, d.channel, d.secret, Delivery{
-			EventID: n.EventID, Kind: n.Kind, ChannelType: d.channel.Type, Title: n.Title, Message: n.Message,
+			EventID: n.EventID, Kind: n.Kind, ChannelType: d.channel.Type, Title: n.Title, Message: n.Message, CreatedAt: time.Now(),
 		})
 	}
 	if err != nil {

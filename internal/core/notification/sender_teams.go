@@ -46,37 +46,90 @@ func (s TeamsSecret) Masked() map[string]any {
 	return map[string]any{"url": maskURL(s.URL)}
 }
 
-// adaptiveCard builds the small, plain card the brief asks for: severity,
-// trigger, node and subject as facts, then the delivery's own rendered
-// title and message as the card body.
+// cardTimeFormat is how the card shows a delivery's time.
+const cardTimeFormat = "2006-01-02 15:04 UTC"
+
+// adaptiveCard builds a small, plain Adaptive Card 1.4: a kind-aware,
+// coloured title, the facts the delivery carries (any empty one left
+// out), then the rendered message.
 //
 // Delivery carries no separate "value" or "since" field — those live on
-// the evaluator's [State] (Value, ConditionSince), which a [Sender] never
-// sees, only the rendered [Delivery.Title] and [Delivery.Message] it
-// produced from them. So "value and since-when" reach the card only
-// insofar as whatever builds the Notification already wrote them into
-// Title or Message — this sender does not fabricate a value fact from
-// data it was not given.
+// the evaluator's [State], which a [Sender] never sees — so they reach the
+// card only as far as the evaluator wrote them into the message.
 func adaptiveCard(d Delivery) map[string]any {
-	facts := []map[string]any{
-		{"title": "Severity", "value": string(d.Severity)},
-		{"title": "Trigger", "value": string(d.Trigger)},
-		{"title": "Node", "value": d.NodeID},
+	var facts []map[string]any
+	addFact := func(title, value string) {
+		if value != "" {
+			facts = append(facts, map[string]any{"title": title, "value": value})
+		}
 	}
-	if d.Subject != "" {
-		facts = append(facts, map[string]any{"title": "Subject", "value": d.Subject})
+	addFact("Severity", string(d.Severity))
+	addFact("Trigger", string(d.Trigger))
+	addFact("Node", nodeLabel(d.NodeID, d.NodeName))
+	addFact("Address", d.NodeAddress)
+	addFact("Subject", d.Subject)
+	if !d.CreatedAt.IsZero() {
+		addFact("Time", d.CreatedAt.UTC().Format(cardTimeFormat))
 	}
-	body := []map[string]any{
-		{"type": "TextBlock", "text": d.Title, "weight": "Bolder", "size": "Medium", "wrap": true},
-		{"type": "FactSet", "facts": facts},
-		{"type": "TextBlock", "text": d.Message, "wrap": true},
+
+	title := map[string]any{"type": "TextBlock", "text": cardTitle(d), "weight": "Bolder", "size": "Medium", "wrap": true}
+	if c := cardTitleColor(d); c != "" {
+		title["color"] = c
 	}
+	body := []map[string]any{title}
+	if len(facts) > 0 {
+		body = append(body, map[string]any{"type": "FactSet", "facts": facts})
+	}
+	body = append(body, map[string]any{"type": "TextBlock", "text": d.Message, "wrap": true})
 	return map[string]any{
 		"$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
 		"type":    "AdaptiveCard",
 		"version": "1.4",
 		"body":    body,
 	}
+}
+
+// nodeLabel names a node for a reader: its hostname with a short id, or
+// the full id when no name is known.
+func nodeLabel(nodeID, name string) string {
+	if name == "" || nodeID == "" {
+		return nodeID
+	}
+	const short = 8
+	if len(nodeID) <= short {
+		return fmt.Sprintf("%s (%s)", name, nodeID)
+	}
+	return fmt.Sprintf("%s (%s…)", name, nodeID[:short])
+}
+
+func cardTitle(d Delivery) string {
+	switch d.Kind {
+	case KindEscalated:
+		return "Escalated: " + d.Title
+	case KindRecovered:
+		return "Recovered: " + d.Title
+	case KindFlapping:
+		return "Flapping: " + d.Title
+	default:
+		return d.Title
+	}
+}
+
+// cardTitleColor is the title's Adaptive Card colour; "" keeps the default.
+func cardTitleColor(d Delivery) string {
+	switch d.Kind {
+	case KindRecovered:
+		return "Good"
+	case KindTest, KindFlapping:
+		return ""
+	}
+	switch d.Severity {
+	case SeverityCritical:
+		return "Attention"
+	case SeverityWarning:
+		return "Warning"
+	}
+	return ""
 }
 
 // teamsEnvelope is the message Teams Workflows expects a webhook POST to

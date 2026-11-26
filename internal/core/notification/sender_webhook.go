@@ -27,12 +27,11 @@ type WebhookConfig struct {
 	// {"text": {{.msg}}, "event": {{.eventJSON}}} with no extra quoting or
 	// escaping of its own.
 	//
-	// nodeJSON and ruleJSON are limited to what a [Delivery] actually
-	// carries: {"node_id": "..."} and {"trigger": "..."}. The full Node
-	// and Rule rows are not available at Send time (Sender.Send receives a
-	// Delivery, not a joined Node or RuleSpec) — enriching these would mean
-	// changing what the dispatcher passes to Send, which is step 8's
-	// concern, not this sender's.
+	// nodeJSON is {"node_id": "...", "name": "...", "address": "..."}:
+	// name is the node's hostname and address its observed public
+	// address, both resolved at send time and "" when unknown (or for a
+	// test). ruleJSON is {"trigger": "..."}. The full Node and Rule rows
+	// are not available at Send time.
 	Template    string
 	ContentType string
 }
@@ -153,6 +152,13 @@ type webhookEvent struct {
 	Message  string `json:"message"`
 }
 
+// webhookNode is the nodeJSON template variable.
+type webhookNode struct {
+	NodeID  string `json:"node_id"`
+	Name    string `json:"name"`
+	Address string `json:"address"`
+}
+
 // jsonFragment marshals v and returns it as a string, ready to embed
 // literally in a template's output (a JSON string literal for a Go
 // string, an object literal for a struct or map). Marshal failure on these
@@ -214,7 +220,7 @@ func (s *WebhookSender) Send(ctx context.Context, channel Channel, secret string
 	if err != nil {
 		return fmt.Errorf("encode eventJSON: %w", err)
 	}
-	nodeJSON, err := jsonFragment(map[string]string{"node_id": d.NodeID})
+	nodeJSON, err := jsonFragment(webhookNode{NodeID: d.NodeID, Name: d.NodeName, Address: d.NodeAddress})
 	if err != nil {
 		return fmt.Errorf("encode nodeJSON: %w", err)
 	}

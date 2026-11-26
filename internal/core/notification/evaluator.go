@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 )
@@ -399,8 +400,14 @@ func (e *Evaluator) evaluateNodeDown(ctx context.Context, n EvalNode, now time.T
 
 	conditionTrue := now.Sub(n.LastSeenAt) > NodeDownAfter
 	always := func(*float64) Severity { return SeverityCritical }
+	silent := now.Sub(n.LastSeenAt)
 	next := e.evaluateSubject(ctx, rule, TriggerNodeDown, n.NodeID, "", conditionTrue, nil, always, now,
-		"Node unreachable", fmt.Sprintf("node %s has not reported for over %s", n.NodeID, NodeDownAfter))
+		func(kind Kind, _ Severity) (string, string) {
+			if kind == KindRecovered {
+				return "Node unreachable", "the node is reporting again"
+			}
+			return "Node unreachable", "the node has not reported for " + silenceText(silent)
+		})
 	return next == StateFiring
 }
 
@@ -423,8 +430,8 @@ func (e *Evaluator) evaluateDisk(ctx context.Context, nodeID string, samples []M
 			continue
 		}
 		e.evaluateThreshold(ctx, rule, TriggerDiskPct, nodeID, mountpoint, s.Value, now,
-			func(sev Severity) (string, string) {
-				return "Disk usage " + string(sev), fmt.Sprintf("%s on %s is at %.1f%%", mountpoint, nodeID, s.Value)
+			func(_ Kind, sev Severity) (string, string) {
+				return "Disk usage " + string(sev), fmt.Sprintf("%s is at %.1f%%", mountpoint, s.Value)
 			})
 	}
 }
@@ -439,8 +446,8 @@ func (e *Evaluator) evaluateRAM(ctx context.Context, nodeID string, value float6
 		return
 	}
 	e.evaluateThreshold(ctx, rule, TriggerRAMPct, nodeID, "", value, now,
-		func(sev Severity) (string, string) {
-			return "RAM usage " + string(sev), fmt.Sprintf("%s is at %.1f%%", nodeID, value)
+		func(_ Kind, sev Severity) (string, string) {
+			return "RAM usage " + string(sev), fmt.Sprintf("RAM is at %.1f%%", value)
 		})
 }
 
@@ -453,7 +460,7 @@ func (e *Evaluator) evaluateRAM(ctx context.Context, nodeID string, value float6
 // margin" lines ask for.
 func (e *Evaluator) evaluateThreshold(
 	ctx context.Context, rule Rule, trigger Trigger, nodeID, subject string, value float64, now time.Time,
-	titleMessage func(Severity) (string, string),
+	titleMessage func(Kind, Severity) (string, string),
 ) {
 	current, found, err := e.states.GetState(ctx, trigger, nodeID, subject)
 	if err != nil {
@@ -498,11 +505,11 @@ func thresholdSeverity(value float64, rule Rule, current Severity) Severity {
 	return SeverityWarning
 }
 
-// evaluateSubject is node_down's entry point: no stored value, a fixed
-// severity, and a title/message built from the node id alone.
+// evaluateSubject is node_down's entry point: no stored value and a fixed
+// severity.
 func (e *Evaluator) evaluateSubject(
 	ctx context.Context, rule Rule, trigger Trigger, nodeID, subject string, conditionTrue bool, value *float64,
-	severityOf func(*float64) Severity, now time.Time, title, message string,
+	severityOf func(*float64) Severity, now time.Time, titleMessage func(Kind, Severity) (string, string),
 ) StateKind {
 	current, found, err := e.states.GetState(ctx, trigger, nodeID, subject)
 	if err != nil {
@@ -511,7 +518,7 @@ func (e *Evaluator) evaluateSubject(
 		return StateOK // unknown; never suppress on the strength of an error we could not even read past
 	}
 	return e.evaluateSubjectWithTitle(ctx, rule, trigger, nodeID, subject, current, found, conditionTrue, value,
-		severityOf, now, func(Severity) (string, string) { return title, message }, nil)
+		severityOf, now, titleMessage, nil)
 }
 
 // evaluateSubjectWithTitle runs the shared state machine (computeTransition)
@@ -526,7 +533,7 @@ func (e *Evaluator) evaluateSubject(
 func (e *Evaluator) evaluateSubjectWithTitle(
 	ctx context.Context, rule Rule, trigger Trigger, nodeID, subject string, current State, found bool,
 	conditionTrue bool, value *float64, severityOf func(*float64) Severity, now time.Time,
-	titleMessage func(Severity) (string, string), track func(StateKind) map[string]any,
+	titleMessage func(Kind, Severity) (string, string), track func(StateKind) map[string]any,
 ) StateKind {
 	next, kind, notifySeverity := computeTransition(rule, current, found, conditionTrue, value, severityOf, now)
 	next.Trigger, next.NodeID, next.Subject = trigger, nodeID, subject
@@ -539,7 +546,7 @@ func (e *Evaluator) evaluateSubjectWithTitle(
 		save = !sameState(current, next)
 	}
 	if kind != "" {
-		title, message := titleMessage(notifySeverity)
+		title, message := titleMessage(kind, notifySeverity)
 		n := Notification{
 			// current, not next: see eventAnchor and the fix-round report's
 			// item 1 for why the id must be built only from a timestamp this
@@ -581,11 +588,27 @@ func (e *Evaluator) evaluateSubjectWithTitle(
 			slog.String("trigger", string(trigger)), slog.String("node_id", nodeID))
 		return current.State
 	}
-	if next.State != current.State {
-		e.logger.InfoContext(ctx, "notification state transition",
-			slog.String("trigger", string(trigger)), slog.String("node_id", nodeID), slog.String("state", string(next.State)))
+	// A first observation that lands in ok is a baseline, not a transition.
+	changed := next.State != current.State
+	if !found {
+		changed = next.State != StateOK
 	}
+	level := slog.LevelDebug
+	if changed || kind != "" {
+		level = slog.LevelInfo
+	}
+	e.logger.Log(ctx, level, "notification state transition",
+		slog.String("trigger", string(trigger)), slog.String("node_id", nodeID), slog.String("state", string(next.State)))
 	return next.State
+}
+
+// silenceText is how long a node has been silent, to the minute once it
+// is a minute or more.
+func silenceText(d time.Duration) string {
+	if d < time.Minute {
+		return d.Truncate(time.Second).String()
+	}
+	return strings.TrimSuffix(d.Truncate(time.Minute).String(), "0s")
 }
 
 // computeTransition is the state machine itself, with no I/O: given the

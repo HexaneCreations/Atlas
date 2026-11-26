@@ -121,10 +121,9 @@ func TestContainerExitNonZeroFiresOnceAndRecovers(t *testing.T) {
 	if n.Trigger != TriggerContainerExit || n.Subject != "web" || n.Severity != SeverityCritical {
 		t.Errorf("notification = %+v", n)
 	}
-	for _, want := range []string{"web", "project shop", "service svc-web", "137", "killed"} {
-		if !strings.Contains(n.Message, want) {
-			t.Errorf("message %q lacks %q", n.Message, want)
-		}
+	if want := "container web (compose project shop, service svc-web) exited with code 137 " +
+		"(killed: usually out of memory or a stop timeout)"; n.Message != want {
+		t.Errorf("message = %q, want %q (the node is its own field)", n.Message, want)
 	}
 
 	h.ticks(10) // still down
@@ -137,7 +136,7 @@ func TestContainerExitNonZeroFiresOnceAndRecovers(t *testing.T) {
 	h.wantKinds(KindFiring)
 	h.tick()
 	h.wantKinds(KindFiring, KindRecovered)
-	if msg := h.notifier.all()[1].Message; !strings.Contains(msg, "is running") {
+	if msg := h.notifier.all()[1].Message; msg != "container web (compose project shop, service svc-web) is running" {
 		t.Errorf("recovered message = %q, want it to say the container is running", msg)
 	}
 	h.wantState(TriggerContainerExit, "web", StateOK)
@@ -243,8 +242,8 @@ func TestContainerRestartIncreaseFiresOnceAndRecovers(t *testing.T) {
 	h.tick()
 	h.wantKinds(KindFiring)
 	n := h.notifier.all()[0]
-	if n.Severity != SeverityWarning || !strings.Contains(n.Message, "restarted 2 time(s)") || !strings.Contains(n.Message, "5 in total") {
-		t.Errorf("notification = %+v", n)
+	if want := "container web (compose project shop, service svc-web) restarted 2 time(s) since the previous observation (5 in total)"; n.Severity != SeverityWarning || n.Message != want {
+		t.Errorf("notification = %+v, want message %q", n, want)
 	}
 	h.tick() // no further increase
 	h.wantState(TriggerContainerRestart, "web", StateRecovering)
@@ -366,7 +365,8 @@ func TestServiceFailedHoldFireAndRecover(t *testing.T) {
 	h.wantState(TriggerServiceFailed, "nginx.service", StatePending)
 	h.tick() // 300s
 	h.wantKinds(KindFiring)
-	if n := h.notifier.all()[0]; n.Trigger != TriggerServiceFailed || n.Subject != "nginx.service" || n.Severity != SeverityCritical {
+	if n := h.notifier.all()[0]; n.Trigger != TriggerServiceFailed || n.Subject != "nginx.service" || n.Severity != SeverityCritical ||
+		n.Message != "service nginx.service is not running (failed or stopped)" {
 		t.Errorf("notification = %+v", n)
 	}
 	h.units["nginx.service"] = 1

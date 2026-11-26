@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // allowTestServerHost temporarily allowlists host (an httptest server's
@@ -209,5 +210,191 @@ func TestTeamsSenderNeverPutsTheURLInAnError(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), sig) || strings.Contains(err.Error(), "workflows/abcd1234") {
 		t.Errorf("error leaked the url: %v", err)
+	}
+}
+
+func cardJSON(t *testing.T, d Delivery) string {
+	t.Helper()
+	b, err := json.MarshalIndent(adaptiveCard(d), "", "  ")
+	if err != nil {
+		t.Fatalf("marshal card: %v", err)
+	}
+	return string(b)
+}
+
+func containerExitDelivery() Delivery {
+	return Delivery{
+		EventID: "evt-1", Kind: KindFiring, Trigger: TriggerContainerExit,
+		NodeID: "b53fd026994b1bf7c0ffee0123456789", NodeName: "web-01", NodeAddress: "203.0.113.7",
+		Subject: "atlas-alert-test", Severity: SeverityCritical, Title: "Container exited",
+		Message:   "container atlas-alert-test exited with code 137 (killed: usually out of memory or a stop timeout)",
+		CreatedAt: time.Date(2026, 11, 26, 9, 41, 7, 0, time.FixedZone("IST", 5*3600+1800)),
+	}
+}
+
+func TestAdaptiveCardFiringContainerExitGolden(t *testing.T) {
+	t.Parallel()
+	want := `{
+  "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+  "body": [
+    {
+      "color": "Attention",
+      "size": "Medium",
+      "text": "Container exited",
+      "type": "TextBlock",
+      "weight": "Bolder",
+      "wrap": true
+    },
+    {
+      "facts": [
+        {
+          "title": "Severity",
+          "value": "critical"
+        },
+        {
+          "title": "Trigger",
+          "value": "container_exit"
+        },
+        {
+          "title": "Node",
+          "value": "web-01 (b53fd026…)"
+        },
+        {
+          "title": "Address",
+          "value": "203.0.113.7"
+        },
+        {
+          "title": "Subject",
+          "value": "atlas-alert-test"
+        },
+        {
+          "title": "Time",
+          "value": "2026-11-26 04:11 UTC"
+        }
+      ],
+      "type": "FactSet"
+    },
+    {
+      "text": "container atlas-alert-test exited with code 137 (killed: usually out of memory or a stop timeout)",
+      "type": "TextBlock",
+      "wrap": true
+    }
+  ],
+  "type": "AdaptiveCard",
+  "version": "1.4"
+}`
+	if got := cardJSON(t, containerExitDelivery()); got != want {
+		t.Errorf("card =\n%s\nwant\n%s", got, want)
+	}
+}
+
+func TestAdaptiveCardTestNotificationGolden(t *testing.T) {
+	t.Parallel()
+	n := testNotification("ops")
+	d := Delivery{EventID: n.EventID, Kind: n.Kind, ChannelType: ChannelTeams, Title: n.Title, Message: n.Message,
+		CreatedAt: time.Date(2026, 11, 26, 4, 11, 0, 0, time.UTC)}
+	want := `{
+  "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+  "body": [
+    {
+      "size": "Medium",
+      "text": "Atlas test notification",
+      "type": "TextBlock",
+      "weight": "Bolder",
+      "wrap": true
+    },
+    {
+      "facts": [
+        {
+          "title": "Time",
+          "value": "2026-11-26 04:11 UTC"
+        }
+      ],
+      "type": "FactSet"
+    },
+    {
+      "text": "This is a test of the \"ops\" notification channel.",
+      "type": "TextBlock",
+      "wrap": true
+    }
+  ],
+  "type": "AdaptiveCard",
+  "version": "1.4"
+}`
+	if got := cardJSON(t, d); got != want {
+		t.Errorf("card =\n%s\nwant\n%s", got, want)
+	}
+
+	// With no time either, the card has no FactSet at all, never empty rows.
+	d.CreatedAt = time.Time{}
+	if got := cardJSON(t, d); strings.Contains(got, "FactSet") {
+		t.Errorf("a card with no facts still has a FactSet:\n%s", got)
+	}
+}
+
+func cardFacts(t *testing.T, d Delivery) map[string]string {
+	t.Helper()
+	out := map[string]string{}
+	for _, block := range adaptiveCard(d)["body"].([]map[string]any) {
+		if block["type"] != "FactSet" {
+			continue
+		}
+		for _, f := range block["facts"].([]map[string]any) {
+			title, value := f["title"].(string), f["value"].(string)
+			if value == "" {
+				t.Errorf("fact %q has an empty value", title)
+			}
+			out[title] = value
+		}
+	}
+	return out
+}
+
+func TestAdaptiveCardNodeFallbackAndOptionalFacts(t *testing.T) {
+	t.Parallel()
+	d := containerExitDelivery()
+	d.NodeName, d.NodeAddress, d.Subject = "", "", ""
+	facts := cardFacts(t, d)
+	if facts["Node"] != d.NodeID {
+		t.Errorf("Node = %q, want the full id %q when no name is known", facts["Node"], d.NodeID)
+	}
+	for _, absent := range []string{"Address", "Subject"} {
+		if _, ok := facts[absent]; ok {
+			t.Errorf("fact %q present with no value", absent)
+		}
+	}
+
+	d.NodeName = "db"
+	if got := cardFacts(t, d)["Node"]; got != "db (b53fd026…)" {
+		t.Errorf("Node = %q, want the name with the short id", got)
+	}
+	d.NodeAddress = "198.51.100.4"
+	if got := cardFacts(t, d)["Address"]; got != "198.51.100.4" {
+		t.Errorf("Address = %q", got)
+	}
+}
+
+func TestAdaptiveCardTitleAndColourFollowKind(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		kind      Kind
+		severity  Severity
+		wantTitle string
+		wantColor any
+	}{
+		{KindFiring, SeverityCritical, "Container exited", "Attention"},
+		{KindFiring, SeverityWarning, "Container exited", "Warning"},
+		{KindEscalated, SeverityCritical, "Escalated: Container exited", "Attention"},
+		{KindRecovered, SeverityCritical, "Recovered: Container exited", "Good"},
+		{KindFlapping, SeverityCritical, "Flapping: Container exited", nil},
+		{KindTest, "", "Container exited", nil},
+	} {
+		d := containerExitDelivery()
+		d.Kind, d.Severity = tc.kind, tc.severity
+		title := adaptiveCard(d)["body"].([]map[string]any)[0]
+		if title["text"] != tc.wantTitle || title["color"] != tc.wantColor {
+			t.Errorf("%s/%s: title %q colour %v, want %q colour %v",
+				tc.kind, tc.severity, title["text"], title["color"], tc.wantTitle, tc.wantColor)
+		}
 	}
 }

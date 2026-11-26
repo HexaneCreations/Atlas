@@ -3,8 +3,10 @@ package notification
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"maps"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -1172,5 +1174,154 @@ func TestEvaluatorUnreadableRuleOrEmptyNodeNeverErrors(t *testing.T) {
 
 	if len(h.notifier.all()) != 0 {
 		t.Errorf("sent %d notifications with no rules configured, want 0", len(h.notifier.all()))
+	}
+}
+
+const longNodeID = "b53fd026994b1bf7c0ffee0123456789"
+
+// runUntil ticks the harness every minute, keeping the node seen when seen
+// is true and publishing whatever publish sets, until want notifications
+// have been sent in total.
+func runUntil(t *testing.T, h *evalHarness, seen bool, publish func(now time.Time), want int) []Notification {
+	t.Helper()
+	for range 30 {
+		if seen {
+			h.nodes.mu.Lock()
+			h.nodes.nodes[longNodeID].LastSeenAt = h.clock.now()
+			h.nodes.mu.Unlock()
+		}
+		publish(h.clock.now())
+		h.eval.EvaluateOnce(context.Background())
+		if got := h.notifier.all(); len(got) >= want {
+			return got
+		}
+		h.clock.advance(time.Minute)
+	}
+	t.Fatalf("sent %d notifications, want %d", len(h.notifier.all()), want)
+	return nil
+}
+
+func TestEvaluatorMessagesDoNotRepeatTheNodeID(t *testing.T) {
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	node := []EvalNode{{NodeID: longNodeID, LastSeenAt: start}}
+	none := func(time.Time) {}
+
+	t.Run("disk", func(t *testing.T) {
+		h := newHarness(t, node, "")
+		value := 95.0
+		publish := func(now time.Time) {
+			h.metrics.set(MetricDiskUsage, []MetricSample{diskSample(longNodeID, "/var", value, now)})
+		}
+		fired := runUntil(t, h, true, publish, 1)
+		value = 10
+		sent := runUntil(t, h, true, publish, 2)
+		wantMessages(t, sent, fired[0], "/var is at 95.0%", "/var is at 10.0%")
+	})
+	t.Run("ram", func(t *testing.T) {
+		h := newHarness(t, node, "")
+		value := 90.0
+		publish := func(now time.Time) { h.metrics.set(MetricRAMUsage, []MetricSample{ramSample(longNodeID, value, now)}) }
+		fired := runUntil(t, h, true, publish, 1)
+		value = 10
+		sent := runUntil(t, h, true, publish, 2)
+		wantMessages(t, sent, fired[0], "RAM is at 90.0%", "RAM is at 10.0%")
+	})
+	t.Run("node_down", func(t *testing.T) {
+		h := newHarness(t, node, "")
+		fired := runUntil(t, h, false, none, 1)
+		if fired[0].Title != "Node unreachable" {
+			t.Errorf("title = %q", fired[0].Title)
+		}
+		sent := runUntil(t, h, true, none, 2)
+		// The condition holds after 2m silent, then 8m more: 11m at the
+		// minute it fires.
+		wantMessages(t, sent, fired[0], "the node has not reported for 11m", "the node is reporting again")
+	})
+}
+
+func wantMessages(t *testing.T, sent []Notification, fired Notification, firing, recovered string) {
+	t.Helper()
+	if len(sent) != 2 || sent[1].Kind != KindRecovered {
+		t.Fatalf("sent = %+v, want a firing then a recovered", sent)
+	}
+	if fired.Message != firing || sent[1].Message != recovered {
+		t.Errorf("messages = %q / %q, want %q / %q", fired.Message, sent[1].Message, firing, recovered)
+	}
+	for _, n := range sent {
+		if strings.Contains(n.Message, longNodeID) || strings.Contains(n.Title, longNodeID) {
+			t.Errorf("notification repeats the node id: %+v", n)
+		}
+		if n.NodeID != longNodeID {
+			t.Errorf("NodeID = %q, want the node as its own field", n.NodeID)
+		}
+	}
+}
+
+func TestSilenceText(t *testing.T) {
+	t.Parallel()
+	for d, want := range map[time.Duration]string{
+		40 * time.Second:                        "40s",
+		45*time.Second + time.Millisecond:       "45s",
+		11*time.Minute + 30*time.Second:         "11m",
+		time.Hour + 5*time.Minute + time.Second: "1h5m",
+	} {
+		if got := silenceText(d); got != want {
+			t.Errorf("silenceText(%s) = %q, want %q", d, got, want)
+		}
+	}
+}
+
+// recordingHandler keeps every log record for inspection.
+type recordingHandler struct {
+	mu      sync.Mutex
+	records []slog.Record
+}
+
+func (h *recordingHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h *recordingHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.records = append(h.records, r)
+	return nil
+}
+func (h *recordingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *recordingHandler) WithGroup(string) slog.Handler      { return h }
+
+func (h *recordingHandler) transitionsAt(level slog.Level) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	n := 0
+	for _, r := range h.records {
+		if r.Message == "notification state transition" && r.Level == level {
+			n++
+		}
+	}
+	return n
+}
+
+func TestBaselineWritesDoNotLogTransitionsAtInfo(t *testing.T) {
+	h := newWorkloadHarness(t)
+	logs := &recordingHandler{}
+	h.eval = NewEvaluator(EvaluatorOptions{
+		Rules: h.rules, States: h.states, Nodes: h.nodes, Metrics: h.metrics, Notifier: h.notifier,
+		Now: h.clock.now, Logger: slog.New(logs),
+		ContainerCollectorInterval: 30 * time.Second, ServiceCollectorInterval: 60 * time.Second,
+	})
+	h.containers["web"] = fakeContainer{up: 1}
+
+	h.tick()
+	h.tick()
+	if got := logs.transitionsAt(slog.LevelInfo); got != 0 {
+		t.Fatalf("baseline ticks logged %d transitions at INFO, want 0", got)
+	}
+	if logs.transitionsAt(slog.LevelDebug) == 0 {
+		t.Error("baseline writes were not logged at DEBUG")
+	}
+
+	h.containers["web"] = fakeContainer{up: 0, exitCode: 137}
+	h.tick()
+	h.wantKinds(KindFiring)
+	if got := logs.transitionsAt(slog.LevelInfo); got == 0 {
+		t.Error("a real firing transition was not logged at INFO")
 	}
 }
