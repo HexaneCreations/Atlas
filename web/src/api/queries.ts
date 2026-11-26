@@ -1,4 +1,11 @@
-import { keepPreviousData, useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  keepPreviousData,
+  useMutation,
+  useQueries,
+  useQuery,
+  useQueryClient,
+  type QueryClient,
+} from "@tanstack/react-query";
 import {
   ApiError,
   apiGet,
@@ -28,11 +35,16 @@ import {
   revokeRole,
   revokeRoleAccess,
   unmuteNodeAlerts,
+  fetchNodeAlertRules,
+  resetNodeAlertRule,
+  setNodeAlertRule,
   updateNotificationChannel,
 } from "./client";
 import { emptyArray } from "./empty";
 import { useSelectedNodeID } from "../lib/selectedNode";
+import { applyOverride } from "../lib/alertRules";
 import type {
+  ListNodeAlertRulesResponse,
   PutUserAccessRequest,
   UserAccessResponse,
   CollectorsResponse,
@@ -800,6 +812,52 @@ export function useMuteNode() {
     },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: nodeKeys.all, exact: true }),
   });
+}
+
+export const nodeAlertRuleKeys = {
+  node: (nodeID: string) => ["node-alert-rules", nodeID] as const,
+};
+
+/** Every catalog alert rule with its effective value on one node. */
+export function useNodeAlertRules(nodeID: string) {
+  return useQuery({
+    queryKey: nodeAlertRuleKeys.node(nodeID),
+    queryFn: ({ signal }) => fetchNodeAlertRules(nodeID, signal),
+  });
+}
+
+/** The mutation behind [useSetNodeAlertRule], separate so it can be
+ *  exercised against a bare QueryClient. */
+export function nodeAlertRuleMutation(queryClient: QueryClient, nodeID: string) {
+  const key = nodeAlertRuleKeys.node(nodeID);
+  return {
+    mutationFn: async ({ ruleKey, override }: { ruleKey: string; override: boolean | null }) => {
+      if (override === null) await resetNodeAlertRule(nodeID, ruleKey);
+      else await setNodeAlertRule(nodeID, ruleKey, override);
+    },
+    onMutate: async ({ ruleKey, override }: { ruleKey: string; override: boolean | null }) => {
+      await queryClient.cancelQueries({ queryKey: key });
+      const previous = queryClient.getQueryData<ListNodeAlertRulesResponse>(key);
+      if (previous) {
+        queryClient.setQueryData<ListNodeAlertRulesResponse>(key, {
+          ...previous,
+          rules: previous.rules.map((r) => (r.key === ruleKey ? applyOverride(r, override) : r)),
+        });
+      }
+      return { previous };
+    },
+    onError: (_error: unknown, _vars: unknown, context: { previous: ListNodeAlertRulesResponse | undefined } | undefined) => {
+      if (context?.previous) queryClient.setQueryData(key, context.previous);
+    },
+    onSettled: () => queryClient.invalidateQueries({ queryKey: key }),
+  };
+}
+
+/** Sets (true/false) or clears (null) one rule's override on a node. The
+ *  list updates at once and is put back if the server refuses. */
+export function useSetNodeAlertRule(nodeID: string) {
+  const queryClient = useQueryClient();
+  return useMutation(nodeAlertRuleMutation(queryClient, nodeID));
 }
 
 // ------------------------------------------------- Fleet: install codes ----

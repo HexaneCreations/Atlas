@@ -130,6 +130,9 @@ type Deps struct {
 	// NodeAlerts mutes and archives nodes. It needs no encryption key. Nil
 	// makes its endpoints answer 503.
 	NodeAlerts NodeAlertStore
+	// NodeAlertRules enables and disables alert rules per node. Nil makes
+	// its endpoints answer 503.
+	NodeAlertRules NodeAlertRuleStore
 	// Users, Sessions and Authz back human-user authentication and
 	// authorization (see internal/core/user). Nil disables login and leaves
 	// every node-scoped read unauthenticated, the same convention as the
@@ -333,6 +336,9 @@ func (h *Handler) Mount(mux Registrar) {
 	mux.Handle("DELETE "+Prefix+"/nodes/{nodeID}/alerts-mute", httpx.Handler(h.UnmuteNodeAlerts))
 	mux.Handle("POST "+Prefix+"/nodes/{nodeID}/archive", httpx.Handler(h.ArchiveNode))
 	mux.Handle("DELETE "+Prefix+"/nodes/{nodeID}/archive", httpx.Handler(h.UnarchiveNode))
+	mux.Handle("GET "+Prefix+"/nodes/{nodeID}/alert-rules", httpx.Handler(h.ListNodeAlertRules))
+	mux.Handle("PUT "+Prefix+"/nodes/{nodeID}/alert-rules/{ruleKey}", httpx.Handler(h.SetNodeAlertRule))
+	mux.Handle("DELETE "+Prefix+"/nodes/{nodeID}/alert-rules/{ruleKey}", httpx.Handler(h.ResetNodeAlertRule))
 
 	mux.Handle("GET "+Prefix+"/metrics", httpx.Handler(h.QueryMetrics))
 	mux.Handle("GET "+Prefix+"/metrics/latest", httpx.Handler(h.LatestMetrics))

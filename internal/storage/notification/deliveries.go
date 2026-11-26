@@ -98,21 +98,48 @@ func (r *Repository) Enqueue(ctx context.Context, n corenotification.Notificatio
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'pending', now())
 		ON CONFLICT (event_id, channel_id) DO NOTHING`
 
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return 0, errs.Wrap(err, errs.CodeUnavailable, "could not begin the enqueue").WithOp(op)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// An alert for a rule disabled on its node is never enqueued, even when
+	// the evaluator decided to send it before the rule was disabled: the
+	// shared lock orders this against the rule change (see lockRuleShared).
+	if n.Kind != corenotification.KindTest && n.Trigger != "" && n.NodeID != "" {
+		if _, err := tx.Exec(ctx, lockRuleShared, string(n.Trigger)); err != nil {
+			return 0, errs.Wrap(err, errs.CodeUnavailable, "could not lock the notification rule").WithOp(op)
+		}
+		enabled, err := ruleEnabled(ctx, tx, n.NodeID, n.Trigger)
+		if err != nil {
+			return 0, errs.Wrap(err, errs.CodeUnavailable, "could not read the notification rule").WithOp(op)
+		}
+		if !enabled {
+			return 0, nil
+		}
+	}
+
 	batch := &pgx.Batch{}
 	for _, c := range channels {
 		batch.Queue(q, id.New(), n.EventID, c.ID, string(c.Type), string(n.Kind), string(n.Trigger), n.NodeID,
 			n.Subject, string(n.Severity), n.Title, n.Message)
 	}
-	br := r.pool.SendBatch(ctx, batch)
-	defer br.Close()
-
+	br := tx.SendBatch(ctx, batch)
 	inserted := 0
 	for range channels {
 		tag, err := br.Exec()
 		if err != nil {
-			return inserted, errs.Wrap(err, errs.CodeUnavailable, "could not enqueue a notification delivery").WithOp(op)
+			_ = br.Close()
+			return 0, errs.Wrap(err, errs.CodeUnavailable, "could not enqueue a notification delivery").WithOp(op)
 		}
 		inserted += int(tag.RowsAffected())
+	}
+	if err := br.Close(); err != nil {
+		return 0, errs.Wrap(err, errs.CodeUnavailable, "could not enqueue a notification delivery").WithOp(op)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, errs.Wrap(err, errs.CodeUnavailable, "could not enqueue a notification delivery").WithOp(op)
 	}
 	return inserted, nil
 }

@@ -224,6 +224,19 @@ func (l lazyNotificationStore) EndMuteExplicitly(ctx context.Context, nodeID str
 func (l lazyNotificationStore) ArchiveNode(ctx context.Context, nodeID string, at time.Time) (corenotification.NodeAlerts, error) {
 	return l.repo().ArchiveNode(ctx, nodeID, at)
 }
+func (l lazyNotificationStore) ListNodeRules(ctx context.Context, nodeID string) ([]corenotification.NodeRule, error) {
+	return l.repo().ListNodeRules(ctx, nodeID)
+}
+func (l lazyNotificationStore) SetNodeRuleEnabled(
+	ctx context.Context, nodeID string, trigger corenotification.Trigger, enabled bool, updatedBy string,
+) (corenotification.NodeRule, error) {
+	return l.repo().SetNodeRuleEnabled(ctx, nodeID, trigger, enabled, updatedBy)
+}
+func (l lazyNotificationStore) ClearNodeRuleEnabled(
+	ctx context.Context, nodeID string, trigger corenotification.Trigger, updatedBy string,
+) (corenotification.NodeRule, error) {
+	return l.repo().ClearNodeRuleEnabled(ctx, nodeID, trigger, updatedBy)
+}
 func (l lazyNotificationStore) UnarchiveNode(ctx context.Context, nodeID string) error {
 	return l.repo().UnarchiveNode(ctx, nodeID)
 }

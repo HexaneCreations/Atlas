@@ -62,6 +62,7 @@ type Deps struct {
 	NotificationTester      v1.NotificationTester
 	NotificationTestLimiter *corenotification.TestLimiter
 	NodeAlerts              v1.NodeAlertStore
+	NodeAlertRules          v1.NodeAlertRuleStore
 	// Users, Sessions and Authz back human-user authentication and
 	// authorization (see internal/core/user and internal/api/v1's auth
 	// endpoints). Nil disables login entirely rather than crashing it — the
@@ -126,6 +127,7 @@ func New(deps Deps) http.Handler {
 		NotificationTester:      deps.NotificationTester,
 		NotificationTestLimiter: deps.NotificationTestLimiter,
 		NodeAlerts:              deps.NodeAlerts,
+		NodeAlertRules:          deps.NodeAlertRules,
 
 		Users:          deps.Users,
 		Sessions:       deps.Sessions,

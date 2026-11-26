@@ -964,6 +964,32 @@ export interface MuteNodeRequest {
   duration: MuteDuration;
 }
 
+/** Where a node's effective alert rule value comes from. */
+export type AlertRuleSource = "node" | "global" | "catalog";
+
+/** One catalog alert rule as it applies to a node. */
+export interface NodeAlertRule {
+  key: string;
+  area: string;
+  title: string;
+  description: string;
+  default_severity: NotificationSeverity;
+  default_enabled: boolean;
+  /** The global rule's value; null when there is none. */
+  global_enabled: boolean | null;
+  /** The node's own value; null when it inherits. */
+  override: boolean | null;
+  /** The effective value. */
+  enabled: boolean;
+  source: AlertRuleSource;
+}
+
+/** GET /api/v1/nodes/{id}/alert-rules. */
+export interface ListNodeAlertRulesResponse {
+  node_id: string;
+  rules: NodeAlertRule[];
+}
+
 /** The answer to a mute. */
 export interface NodeAlertsResponse {
   node_id: string;

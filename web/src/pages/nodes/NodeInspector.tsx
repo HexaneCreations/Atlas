@@ -7,7 +7,9 @@ import { CopyButton } from "../processes/ProcessInspector";
 import { emptyArt } from "../../lib/assets";
 import { nodePrimaryLabel, nodeSecondaryLabel } from "../../lib/nodeIdentity";
 import { formatAgo, formatBytes, formatDuration, formatValue } from "../../format";
+import { useAuth } from "../../auth/AuthContext";
 import { AlertMute } from "./AlertMute";
+import { AlertRules } from "./AlertRules";
 import { readVitals, type Filesystem, type Interface, type Vitals } from "./nodeMetrics";
 import { UNTAGGED } from "./useNodeTable";
 
@@ -17,7 +19,7 @@ const STATUS_TONE: Record<Node["status"], Tone> = {
   down: "danger",
 };
 
-type Tab = "hardware" | "resources" | "network" | "workload" | "metadata";
+type Tab = "hardware" | "resources" | "network" | "workload" | "metadata" | "alerts";
 
 /**
  * The right-hand inspector for one node.
@@ -54,6 +56,8 @@ export function NodeInspector({
   onClose: () => void;
 }) {
   const [tab, setTab] = useState<Tab>("hardware");
+  const { user } = useAuth();
+  const canManageAlerts = user?.can_manage_notifications ?? false;
   const v = readVitals(values);
 
   return (
@@ -100,8 +104,9 @@ export function NodeInspector({
             ["network", "Network"],
             ["workload", "Workload"],
             ["metadata", "Metadata"],
+            ["alerts", "Alert rules"],
           ] as const
-        ).map(([id, label]) => (
+        ).filter(([id]) => id !== "alerts" || canManageAlerts).map(([id, label]) => (
           <button
             key={id}
             role="tab"
@@ -125,6 +130,7 @@ export function NodeInspector({
           <Workload vitals={v} node={node} collectors={collectors} isPrimary={isPrimary} />
         ) : null}
         {tab === "metadata" ? <Metadata node={node} /> : null}
+        {tab === "alerts" && canManageAlerts ? <AlertRules key={node.node_id} nodeID={node.node_id} /> : null}
       </div>
     </aside>
   );

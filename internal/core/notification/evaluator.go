@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"maps"
 	"slices"
 	"strings"
 	"sync"
@@ -76,11 +77,11 @@ type MetricSample struct {
 	Time   time.Time
 }
 
-// RuleStore is what the evaluator needs to resolve a trigger's effective
-// rule for a node. Satisfied by [github.com/hexane/atlas/internal/storage/
-// notification.Repository].
+// RuleStore is what the evaluator needs to resolve every trigger's
+// effective rule: all stored rule rows, read once per tick. Satisfied by
+// [github.com/hexane/atlas/internal/storage/notification.Repository].
 type RuleStore interface {
-	EffectiveRule(ctx context.Context, trigger Trigger, nodeID string) (Rule, error)
+	ListRules(ctx context.Context) ([]RuleSpec, error)
 }
 
 // StateStore is the evaluator's persistent memory, per (trigger, node,
@@ -111,6 +112,8 @@ type StateStore interface {
 	BeginPending(ctx context.Context, s State) (State, error)
 	// DeleteState removes one state row; a missing row is not an error.
 	DeleteState(ctx context.Context, trigger Trigger, nodeID, subject string) error
+	// ListActiveStates returns every state that is not ok.
+	ListActiveStates(ctx context.Context) ([]State, error)
 }
 
 // NodeStore is what the evaluator needs from the node repository: every
@@ -273,6 +276,21 @@ func (e *Evaluator) EvaluateOnce(ctx context.Context) {
 		e.logger.ErrorContext(ctx, "could not list nodes for notification evaluation", slog.String("error", err.Error()))
 		return
 	}
+	specs, err := e.rules.ListRules(ctx)
+	if err != nil {
+		e.logger.ErrorContext(ctx, "could not read notification rules", slog.String("error", err.Error()))
+		return
+	}
+	rules := newRuleSet(specs)
+	activeStates, err := e.states.ListActiveStates(ctx)
+	if err != nil {
+		e.logger.ErrorContext(ctx, "could not read active notification states", slog.String("error", err.Error()))
+		return
+	}
+	active := map[string][]State{}
+	for _, s := range activeStates {
+		active[s.NodeID] = append(active[s.NodeID], s)
+	}
 
 	disk, err := e.metrics.LatestForMetric(ctx, MetricDiskUsage, StaleFactor*DiskCollectorInterval)
 	if err != nil {
@@ -300,12 +318,13 @@ func (e *Evaluator) EvaluateOnce(ctx context.Context) {
 	// back later than itself, and a zero-second hold would not have elapsed.
 	now := e.now().Truncate(time.Microsecond)
 	for _, n := range nodes {
-		e.evaluateNode(ctx, n, diskByNode[n.NodeID], ramByNode[n.NodeID], workloads[n.NodeID], now)
+		e.evaluateNode(ctx, rules, n, active[n.NodeID], diskByNode[n.NodeID], ramByNode[n.NodeID], workloads[n.NodeID], now)
 	}
 }
 
 func (e *Evaluator) evaluateNode(
-	ctx context.Context, n EvalNode, disk []MetricSample, ram MetricSample, workloads *nodeWorkloads, now time.Time,
+	ctx context.Context, rules ruleSet, n EvalNode, active []State, disk []MetricSample, ram MetricSample,
+	workloads *nodeWorkloads, now time.Time,
 ) {
 	// Skip entirely, touching no state at all — item 3 of the brief.
 	if n.NodeID == e.localNodeID {
@@ -330,7 +349,9 @@ func (e *Evaluator) evaluateNode(
 		}
 	}
 
-	nodeDownFiring := e.evaluateNodeDown(ctx, n, now)
+	e.resetDisabledRules(ctx, rules, n.NodeID, active, now)
+
+	nodeDownFiring := e.evaluateNodeDown(ctx, rules, n, now)
 	// While node_down is firing, every other trigger is suppressed entirely —
 	// item 2. This also satisfies "re-evaluate fresh data before sending
 	// recovered": once node_down stops firing, disk/ram resume from
@@ -340,11 +361,65 @@ func (e *Evaluator) evaluateNode(
 		return
 	}
 
-	e.evaluateDisk(ctx, n.NodeID, disk, now)
+	e.evaluateDisk(ctx, rules, n.NodeID, disk, now)
 	if ram.NodeID != "" {
-		e.evaluateRAM(ctx, n.NodeID, ram.Value, now)
+		e.evaluateRAM(ctx, rules, n.NodeID, ram.Value, now)
 	}
-	e.evaluateWorkloads(ctx, n.NodeID, workloads, now)
+	e.evaluateWorkloads(ctx, rules, n.NodeID, workloads, now)
+}
+
+// resetDisabledRules silently returns every non-ok state of a rule that is
+// disabled for this node to ok, the way ending a mute does: no
+// notification. Disabling through the API already does this in the same
+// transaction as the override write; this catches a tick that was in flight
+// at that moment, and a rule disabled globally.
+func (e *Evaluator) resetDisabledRules(ctx context.Context, rules ruleSet, nodeID string, active []State, now time.Time) {
+	for _, s := range active {
+		rule, err := rules.effective(s.Trigger, nodeID)
+		if err != nil || rule.Enabled {
+			continue
+		}
+		next, changed := disabledReset(s, now)
+		if !changed {
+			continue
+		}
+		if err := e.states.UpsertState(ctx, next); err != nil {
+			e.logger.ErrorContext(ctx, "could not reset a disabled rule's notification state",
+				slog.String("trigger", string(s.Trigger)), slog.String("node_id", nodeID))
+			continue
+		}
+		e.logger.InfoContext(ctx, "notification state reset: rule disabled for node",
+			slog.String("trigger", string(s.Trigger)), slog.String("node_id", nodeID), slog.String("subject", s.Subject))
+	}
+}
+
+func hasAnyKey(m map[string]any, keys ...string) bool {
+	for _, k := range keys {
+		if _, ok := m[k]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// disabledReset is s as a disabled rule leaves it: ok, with nothing pending,
+// and without the workload baselines whose history would otherwise make the
+// first observation after re-enabling fire.
+func disabledReset(s State, now time.Time) (State, bool) {
+	next, changed := s, false
+	if s.State != StateOK {
+		next.State, next.StateSince, next.Severity, next.Value, next.ConditionSince = StateOK, now, "", nil, nil
+		next.FlapCount, next.FlapWindowStart = 0, nil
+		changed = true
+	}
+	if hasAnyKey(s.Baseline, baselineSeenUp, baselineLastRestarts) {
+		next.Baseline = maps.Clone(s.Baseline)
+		delete(next.Baseline, baselineSeenUp)
+		delete(next.Baseline, baselineLastRestarts)
+		changed = true
+	}
+	next.UpdatedAt = now
+	return next, changed
 }
 
 // endExpiredMute ends a mute whose alerts_muted_until the evaluator just
@@ -388,8 +463,8 @@ func (e *Evaluator) endExpiredMute(ctx context.Context, n EvalNode, now time.Tim
 	return did
 }
 
-func (e *Evaluator) evaluateNodeDown(ctx context.Context, n EvalNode, now time.Time) (firing bool) {
-	rule, err := e.rules.EffectiveRule(ctx, TriggerNodeDown, n.NodeID)
+func (e *Evaluator) evaluateNodeDown(ctx context.Context, rules ruleSet, n EvalNode, now time.Time) (firing bool) {
+	rule, err := rules.effective(TriggerNodeDown, n.NodeID)
 	if err != nil {
 		e.logger.ErrorContext(ctx, "could not resolve the node_down rule", slog.String("node_id", n.NodeID))
 		return false
@@ -411,11 +486,11 @@ func (e *Evaluator) evaluateNodeDown(ctx context.Context, n EvalNode, now time.T
 	return next == StateFiring
 }
 
-func (e *Evaluator) evaluateDisk(ctx context.Context, nodeID string, samples []MetricSample, now time.Time) {
+func (e *Evaluator) evaluateDisk(ctx context.Context, rules ruleSet, nodeID string, samples []MetricSample, now time.Time) {
 	if len(samples) == 0 {
 		return
 	}
-	rule, err := e.rules.EffectiveRule(ctx, TriggerDiskPct, nodeID)
+	rule, err := rules.effective(TriggerDiskPct, nodeID)
 	if err != nil {
 		e.logger.ErrorContext(ctx, "could not resolve the disk_pct rule", slog.String("node_id", nodeID))
 		return
@@ -436,8 +511,8 @@ func (e *Evaluator) evaluateDisk(ctx context.Context, nodeID string, samples []M
 	}
 }
 
-func (e *Evaluator) evaluateRAM(ctx context.Context, nodeID string, value float64, now time.Time) {
-	rule, err := e.rules.EffectiveRule(ctx, TriggerRAMPct, nodeID)
+func (e *Evaluator) evaluateRAM(ctx context.Context, rules ruleSet, nodeID string, value float64, now time.Time) {
+	rule, err := rules.effective(TriggerRAMPct, nodeID)
 	if err != nil {
 		e.logger.ErrorContext(ctx, "could not resolve the ram_pct rule", slog.String("node_id", nodeID))
 		return

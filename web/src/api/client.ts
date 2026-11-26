@@ -11,6 +11,7 @@ import type {
   GrantPageAccessRequest,
   GrantRoleRequest,
   ListInstallCommandsResponse,
+  ListNodeAlertRulesResponse,
   ListNotificationChannelsResponse,
   ListNotificationDeliveriesResponse,
   ListRoleAccessResponse,
@@ -18,6 +19,7 @@ import type {
   ListUserPageAccessResponse,
   ListUsersResponse,
   MuteNodeRequest,
+  NodeAlertRule,
   NodeAlertsResponse,
   NotificationChannel,
   NotificationChannelRequest,
@@ -450,6 +452,25 @@ export async function muteNodeAlerts(nodeID: string, body: MuteNodeRequest): Pro
 
 export async function unmuteNodeAlerts(nodeID: string): Promise<void> {
   await request(`/nodes/${encodeURIComponent(nodeID)}/alerts-mute`, { method: "DELETE" });
+}
+
+const alertRulesPath = (nodeID: string) => `/nodes/${encodeURIComponent(nodeID)}/alert-rules`;
+
+export async function fetchNodeAlertRules(nodeID: string, signal?: AbortSignal): Promise<ListNodeAlertRulesResponse> {
+  return apiGet<ListNodeAlertRulesResponse>(alertRulesPath(nodeID), signal ? { signal } : {});
+}
+
+export async function setNodeAlertRule(nodeID: string, key: string, enabled: boolean): Promise<NodeAlertRule> {
+  const response = await request(`${alertRulesPath(nodeID)}/${encodeURIComponent(key)}`, {
+    method: "PUT",
+    headers: JSON_HEADERS,
+    body: JSON.stringify({ enabled }),
+  });
+  return (await response.json()) as NodeAlertRule;
+}
+
+export async function resetNodeAlertRule(nodeID: string, key: string): Promise<void> {
+  await request(`${alertRulesPath(nodeID)}/${encodeURIComponent(key)}`, { method: "DELETE" });
 }
 
 // ------------------------------------------------- Fleet: install codes ----

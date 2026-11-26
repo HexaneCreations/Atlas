@@ -121,7 +121,7 @@ type verdict struct {
 }
 
 // evaluateWorkloads runs the container and service triggers for one node.
-func (e *Evaluator) evaluateWorkloads(ctx context.Context, nodeID string, w *nodeWorkloads, now time.Time) {
+func (e *Evaluator) evaluateWorkloads(ctx context.Context, rules ruleSet, nodeID string, w *nodeWorkloads, now time.Time) {
 	if w == nil {
 		return // nothing fresh at all: unknown
 	}
@@ -155,28 +155,37 @@ func (e *Evaluator) evaluateWorkloads(ctx context.Context, nodeID string, w *nod
 			},
 		},
 	} {
-		if len(t.family) == 0 {
-			continue // stale or absent: unknown, so neither judged nor vanished
-		}
 		states := map[string]State{}
 		for _, s := range stored {
 			if s.Trigger == t.trigger {
 				states[s.Subject] = s
 			}
 		}
-		e.evaluateTrigger(ctx, t, nodeID, states, now)
+		rule, err := rules.effective(t.trigger, nodeID)
+		if err != nil {
+			e.logger.ErrorContext(ctx, "could not resolve a notification rule",
+				slog.String("trigger", string(t.trigger)), slog.String("node_id", nodeID))
+			continue
+		}
+		if !rule.Enabled {
+			// Nothing is judged or tracked while disabled, so re-enabling
+			// starts from a clean baseline.
+			for _, s := range states {
+				if next, changed := disabledReset(s, now); changed {
+					e.saveWorkloadState(ctx, next)
+				}
+			}
+			continue
+		}
+		if len(t.family) == 0 {
+			continue // stale or absent: unknown, so neither judged nor vanished
+		}
+		e.evaluateTrigger(ctx, rule, t, nodeID, states, now)
 		e.sweepVanished(ctx, t, states, now)
 	}
 }
 
-func (e *Evaluator) evaluateTrigger(ctx context.Context, t workloadTrigger, nodeID string, states map[string]State, now time.Time) {
-	rule, err := e.rules.EffectiveRule(ctx, t.trigger, nodeID)
-	if err != nil {
-		e.logger.ErrorContext(ctx, "could not resolve a notification rule",
-			slog.String("trigger", string(t.trigger)), slog.String("node_id", nodeID))
-		return
-	}
-
+func (e *Evaluator) evaluateTrigger(ctx context.Context, rule Rule, t workloadTrigger, nodeID string, states map[string]State, now time.Time) {
 	for _, subject := range slices.Sorted(maps.Keys(t.family)) {
 		current, found := states[subject]
 		v := t.judge(subject, t.family[subject], current.Baseline)
@@ -190,10 +199,10 @@ func (e *Evaluator) evaluateTrigger(ctx context.Context, t workloadTrigger, node
 			return b
 		}
 
-		if !rule.Enabled || slices.Contains(rule.SubjectExcludes, subject) {
+		if slices.Contains(rule.SubjectExcludes, subject) {
 			// No transition, but the baseline keeps following reality:
-			// restarts counted while the rule was off are not news when it
-			// is turned back on.
+			// restarts counted while the subject was excluded are not news
+			// when it is included again.
 			e.saveBaseline(ctx, t.trigger, nodeID, subject, current, found, track(StateOK), now)
 			continue
 		}

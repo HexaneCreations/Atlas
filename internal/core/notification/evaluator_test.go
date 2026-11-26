@@ -2,7 +2,6 @@ package notification
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 	"maps"
 	"slices"
@@ -248,20 +247,42 @@ func (c *fakeClock) advance(d time.Duration) {
 	c.t = c.t.Add(d)
 }
 
+// fakeRuleStore serves rules as the global row of each trigger, plus any
+// node overrides.
 type fakeRuleStore struct {
-	mu    sync.Mutex
-	rules map[Trigger]Rule
+	mu        sync.Mutex
+	rules     map[Trigger]Rule
+	overrides []RuleSpec
+	lists     int
 }
 
-func (f *fakeRuleStore) EffectiveRule(_ context.Context, trigger Trigger, nodeID string) (Rule, error) {
+func (f *fakeRuleStore) ListRules(context.Context) ([]RuleSpec, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	r, ok := f.rules[trigger]
-	if !ok {
-		return Rule{}, errors.New("no rule for trigger")
+	f.lists++
+	var out []RuleSpec
+	for _, r := range f.rules {
+		excludes := r.SubjectExcludes
+		if excludes == nil {
+			excludes = []string{}
+		}
+		out = append(out, RuleSpec{
+			Trigger: r.Trigger, Enabled: &r.Enabled, WarnThreshold: r.WarnThreshold, CritThreshold: r.CritThreshold,
+			ForSeconds: &r.ForSeconds, RecoverySeconds: &r.RecoverySeconds, Hysteresis: &r.Hysteresis,
+			CooldownSeconds: &r.CooldownSeconds, SendRecovery: &r.SendRecovery, SubjectExcludes: excludes,
+		})
 	}
-	r.NodeID = nodeID
-	return r, nil
+	return append(out, f.overrides...), nil
+}
+
+// setNodeEnabled stores (or, with nil, clears) nodeID's enabled override.
+func (f *fakeRuleStore) setNodeEnabled(trigger Trigger, nodeID string, enabled *bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.overrides = slices.DeleteFunc(f.overrides, func(s RuleSpec) bool { return s.Trigger == trigger && s.NodeID == nodeID })
+	if enabled != nil {
+		f.overrides = append(f.overrides, RuleSpec{Trigger: trigger, NodeID: nodeID, Enabled: enabled})
+	}
 }
 
 type stateKey struct{ trigger, nodeID, subject string }
@@ -329,6 +350,18 @@ func (f *fakeStateStore) DeleteState(_ context.Context, trigger Trigger, nodeID,
 	defer f.mu.Unlock()
 	delete(f.states, stateKey{string(trigger), nodeID, subject})
 	return nil
+}
+
+func (f *fakeStateStore) ListActiveStates(context.Context) ([]State, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []State
+	for _, st := range f.states {
+		if st.State != StateOK {
+			out = append(out, st)
+		}
+	}
+	return out, nil
 }
 
 // ResetNodeStates mirrors the real repository's single-statement reset:

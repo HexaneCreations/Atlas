@@ -163,6 +163,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*App, error) {
 
 		NotificationTester: notificationTester,
 		NodeAlerts:         lazyNotificationStore{pool: pool, key: notificationKey},
+		NodeAlertRules:     lazyNotificationStore{pool: pool, key: notificationKey},
 
 		Users:          lazyUserStore{pool: pool},
 		Sessions:       lazyUserStore{pool: pool},

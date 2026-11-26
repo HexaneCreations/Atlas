@@ -214,6 +214,10 @@ func (f *failOnceStateStore) GetState(ctx context.Context, trigger corenotificat
 	return f.repo.GetState(ctx, trigger, nodeID, subject)
 }
 
+func (f *failOnceStateStore) ListActiveStates(ctx context.Context) ([]corenotification.State, error) {
+	return f.repo.ListActiveStates(ctx)
+}
+
 func (f *failOnceStateStore) UpsertState(ctx context.Context, s corenotification.State) error {
 	f.mu.Lock()
 	shouldFail := !f.failed && s.LastNotifiedKind == corenotification.KindFiring
