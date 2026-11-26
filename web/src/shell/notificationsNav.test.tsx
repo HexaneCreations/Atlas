@@ -17,7 +17,7 @@ vi.mock("./Topbar", () => ({ Topbar: () => null }));
 function user(over: Partial<CurrentUser>): CurrentUser {
   return {
     user_id: "u1", username: "someone", can_manage_users: false, is_superadmin: false,
-    can_manage_notifications: false, page_access: [], ...over,
+    can_manage_notifications: false, can_enroll_fleet: false, page_access: [], ...over,
   };
 }
 

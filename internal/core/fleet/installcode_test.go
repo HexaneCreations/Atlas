@@ -143,7 +143,9 @@ var testTarget = InstallTarget{
 }
 
 // Every value in the generated command passes the same check install.sh
-// applies to its flag, and every value is single-quoted.
+// applies to its flag, and every value is single-quoted. The code travels
+// as the sudo'd process's ATLAS_INSTALL_CODE environment variable, never as
+// a command-line flag — see [InstallCommand]'s doc.
 func TestInstallCommandValuesPassInstallScriptAllowlists(t *testing.T) {
 	script := installScriptRegexes(t)
 	code, _ := NewInstallCode()
@@ -152,11 +154,16 @@ func TestInstallCommandValuesPassInstallScriptAllowlists(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	flagRE := map[string]string{
-		"--version": "VERSION_RE", "--control-plane-url": "URL_RE",
-		"--server-addr": "MULTIADDR_RE", "--install-code": "TOKEN_RE",
+	envCode := regexp.MustCompile(`sudo env ATLAS_INSTALL_CODE='([^']*)' bash "\$d/install\.sh"`).FindStringSubmatch(cmd)
+	if envCode == nil {
+		t.Fatalf("command does not pass the code via ATLAS_INSTALL_CODE: %q", cmd)
 	}
-	_, installArgs, found := strings.Cut(cmd, `sudo bash "$d/install.sh"`)
+	if envCode[1] != code.Plaintext || !script["TOKEN_RE"].MatchString(envCode[1]) {
+		t.Errorf("ATLAS_INSTALL_CODE = %q, want %q matching TOKEN_RE", envCode[1], code.Plaintext)
+	}
+
+	flagRE := map[string]string{"--version": "VERSION_RE", "--server-url": "URL_RE"}
+	_, installArgs, found := strings.Cut(cmd, `bash "$d/install.sh"`)
 	if !found {
 		t.Fatalf("command does not run the downloaded install.sh: %q", cmd)
 	}
@@ -177,12 +184,16 @@ func TestInstallCommandValuesPassInstallScriptAllowlists(t *testing.T) {
 			t.Errorf("command has no %s value: %q", flag, cmd)
 		}
 	}
-	if seen["--install-code"] != code.Plaintext || seen["--version"] != testTarget.Version ||
-		seen["--server-addr"] != testTarget.ServerAddr || seen["--control-plane-url"] != testTarget.ControlPlaneURL {
+	if seen["--version"] != testTarget.Version || seen["--server-url"] != testTarget.ControlPlaneURL {
 		t.Errorf("command carries the wrong values: %v", seen)
 	}
-	if !strings.Contains(cmd, " --transport libp2p") {
-		t.Errorf("command does not select libp2p: %q", cmd)
+	// The server address, Peer ID, transport and environment are deliberately
+	// absent: the installer learns them from the redeem response, not the
+	// command line.
+	for _, absent := range []string{"--server-addr", "--install-code", "--transport", "--control-plane-url", "--environment", "--relationship"} {
+		if strings.Contains(cmd, absent) {
+			t.Errorf("command unexpectedly carries %s: %q", absent, cmd)
+		}
 	}
 	scriptURL := regexp.MustCompile(`-o "\$d/install.sh" '([^']*)'`).FindStringSubmatch(cmd)
 	if scriptURL == nil || !script["URL_RE"].MatchString(scriptURL[1]) ||

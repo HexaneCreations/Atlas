@@ -62,7 +62,7 @@ func newFollowTestServer(t *testing.T, client docker.Client) *httptest.Server {
 		Collection: fakeCollection{docker: client},
 	})
 
-	srv := httptest.NewServer(handler)
+	srv := httptest.NewServer(signedIn(handler))
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -496,7 +496,7 @@ func newRemoteFollowTestServer(t *testing.T, remote v1.RemoteLogSource) *httptes
 		Collection: fakeCollection{},
 		RemoteLogs: remote,
 	})
-	srv := httptest.NewServer(handler)
+	srv := httptest.NewServer(signedIn(handler))
 	t.Cleanup(srv.Close)
 	return srv
 }

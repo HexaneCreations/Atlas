@@ -330,7 +330,11 @@ func TestTestSendOutlivesTheRequest(t *testing.T) {
 			resp.Body.Close()
 		}
 	}()
-	<-sender.entered
+	select {
+	case <-sender.entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the test send never reached the sender")
+	}
 	cancel()
 	time.Sleep(100 * time.Millisecond) // let the server notice
 	close(sender.release)
@@ -354,11 +358,15 @@ func (s *ctxSender) Send(ctx context.Context, _ notification.Channel, _ string, 
 func newNotificationServerWith(t *testing.T, store *fakeNotificationStore, sender notification.Sender) *httptest.Server {
 	t.Helper()
 	u := testUser(t, "anyone", "correct horse battery staple")
-	return newWriteEndpointTestServer(t, u, nil, store, func(d *api.Deps) {
+	srv := newWriteEndpointTestServer(t, u, nil, store, func(d *api.Deps) {
 		d.Authz = nil
 		d.NotificationTester = newFakeTester(store, sender)
 		d.Sessions, d.Users = nil, nil
 	})
+	// Every route needs a session; with no session store, supply one.
+	front := httptest.NewServer(signedIn(srv.Config.Handler))
+	t.Cleanup(front.Close)
+	return front
 }
 
 func TestChannelChangesAreLoggedWithoutSecrets(t *testing.T) {

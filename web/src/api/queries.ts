@@ -5,11 +5,13 @@ import {
   assignRoleAccess,
   fetchUserAccess,
   putUserAccess,
+  createInstallCommand,
   createNotificationChannel,
   createUser,
   deleteNotificationChannel,
   disableUser,
   enableUser,
+  fetchInstallCommands,
   forceLogout,
   fetchNotificationChannels,
   fetchNotificationDeliveries,
@@ -21,6 +23,7 @@ import {
   grantRole,
   muteNodeAlerts,
   resetPassword,
+  revokeInstallCommand,
   revokePageAccess,
   revokeRole,
   revokeRoleAccess,
@@ -36,6 +39,7 @@ import type {
   ContainerDetail,
   ContainerLogsResponse,
   AssignRoleAccessRequest,
+  CreateInstallCommandRequest,
   CreateUserRequest,
   GrantPageAccessRequest,
   GrantRoleRequest,
@@ -795,5 +799,41 @@ export function useMuteNode() {
       else await unmuteNodeAlerts(nodeID);
     },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: nodeKeys.all, exact: true }),
+  });
+}
+
+// ------------------------------------------------- Fleet: install codes ----
+
+export const installCommandKeys = { all: ["install-commands"] as const };
+
+/** Every install code Atlas knows about, without any code — the "Add
+ *  server" panel's list. */
+export function useInstallCommands() {
+  return useQuery({
+    queryKey: installCommandKeys.all,
+    queryFn: ({ signal }) => fetchInstallCommands(signal),
+  });
+}
+
+function useInvalidateInstallCommands() {
+  const queryClient = useQueryClient();
+  return () => { void queryClient.invalidateQueries({ queryKey: installCommandKeys.all }); };
+}
+
+/** Generates a one-time install code. The response's `command` is the only
+ *  place its plaintext ever appears — see the "Add server" reveal modal. */
+export function useCreateInstallCommand() {
+  const invalidate = useInvalidateInstallCommands();
+  return useMutation({
+    mutationFn: (body: CreateInstallCommandRequest) => createInstallCommand(body),
+    onSuccess: invalidate,
+  });
+}
+
+export function useRevokeInstallCommand() {
+  const invalidate = useInvalidateInstallCommands();
+  return useMutation({
+    mutationFn: (id: string) => revokeInstallCommand(id),
+    onSuccess: invalidate,
   });
 }

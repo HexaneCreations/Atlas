@@ -178,9 +178,8 @@ func TestSLOLifecycleAndStatusAgainstRealHistory(t *testing.T) {
 		t.Fatal("created SLO has no id")
 	}
 
-	// List includes it. Reads on /slo are still open — not in scope for
-	// this pass, see docs/adr/0013-human-user-authentication-and-authorization.md.
-	listResp, err := http.Get(base + "/api/v1/slo")
+	// List includes it. Reads on /slo need a session but no permission.
+	listResp, err := client.Get(base + "/api/v1/slo")
 	if err != nil {
 		t.Fatalf("GET slo list: %v", err)
 	}
@@ -197,7 +196,7 @@ func TestSLOLifecycleAndStatusAgainstRealHistory(t *testing.T) {
 
 	// Status reflects the seeded history: 7/8 compliant = 87.5% compliance
 	// against an 80% target.
-	statusResp, err := http.Get(base + "/api/v1/slo/" + created.ID + "/status")
+	statusResp, err := client.Get(base + "/api/v1/slo/" + created.ID + "/status")
 	if err != nil {
 		t.Fatalf("GET slo status: %v", err)
 	}
@@ -247,7 +246,7 @@ func TestSLOLifecycleAndStatusAgainstRealHistory(t *testing.T) {
 		t.Errorf("delete status = %d, want 204", delResp.StatusCode)
 	}
 
-	getAfterDelete, err := http.Get(base + "/api/v1/slo/" + created.ID)
+	getAfterDelete, err := client.Get(base + "/api/v1/slo/" + created.ID)
 	if err != nil {
 		t.Fatalf("GET after delete: %v", err)
 	}
@@ -283,7 +282,7 @@ func TestSLOStatusUnavailableWithNoSamplesInWindow(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 
-	statusResp, err := http.Get(base + "/api/v1/slo/" + created.ID + "/status")
+	statusResp, err := client.Get(base + "/api/v1/slo/" + created.ID + "/status")
 	if err != nil {
 		t.Fatalf("GET slo status: %v", err)
 	}

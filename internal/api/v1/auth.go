@@ -99,6 +99,10 @@ type CurrentUserResponse struct {
 	// notification settings. A display hint only: every /notifications
 	// endpoint checks PermissionNotificationsManage itself.
 	CanManageNotifications bool `json:"can_manage_notifications"`
+	// CanEnrollFleet tells the frontend whether to show the Nodes page's
+	// "Add server" action. A display hint only: every /fleet/install-commands
+	// endpoint checks PermissionFleetEnroll itself.
+	CanEnrollFleet bool `json:"can_enroll_fleet"`
 	// PageAccess is every page this caller can reach, with the scope it
 	// applies at — the frontend hides nav items and redirects direct-URL
 	// visits to unreachable routes with it. A navigation hint only: every
@@ -136,6 +140,7 @@ func (h *Handler) currentUserResponse(ctx context.Context, principal user.Princi
 	if h.deps.Authz != nil {
 		resp.CanManageUsers = h.deps.Authz.Require(ctx, principal, user.PermissionUserManage, "") == nil
 		resp.CanManageNotifications = h.deps.Authz.Require(ctx, principal, user.PermissionNotificationsManage, "") == nil
+		resp.CanEnrollFleet = h.deps.Authz.Require(ctx, principal, user.PermissionFleetEnroll, "") == nil
 	}
 	if h.deps.UserAdmin != nil {
 		isSuper, err := h.deps.UserAdmin.IsSuperadmin(ctx, principal.UserID)

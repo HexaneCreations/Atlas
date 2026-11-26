@@ -15,9 +15,11 @@ import { SearchInput, FilterSelect, Toolbar } from "../components/Toolbar";
 import { formatAgo, formatDuration, formatValue } from "../format";
 import { FleetDistribution } from "./nodes/FleetDistribution";
 import { EnvironmentComparison } from "./nodes/EnvironmentComparison";
+import { InstallCodesPanel } from "./nodes/InstallCodes";
 import { NodeComparison } from "./nodes/NodeComparison";
 import { MutedBadge } from "./nodes/AlertMute";
 import { NodeInspector } from "./nodes/NodeInspector";
+import { CopyButton } from "./processes/ProcessInspector";
 import { readVitals } from "./nodes/nodeMetrics";
 import { DEFAULT_FILTERS, UNTAGGED, countByStatus, useNodeTable, type SortKey } from "./nodes/useNodeTable";
 
@@ -51,7 +53,7 @@ const STATUS_OPTIONS: { value: "all" | NodeStatus; label: string }[] = [
  * labelled "not reporting"; none of it is ever rendered as zero.
  */
 export function NodesPage() {
-  const { user } = useAuth();
+  const { user: me } = useAuth();
   const nodes = useNodes();
   const collectors = useCollectors();
   const [selectedID, setSelectedID] = useState<string | null>(null);
@@ -100,6 +102,7 @@ export function NodesPage() {
             hint: nodes.error ? "unavailable" : nodes.isPending ? "loading" : "no nodes",
           }))}
         />
+        {me?.can_enroll_fleet ? <InstallCodesPanel /> : null}
         <Card level="floating" className="p-0">
           <QueryState
             isPending={nodes.isPending}
@@ -150,6 +153,8 @@ export function NodesPage() {
         ]}
       />
 
+      {me?.can_enroll_fleet ? <InstallCodesPanel /> : null}
+
       <h2 className="eyebrow mb-3">Fleet composition</h2>
       <FleetDistribution nodes={all} />
 
@@ -169,7 +174,7 @@ export function NodesPage() {
               <SearchInput
                 value={filters.search}
                 onChange={(v) => { setFilters((f) => ({ ...f, search: v })); }}
-                placeholder="Search hostname, node ID, platform, or kernel…"
+                placeholder="Search hostname, node ID, IP, platform, or kernel…"
               />
               <FilterSelect
                 value={filters.status}
@@ -229,6 +234,7 @@ export function NodesPage() {
                     <SortableTh label="Status" col="status" {...{ sortKey, direction, toggleSort }} />
                     <SortableTh label="Environment" col="environment" {...{ sortKey, direction, toggleSort }} />
                     <SortableTh label="Platform" col="platform" {...{ sortKey, direction, toggleSort }} />
+                    <SortableTh label="IP" col="ip" {...{ sortKey, direction, toggleSort }} />
                     <SortableTh label="Cores" col="cores" align="right" {...{ sortKey, direction, toggleSort }} />
                     {selected ? null : (
                       <th className="px-3 py-2.5 text-left text-[11px] font-semibold tracking-wider text-text-muted uppercase">
@@ -252,7 +258,7 @@ export function NodesPage() {
                       values={fleet.byNode.get(n.node_id) ?? emptyArray()}
                       selected={n.node_id === selectedID}
                       showVitals={!selected}
-                      showMute={user?.can_manage_notifications ?? false}
+                      showMute={me?.can_manage_notifications ?? false}
                       onSelect={() => { setSelectedID(n.node_id === selectedID ? null : n.node_id); }}
                     />
                   ))}
@@ -360,6 +366,24 @@ function NodeRow({
         )}
       </td>
       <td className="px-3 py-2 text-xs text-text-muted">{n.platform ?? "—"}</td>
+      <td className="px-3 py-2 text-xs">
+        {n.public_ip ? (
+          <span
+            className="flex items-center gap-1"
+            onClick={(e) => { e.stopPropagation(); }}
+          >
+            <span className="font-mono tabular-nums text-text-muted">{n.public_ip}</span>
+            <CopyButton value={n.public_ip} label="IP" />
+          </span>
+        ) : (
+          <span
+            className="text-text-subtle"
+            title="Not observed (local node, or no connection yet)"
+          >
+            —
+          </span>
+        )}
+      </td>
       <td className="px-3 py-2 text-right text-xs tabular-nums text-text-muted">
         {n.cpu_cores ?? "—"}
       </td>

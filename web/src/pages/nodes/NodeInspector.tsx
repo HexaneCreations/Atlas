@@ -440,6 +440,16 @@ function Metadata({ node }: { node: Node }) {
 
       <dl className="flex flex-col">
         <Field label="Hostname" value={node.hostname} />
+        <Field
+          label="Public IP (observed)"
+          value={
+            node.public_ip ? (
+              <span className="font-mono">{node.public_ip}</span>
+            ) : (
+              <span title="Not observed (local node, or no connection yet)">—</span>
+            )
+          }
+        />
         <Field label="Environment" value={node.environment ?? "not tagged"} />
         <Field label="Agent version" value={node.agent_version ?? "—"} />
         <Field label="First seen" value={new Date(node.first_seen_at).toLocaleString()} />

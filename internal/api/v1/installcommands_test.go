@@ -25,6 +25,18 @@ import (
 
 const testPeerID = "12D3KooWD3eckifWpRn9wQpMG9R9hX3sD158z7EqHWmweQAJU5SA"
 
+// fakeInstallTarget is a fixed, always-valid [v1.InstallTargetSource] — the
+// redeem handler needs one to fill RedeemInstallCodeResponse.ServerAddr.
+type fakeInstallTarget struct{}
+
+func (fakeInstallTarget) InstallTarget() (fleet.InstallTarget, error) {
+	return fleet.InstallTarget{
+		Version:         "v9.9.9",
+		ControlPlaneURL: "https://atlas.example.test",
+		ServerAddr:      "/ip4/203.0.113.10/tcp/4102/p2p/12D3KooWAG8Ks6fnAuXcq5CzjmFHkrhJc3kRxy1YGh8BTUtAFaf",
+	}, nil
+}
+
 type fakeInstallStore struct {
 	mu          sync.Mutex
 	redeemCalls int
@@ -68,7 +80,7 @@ func newInstallTestServer(t *testing.T, store *fakeInstallStore, limiter v1.Rede
 	deps := api.Deps{
 		Config: &cfg, Health: health.NewRegistry(nil), Pool: postgres.NewPool(cfg.Database, nil), Bus: bus,
 		Collection: fakeCollection{}, Users: users, Sessions: newMemSessionStore(users), Authz: authz,
-		InstallCodes: store, RedeemLimiter: limiter,
+		InstallCodes: store, RedeemLimiter: limiter, InstallTargets: fakeInstallTarget{},
 	}
 	srv := httptest.NewServer(api.New(deps))
 	t.Cleanup(srv.Close)
@@ -175,7 +187,7 @@ func TestRedeemRefusalsAreUniformAndFormatChecksPrecedeTheStore(t *testing.T) {
 	}
 }
 
-func TestRedeemSuccessReturnsOnlyNodeAndEnvironment(t *testing.T) {
+func TestRedeemSuccessReturnsNodeEnvironmentAndServerAddr(t *testing.T) {
 	t.Parallel()
 	store := &fakeInstallStore{}
 	srv := newInstallTestServer(t, store, fleet.NewRedeemLimiter(1000, 1000), nil)
@@ -185,8 +197,10 @@ func TestRedeemSuccessReturnsOnlyNodeAndEnvironment(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", status, raw)
 	}
-	if len(decoded) != 2 || decoded["node_id"] != "0123456789abcdef0123456789abcdef" || decoded["environment"] != "production" {
-		t.Errorf("body = %v, want exactly node_id and environment", decoded)
+	target, _ := fakeInstallTarget{}.InstallTarget()
+	if len(decoded) != 3 || decoded["node_id"] != "0123456789abcdef0123456789abcdef" ||
+		decoded["environment"] != "production" || decoded["server_addr"] != target.ServerAddr {
+		t.Errorf("body = %v, want exactly node_id, environment and server_addr %q", decoded, target.ServerAddr)
 	}
 	if strings.Contains(raw, code) {
 		t.Error("the response echoes the code")
@@ -230,7 +244,9 @@ func TestInstallCommandEndpointsNeedASessionAndWiredAuthz(t *testing.T) {
 		{"revoke", http.MethodDelete, "/fleet/install-commands/abc", ""},
 	}
 	withAuthz := newInstallTestServer(t, &fakeInstallStore{}, fleet.NewRedeemLimiter(10, 10), roleAuthorizer{role: user.RoleSuperadmin})
-	noAuthz := newInstallTestServer(t, &fakeInstallStore{}, fleet.NewRedeemLimiter(10, 10), nil)
+	unwired := newInstallTestServer(t, &fakeInstallStore{}, fleet.NewRedeemLimiter(10, 10), nil)
+	noAuthz := httptest.NewServer(signedIn(unwired.Config.Handler))
+	t.Cleanup(noAuthz.Close)
 	for _, a := range actions {
 		if code := do(t, http.DefaultClient, withAuthz.URL, a); code != http.StatusUnauthorized {
 			t.Errorf("%s anonymous: status %d, want 401", a.name, code)

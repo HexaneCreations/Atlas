@@ -85,7 +85,7 @@ func newRemoteTestServer(t *testing.T, inv *fakeInventoryStore, nodes *fakeNodeE
 		Nodes:      nodes,
 	})
 
-	srv := httptest.NewServer(handler)
+	srv := httptest.NewServer(signedIn(handler))
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -267,7 +267,7 @@ func TestRemoteInventoryWithNoStoreConfiguredIsUnavailable(t *testing.T) {
 		Pool: postgres.NewPool(cfg.Database, nil), Bus: bus,
 		Collection: &scopeCollection{},
 	})
-	srv := httptest.NewServer(handler)
+	srv := httptest.NewServer(signedIn(handler))
 	t.Cleanup(srv.Close)
 
 	body := getError(t, srv.URL+"/api/v1/processes?node="+remoteTestNode, http.StatusServiceUnavailable)

@@ -1,8 +1,9 @@
 //go:build integration
 
 // The "Add server" install-code flow against real Postgres and the real
-// role_permissions seed: the three fleet.enroll endpoints, and the one new
-// unauthenticated route, POST /api/v1/agent/install/redeem.
+// role_permissions seed: the three fleet.enroll endpoints, and the
+// unauthenticated POST /api/v1/agent/install/redeem. That redeem is one of
+// the few public routes is pinned in public_routes_integration_test.go.
 package app_test
 
 import (
@@ -14,7 +15,6 @@ import (
 	"net/http"
 	"os"
 	"regexp"
-	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -111,7 +111,7 @@ type createdCommand struct {
 	code string
 }
 
-var commandCodeRE = regexp.MustCompile(`--install-code '(atlas_install_[0-9a-f]{64})'`)
+var commandCodeRE = regexp.MustCompile(`ATLAS_INSTALL_CODE='(atlas_install_[0-9a-f]{64})'`)
 
 func (f *installFixture) create(client *http.Client, body string) createdCommand {
 	f.t.Helper()
@@ -260,12 +260,16 @@ func TestInstallCodeRedeemAuthorizesThePeerOnceForThePreassignedNode(t *testing.
 	}
 	for _, want := range []string{
 		"--version '" + installTestVersion + "'",
-		"--control-plane-url 'https://atlas.example.test'",
-		"--server-addr '/ip4/203.0.113.10/tcp/4102/p2p/12D3KooW",
+		"--server-url 'https://atlas.example.test'",
 		"raw.githubusercontent.com/HexaneCreations/Atlas/" + installTestVersion + "/packaging/atlas-agent/install.sh",
 	} {
 		if !strings.Contains(created.Command, want) {
 			t.Errorf("command lacks %q: %s", want, created.Command)
+		}
+	}
+	for _, notWant := range []string{"--install-code", "--server-addr", "--transport", "--control-plane-url"} {
+		if strings.Contains(created.Command, notWant) {
+			t.Errorf("command carries %q as a flag; the code and connection details come from redeem, not the command line: %s", notWant, created.Command)
 		}
 	}
 
@@ -287,8 +291,11 @@ func TestInstallCodeRedeemAuthorizesThePeerOnceForThePreassignedNode(t *testing.
 	peerA, peerB := newPeerID(t), newPeerID(t)
 	ip := freshIP()
 	status, body := f.redeemFrom(ip, created.code, peerA)
-	if status != http.StatusOK || body["node_id"] != created.NodeID || body["environment"] != "production" || len(body) != 2 {
-		t.Fatalf("redeem: %d %v, want 200 {node_id: %s, environment: production}", status, body, created.NodeID)
+	wantAddr := "/ip4/203.0.113.10/tcp/4102/p2p/"
+	if status != http.StatusOK || body["node_id"] != created.NodeID || body["environment"] != "production" ||
+		len(body) != 3 || !strings.HasPrefix(fmt.Sprint(body["server_addr"]), wantAddr) {
+		t.Fatalf("redeem: %d %v, want 200 {node_id: %s, environment: production, server_addr: %s...}",
+			status, body, created.NodeID, wantAddr)
 	}
 	node, env, role, st, ok := f.peerRow(peerA)
 	if !ok || node != created.NodeID || env != "production" || role != "agent" || st != "active" {
@@ -626,81 +633,5 @@ func TestInstallFlowLeavesExistingNodesUntouched(t *testing.T) {
 
 	if after := snapshot(); after != before {
 		t.Fatalf("existing node data changed:\nbefore %s\nafter  %s", before, after)
-	}
-}
-
-type routeRecorder struct{ patterns []string }
-
-func (r *routeRecorder) Handle(pattern string, _ http.Handler) {
-	r.patterns = append(r.patterns, pattern)
-}
-
-// publicRoutesBeforeInstallCodes is every /api/v1 route that, before this
-// change, answered an anonymous request with anything other than the
-// session check's 401 "authentication required" — i.e. reached handler
-// logic without a session. Frozen here so that the redeem route is provably
-// the only addition; it is not an endorsement of every entry.
-var publicRoutesBeforeInstallCodes = []string{
-	"GET /api/v1/activity",
-	"GET /api/v1/alerts",
-	"GET /api/v1/alerts/history",
-	"GET /api/v1/alerts/rules",
-	"GET /api/v1/alerts/rules/{ruleID}",
-	"GET /api/v1/auth/me",
-	"GET /api/v1/capacity/fleet",
-	"GET /api/v1/collectors",
-	"GET /api/v1/containers/{containerID}/logs/follow",
-	"GET /api/v1/cost/fleet",
-	"GET /api/v1/events",
-	"GET /api/v1/health/fleet",
-	"GET /api/v1/incidents",
-	"GET /api/v1/incidents/{incidentID}",
-	"GET /api/v1/metrics",
-	"GET /api/v1/metrics/latest",
-	"GET /api/v1/metrics/names",
-	"GET /api/v1/signals/fleet",
-	"GET /api/v1/slo",
-	"GET /api/v1/slo/{sloID}",
-	"GET /api/v1/slo/{sloID}/status",
-	"GET /api/v1/system/health",
-	"GET /api/v1/system/info",
-	"GET /api/v1/system/runtime",
-	"POST /api/v1/auth/login",
-	"POST /api/v1/auth/logout",
-}
-
-func TestRedeemIsTheOnlyNewUnauthenticatedRoute(t *testing.T) {
-	f := bootInstallServer(t)
-	rec := &routeRecorder{}
-	v1.NewHandler(v1.Deps{}).Mount(rec)
-	if len(rec.patterns) < 50 {
-		t.Fatalf("recorded only %d routes", len(rec.patterns))
-	}
-
-	param := regexp.MustCompile(`\{[^}]+\}`)
-	var public []string
-	for _, pattern := range rec.patterns {
-		method, path, _ := strings.Cut(pattern, " ")
-		body := ""
-		if method == http.MethodPost || method == http.MethodPut {
-			body = "{}"
-		}
-		status, raw := f.send(http.DefaultClient, method, param.ReplaceAllString(path, "x"), body,
-			map[string]string{"X-Forwarded-For": freshIP() + ", 172.18.0.2"})
-		var envelope struct {
-			Error struct {
-				Message string `json:"message"`
-			} `json:"error"`
-		}
-		_ = json.Unmarshal([]byte(raw), &envelope)
-		if status != http.StatusUnauthorized || envelope.Error.Message != "authentication required" {
-			public = append(public, pattern)
-		}
-	}
-	sort.Strings(public)
-	want := append(slices.Clone(publicRoutesBeforeInstallCodes), "POST /api/v1/agent/install/redeem")
-	sort.Strings(want)
-	if !slices.Equal(public, want) {
-		t.Fatalf("routes reachable without a session:\n got %v\nwant %v", public, want)
 	}
 }

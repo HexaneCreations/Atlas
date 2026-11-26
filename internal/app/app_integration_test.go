@@ -244,9 +244,9 @@ func releaseSuperadminSlot(t *testing.T, pool *pgxpool.Pool) {
 	}
 }
 
-func getJSON(t *testing.T, url string) (int, map[string]any) {
+func getJSON(t *testing.T, client *http.Client, url string) (int, map[string]any) {
 	t.Helper()
-	resp, err := http.Get(url)
+	resp, err := client.Get(url)
 	if err != nil {
 		t.Fatalf("GET %s: %v", url, err)
 	}
@@ -267,9 +267,10 @@ func getJSON(t *testing.T, url string) (int, map[string]any) {
 // the API answers.
 func TestAtlasBootsAndServes(t *testing.T) {
 	base := bootServer(t)
+	viewer := authenticatedTestClient(t, base, "viewer")
 
 	t.Run("liveness", func(t *testing.T) {
-		status, body := getJSON(t, base+"/healthz")
+		status, body := getJSON(t, http.DefaultClient, base+"/healthz")
 		if status != http.StatusOK {
 			t.Errorf("/healthz = %d, want 200", status)
 		}
@@ -279,7 +280,7 @@ func TestAtlasBootsAndServes(t *testing.T) {
 	})
 
 	t.Run("readiness reports a healthy database", func(t *testing.T) {
-		status, body := getJSON(t, base+"/readyz")
+		status, body := getJSON(t, http.DefaultClient, base+"/readyz")
 		if status != http.StatusOK {
 			t.Errorf("/readyz = %d, want 200", status)
 		}
@@ -289,7 +290,7 @@ func TestAtlasBootsAndServes(t *testing.T) {
 	})
 
 	t.Run("system info", func(t *testing.T) {
-		status, body := getJSON(t, base+"/api/v1/system/info")
+		status, body := getJSON(t, viewer, base+"/api/v1/system/info")
 		if status != http.StatusOK {
 			t.Fatalf("status = %d, want 200", status)
 		}
@@ -302,7 +303,7 @@ func TestAtlasBootsAndServes(t *testing.T) {
 	})
 
 	t.Run("system health names the database check", func(t *testing.T) {
-		_, body := getJSON(t, base+"/api/v1/system/health")
+		_, body := getJSON(t, http.DefaultClient, base+"/api/v1/system/health")
 		checks, _ := body["checks"].([]any)
 		if len(checks) == 0 {
 			t.Fatal("no health checks were reported")
@@ -326,7 +327,7 @@ func TestAtlasBootsAndServes(t *testing.T) {
 	})
 
 	t.Run("runtime telemetry reflects a live pool", func(t *testing.T) {
-		_, body := getJSON(t, base+"/api/v1/system/runtime")
+		_, body := getJSON(t, viewer, base+"/api/v1/system/runtime")
 		db, _ := body["database"].(map[string]any)
 		if maxConns, _ := db["max_conns"].(float64); maxConns <= 0 {
 			t.Errorf("database.max_conns = %v, want the configured ceiling", db["max_conns"])
