@@ -63,6 +63,11 @@ type Deps struct {
 	NotificationTestLimiter *corenotification.TestLimiter
 	NodeAlerts              v1.NodeAlertStore
 	NodeAlertRules          v1.NodeAlertRuleStore
+	// Monitors, MonitorProbe and MonitorAllowPrivateTargets back the
+	// website monitoring endpoints; a nil store answers 503.
+	Monitors                   v1.MonitorStore
+	MonitorProbe               v1.MonitorProbe
+	MonitorAllowPrivateTargets bool
 	// Users, Sessions and Authz back human-user authentication and
 	// authorization (see internal/core/user and internal/api/v1's auth
 	// endpoints). Nil disables login entirely rather than crashing it — the
@@ -128,6 +133,10 @@ func New(deps Deps) http.Handler {
 		NotificationTestLimiter: deps.NotificationTestLimiter,
 		NodeAlerts:              deps.NodeAlerts,
 		NodeAlertRules:          deps.NodeAlertRules,
+
+		Monitors:                   deps.Monitors,
+		MonitorProbe:               deps.MonitorProbe,
+		MonitorAllowPrivateTargets: deps.MonitorAllowPrivateTargets,
 
 		Users:          deps.Users,
 		Sessions:       deps.Sessions,

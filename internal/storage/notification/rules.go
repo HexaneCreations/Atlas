@@ -339,12 +339,13 @@ func (r *Repository) upsertState(ctx context.Context, op string, s corenotificat
 	return nil
 }
 
-// ListActiveStates returns every state that is not ok, oldest first.
+// ListActiveStates returns every node state that is not ok, oldest first.
+// Monitor states (node_id NULL) belong to the monitor evaluator.
 func (r *Repository) ListActiveStates(ctx context.Context) ([]corenotification.State, error) {
 	const op = "notification.Repository.ListActiveStates"
 
 	rows, err := r.pool.Query(ctx, `SELECT `+stateColumns+` FROM notification_state
-		WHERE state <> 'ok' ORDER BY state_since, trigger, node_id, subject`)
+		WHERE state <> 'ok' AND node_id IS NOT NULL ORDER BY state_since, trigger, node_id, subject`)
 	if err != nil {
 		return nil, errs.Wrap(err, errs.CodeUnavailable, "could not list active notification states").WithOp(op)
 	}

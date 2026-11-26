@@ -51,6 +51,7 @@ const (
 	PagePorts      Page = "ports"
 	PageDisks      Page = "disks"
 	PageUsers      Page = "users"
+	PageWebsites   Page = "websites"
 )
 
 // FleetOnlyPages have no per-node concept: a grant naming one of these must
@@ -69,12 +70,13 @@ var FleetOnlyPages = map[Page]bool{
 	PageOverview: true,
 	PageNodes:    true,
 	PageUsers:    true,
+	PageWebsites: true,
 }
 
 // KnownPages are every page a grant or bundle may name.
 var KnownPages = map[Page]bool{
 	PageOverview: true, PageNodes: true, PageContainers: true, PageProcesses: true,
-	PageServices: true, PageCron: true, PagePorts: true, PageDisks: true, PageUsers: true,
+	PageServices: true, PageCron: true, PagePorts: true, PageDisks: true, PageUsers: true, PageWebsites: true,
 }
 
 // Audit action labels recorded in user_audit_log.detail — see

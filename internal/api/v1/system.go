@@ -133,6 +133,12 @@ type Deps struct {
 	// NodeAlertRules enables and disables alert rules per node. Nil makes
 	// its endpoints answer 503.
 	NodeAlertRules NodeAlertRuleStore
+	// Monitors stores website monitors; nil makes their endpoints answer
+	// 503. MonitorProbe reports the prober's connectivity and may be nil.
+	// MonitorAllowPrivateTargets is monitoring.allow_private_targets.
+	Monitors                   MonitorStore
+	MonitorProbe               MonitorProbe
+	MonitorAllowPrivateTargets bool
 	// Users, Sessions and Authz back human-user authentication and
 	// authorization (see internal/core/user). Nil disables login and leaves
 	// every node-scoped read unauthenticated, the same convention as the
@@ -339,6 +345,20 @@ func (h *Handler) Mount(mux Registrar) {
 	mux.Handle("GET "+Prefix+"/nodes/{nodeID}/alert-rules", httpx.Handler(h.ListNodeAlertRules))
 	mux.Handle("PUT "+Prefix+"/nodes/{nodeID}/alert-rules/{ruleKey}", httpx.Handler(h.SetNodeAlertRule))
 	mux.Handle("DELETE "+Prefix+"/nodes/{nodeID}/alert-rules/{ruleKey}", httpx.Handler(h.ResetNodeAlertRule))
+
+	mux.Handle("GET "+Prefix+"/monitors", httpx.Handler(h.ListMonitors))
+	mux.Handle("POST "+Prefix+"/monitors", httpx.Handler(h.CreateMonitor))
+	mux.Handle("GET "+Prefix+"/monitors/{monitorID}", httpx.Handler(h.GetMonitor))
+	mux.Handle("PUT "+Prefix+"/monitors/{monitorID}", httpx.Handler(h.UpdateMonitor))
+	mux.Handle("DELETE "+Prefix+"/monitors/{monitorID}", httpx.Handler(h.DeleteMonitor))
+	mux.Handle("PUT "+Prefix+"/monitors/{monitorID}/active", httpx.Handler(h.SetMonitorActive))
+	mux.Handle("GET "+Prefix+"/monitors/{monitorID}/heartbeats", httpx.Handler(h.MonitorHeartbeats))
+	mux.Handle("GET "+Prefix+"/monitors/{monitorID}/history", httpx.Handler(h.MonitorHistory))
+	mux.Handle("GET "+Prefix+"/monitors/{monitorID}/events", httpx.Handler(h.MonitorEvents))
+	mux.Handle("GET "+Prefix+"/monitor-groups", httpx.Handler(h.ListMonitorGroups))
+	mux.Handle("POST "+Prefix+"/monitor-groups", httpx.Handler(h.CreateMonitorGroup))
+	mux.Handle("PUT "+Prefix+"/monitor-groups/{groupID}", httpx.Handler(h.UpdateMonitorGroup))
+	mux.Handle("DELETE "+Prefix+"/monitor-groups/{groupID}", httpx.Handler(h.DeleteMonitorGroup))
 
 	mux.Handle("GET "+Prefix+"/metrics", httpx.Handler(h.QueryMetrics))
 	mux.Handle("GET "+Prefix+"/metrics/latest", httpx.Handler(h.LatestMetrics))

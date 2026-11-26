@@ -88,6 +88,22 @@ type Config struct {
 	Collection    Collection           `yaml:"collection" json:"collection" env:"COLLECTION"`
 	Fleet         Fleet                `yaml:"fleet" json:"fleet" env:"FLEET"`
 	Notifications Notifications        `yaml:"notifications" json:"notifications" env:"NOTIFICATIONS"`
+	Monitoring    Monitoring           `yaml:"monitoring" json:"monitoring" env:"MONITORING"`
+}
+
+// Monitoring configures the website monitors atlas-server probes.
+type Monitoring struct {
+	// AllowPrivateTargets lets a monitor reach loopback, RFC 1918, IPv6
+	// unique-local and CGNAT addresses. Off by default; deliberately not
+	// settable from the UI. Link-local and cloud metadata addresses stay
+	// refused either way.
+	AllowPrivateTargets bool `yaml:"allow_private_targets" json:"allow_private_targets" env:"ALLOW_PRIVATE_TARGETS"`
+	// MaxConcurrentChecks bounds how many checks run at once.
+	MaxConcurrentChecks int `yaml:"max_concurrent_checks" json:"max_concurrent_checks" env:"MAX_CONCURRENT_CHECKS"`
+	// Canaries are host:port addresses the prober dials to tell its own
+	// loss of connectivity from many sites failing at once. Empty (the
+	// default) decides by correlating failures across monitors instead.
+	Canaries []string `yaml:"canaries" json:"canaries" env:"CANARIES"`
 }
 
 // Notifications configures outbound notification delivery.
@@ -366,6 +382,7 @@ func Default() Config {
 			RequestTimeout:       30 * time.Second,
 			MaxRequestsPerMinute: 240, // 4/s sustained: well above a 15s collection interval, even with spool replay
 		},
+		Monitoring: Monitoring{MaxConcurrentChecks: 16},
 	}
 }
 

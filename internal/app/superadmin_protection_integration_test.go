@@ -320,7 +320,8 @@ func protectedActions() []protectedAction {
 			body: func(u targetUser) string {
 				return `{"version":"` + u.accessVersion + `","roles":[{"role":"admin","fleet_wide":true}],"pages":[` +
 					`{"page":"overview","fleet_wide":true},{"page":"nodes","fleet_wide":true},{"page":"processes","fleet_wide":true},` +
-					`{"page":"services","fleet_wide":true},{"page":"cron","fleet_wide":true},{"page":"ports","fleet_wide":true}]}`
+					`{"page":"services","fleet_wide":true},{"page":"cron","fleet_wide":true},{"page":"ports","fleet_wide":true},` +
+					`{"page":"websites","fleet_wide":true}]}`
 			}},
 	}
 }

@@ -30,6 +30,16 @@ const testDatabaseURLEnv = "ATLAS_TEST_DATABASE_URL"
 // newDatabase migrates a fresh database and returns its pool.
 func newDatabase(t *testing.T) *pgxpool.Pool {
 	t.Helper()
+	pool := freshUnmigrated(t)
+	if _, err := postgres.NewMigrator(pool, migrations.FS, log.Discard()).Apply(context.Background()); err != nil {
+		t.Fatalf("apply migrations: %v", err)
+	}
+	return pool
+}
+
+// freshUnmigrated creates an empty database and returns its pool.
+func freshUnmigrated(t *testing.T) *pgxpool.Pool {
+	t.Helper()
 
 	dsn := os.Getenv(testDatabaseURLEnv)
 	if dsn == "" {
@@ -72,10 +82,6 @@ func newDatabase(t *testing.T) *pgxpool.Pool {
 		t.Fatalf("pool start: %v", err)
 	}
 	t.Cleanup(func() { _ = pool.Stop(context.Background()) })
-
-	if _, err := postgres.NewMigrator(pool.DB(), migrations.FS, log.Discard()).Apply(ctx); err != nil {
-		t.Fatalf("apply migrations: %v", err)
-	}
 	return pool.DB()
 }
 

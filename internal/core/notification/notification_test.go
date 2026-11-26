@@ -3,6 +3,7 @@ package notification
 import (
 	"reflect"
 	"testing"
+	"time"
 )
 
 func ptr[T any](v T) *T { return &v }
@@ -145,5 +146,18 @@ func TestChannelInputValidate(t *testing.T) {
 		if err := in.Validate(); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
+	}
+}
+
+// Node event ids are the dedupe key stored in notification_deliveries; a
+// change to their format would re-send every alert already delivered.
+func TestEventIDFormatIsStable(t *testing.T) {
+	t.Parallel()
+	anchor := time.Unix(1764000000, 0)
+	if got := eventID(TriggerDiskPct, "node-1", "/var", anchor, KindFiring, SeverityCritical); got != "notif-disk_pct-node-1-/var-1764000000-firing-critical" {
+		t.Errorf("eventID = %q", got)
+	}
+	if got := eventID(TriggerNodeDown, "node-1", "", anchor, KindRecovered, SeverityCritical); got != "notif-node_down-node-1--1764000000-recovered-critical" {
+		t.Errorf("eventID = %q", got)
 	}
 }

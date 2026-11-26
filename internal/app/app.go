@@ -111,6 +111,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*App, error) {
 
 	incidentPipe := newIncidentPipeline(logger, pool)
 	notificationPipe := newNotificationPipeline(logger, pool, notificationKey, identity.NodeID, cfg.Collection.DefaultInterval)
+	monitorPipe := newMonitorPipeline(logger, pool, notificationKey, cfg.Monitoring)
 	if notificationKey != nil {
 		notificationTester = notificationPipe
 	}
@@ -164,6 +165,10 @@ func New(cfg *config.Config, logger *slog.Logger) (*App, error) {
 		NotificationTester: notificationTester,
 		NodeAlerts:         lazyNotificationStore{pool: pool, key: notificationKey},
 		NodeAlertRules:     lazyNotificationStore{pool: pool, key: notificationKey},
+
+		Monitors:                   lazyMonitorStore{pool: pool, key: notificationKey},
+		MonitorProbe:               monitorPipe,
+		MonitorAllowPrivateTargets: cfg.Monitoring.AllowPrivateTargets,
 
 		Users:          lazyUserStore{pool: pool},
 		Sessions:       lazyUserStore{pool: pool},
@@ -224,6 +229,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*App, error) {
 		},
 		incidentPipe,
 		notificationPipe,
+		monitorPipe,
 		alertPipe,
 		collection,
 		// The activity recorder starts after the pipeline so it is listening

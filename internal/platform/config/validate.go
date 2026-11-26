@@ -63,6 +63,7 @@ func (c *Config) Validate() error {
 		v.addf("public_hostname", "%q is not a host name, optionally with :port", c.PublicHostname)
 	}
 	c.Notifications.validate(v)
+	c.Monitoring.validate(v)
 
 	if err := c.Logging.Validate(); err != nil {
 		v.addf("logging", "%s", err)
@@ -79,6 +80,17 @@ func (n Notifications) validate(v *violations) {
 	}
 	if _, err := secretbox.ParseKey(n.EncryptionKey.Reveal()); err != nil {
 		v.addf("notifications.encryption_key", "%s (want %d random bytes, base64-encoded)", err, secretbox.KeySize)
+	}
+}
+
+func (m Monitoring) validate(v *violations) {
+	if m.MaxConcurrentChecks < 1 || m.MaxConcurrentChecks > 256 {
+		v.addf("monitoring.max_concurrent_checks", "must be between 1 and 256, got %d", m.MaxConcurrentChecks)
+	}
+	for _, c := range m.Canaries {
+		if _, port, err := net.SplitHostPort(c); err != nil || port == "" {
+			v.addf("monitoring.canaries", "%q is not host:port", c)
+		}
 	}
 }
 
