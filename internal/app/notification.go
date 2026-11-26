@@ -187,6 +187,9 @@ func (l lazyNotificationStore) ListChannels(ctx context.Context) ([]corenotifica
 func (l lazyNotificationStore) GetChannel(ctx context.Context, id string) (corenotification.Channel, error) {
 	return l.repo().GetChannel(ctx, id)
 }
+func (l lazyNotificationStore) ChannelSecret(ctx context.Context, channelID string) (string, error) {
+	return l.repo().ChannelSecret(ctx, channelID)
+}
 func (l lazyNotificationStore) CreateChannel(ctx context.Context, in corenotification.ChannelInput) (corenotification.Channel, error) {
 	return l.repo().CreateChannel(ctx, in)
 }

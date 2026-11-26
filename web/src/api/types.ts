@@ -410,6 +410,10 @@ export interface Node {
   last_seen_at: string;
   seconds_since_seen: number;
   clock_skew_seconds?: number;
+  /** null: not muted. [MUTED_INDEFINITELY]: until unmuted. Otherwise when the
+   *  mute ends. */
+  alerts_muted_until: string | null;
+  archived_at: string | null;
 }
 
 export interface ListNodesResponse {
@@ -860,4 +864,99 @@ export interface ListActivityResponse {
   /** Events the bus dropped because the recorder fell behind. Non-zero means
    *  the feed has gaps. */
   dropped: number;
+}
+
+// --------------------------------------------------------- Notifications ----
+
+export type NotificationChannelType = "email" | "teams" | "webhook";
+export type NotificationSeverity = "warning" | "critical";
+
+/** GET /api/v1/notifications/channels/{id}. The destination URL and header
+ *  values are never served: only the URL's host and the headers' names. Both
+ *  are empty when the stored secret cannot be read. */
+export interface NotificationChannel {
+  id: string;
+  name: string;
+  type: NotificationChannelType;
+  enabled: boolean;
+  min_severity: NotificationSeverity;
+  /** The non-secret settings: `template` and `content_type` for a webhook. */
+  config: Record<string, unknown>;
+  secret_configured: boolean;
+  destination_host: string;
+  header_names: string[];
+  created_at: string;
+  updated_at: string;
+}
+
+/** GET /api/v1/notifications/channels */
+export interface ListNotificationChannelsResponse {
+  channels: NotificationChannel[];
+  total: number;
+}
+
+/** POST /api/v1/notifications/channels, PUT /api/v1/notifications/channels/{id} */
+export interface NotificationChannelRequest {
+  name: string;
+  type: NotificationChannelType;
+  enabled: boolean;
+  min_severity: NotificationSeverity;
+  config: Record<string, unknown>;
+  /** Write-only JSON text, `{"url", "headers"}`. Omitted on update, the stored
+   *  one is kept; with an empty url the stored url is kept and so is the value
+   *  of any header left empty. */
+  secret?: string;
+}
+
+/** POST /api/v1/notifications/channels/test */
+export interface TestNotificationDraftRequest extends NotificationChannelRequest {
+  /** The saved channel whose stored secret fills in what `secret` leaves out. */
+  channel_id?: string;
+}
+
+/** `error` is one of the server's fixed category messages, empty when ok. */
+export interface TestNotificationResponse {
+  ok: boolean;
+  error: string;
+}
+
+export interface NotificationDelivery {
+  id: string;
+  event_id: string;
+  channel_id: string;
+  channel_type: NotificationChannelType;
+  kind: "firing" | "escalated" | "recovered" | "flapping" | "test";
+  trigger: string;
+  node_id?: string;
+  subject?: string;
+  severity?: string;
+  title?: string;
+  message?: string;
+  status: "pending" | "delivered" | "failed";
+  attempts: number;
+  next_attempt_at?: string;
+  last_error?: string;
+  delivered_at?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** GET /api/v1/notifications/deliveries. `total` is this page's length. */
+export interface ListNotificationDeliveriesResponse {
+  deliveries: NotificationDelivery[];
+  total: number;
+}
+
+export type MuteDuration = "1h" | "4h" | "24h" | "7d" | "until_unmuted";
+
+/** PUT /api/v1/nodes/{nodeID}/alerts-mute */
+export interface MuteNodeRequest {
+  duration: MuteDuration;
+}
+
+/** The answer to a mute. */
+export interface NodeAlertsResponse {
+  node_id: string;
+  alerts_muted_until: string | null;
+  archived_at: string | null;
 }

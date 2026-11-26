@@ -14,6 +14,7 @@ import (
 	v1 "github.com/hexane/atlas/internal/api/v1"
 	"github.com/hexane/atlas/internal/core/notification"
 	"github.com/hexane/atlas/internal/platform/config"
+	"github.com/hexane/atlas/internal/platform/errs"
 	"github.com/hexane/atlas/internal/platform/eventbus"
 	"github.com/hexane/atlas/internal/platform/health"
 	"github.com/hexane/atlas/internal/platform/postgres"
@@ -64,6 +65,13 @@ func (f *fakeNotificationStore) GetChannel(_ context.Context, id string) (notifi
 		return notification.Channel{}, notFoundErr{}
 	}
 	return c, nil
+}
+func (f *fakeNotificationStore) ChannelSecret(_ context.Context, id string) (string, error) {
+	secret, ok := f.secrets[id]
+	if !ok {
+		return "", errs.New(errs.CodeFailedPrecondition, "no secret")
+	}
+	return secret, nil
 }
 func (f *fakeNotificationStore) put(id string, in notification.ChannelInput) notification.Channel {
 	if in.Secret != nil {
@@ -119,8 +127,8 @@ func TestCreateNotificationChannelAcceptsSecretButNeverReturnsIt(t *testing.T) {
 	store := newFakeNotificationStore()
 	srv := newNotificationServer(t, store)
 
-	const secret = "https://example.invalid/workflows/run?sig=super-secret-signature"
-	body := `{"name":"ops","type":"teams","secret":"` + secret + `"}`
+	const secret = `{"url":"https://prod-1.westus.logic.azure.com/workflows/run?sig=super-secret-signature"}`
+	body := `{"name":"ops","type":"teams","secret":` + string(mustJSON(t, secret)) + `}`
 	resp, err := http.Post(srv.URL+"/api/v1/notifications/channels", "application/json", strings.NewReader(body))
 	if err != nil {
 		t.Fatalf("post: %v", err)

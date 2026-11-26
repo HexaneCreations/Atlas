@@ -7,7 +7,7 @@ import { useSystemInfo } from "../api/queries";
 import { useAuth } from "../auth/AuthContext";
 import { useTheme } from "./useTheme";
 import { NAV_PAGES } from "./pages";
-import { canReachPage } from "./pageAccess";
+import { canSeeNavPage } from "./pageAccess";
 
 /**
  * The primary navigation.
@@ -87,12 +87,13 @@ function SidebarBody() {
   const { user } = useAuth();
 
   // Monitor and Infrastructure items are shown only for pages this caller
-  // can actually reach (CurrentUser.page_access from GET /auth/me) — the
-  // same idea as the Admin section's can_manage_users gate below, one axis
-  // over. Overview is always kept (see shell/pageAccess). The Admin section
-  // stays on can_manage_users alone, unchanged.
-  const monitor = MONITOR_ITEMS.filter((p) => canReachPage(user, p.page));
-  const infrastructure = INFRASTRUCTURE_ITEMS.filter((p) => canReachPage(user, p.page));
+  // can actually reach (CurrentUser.page_access from GET /auth/me); Overview
+  // is always kept. Admin items each go by their own flag (can_manage_users,
+  // can_manage_notifications). The backend enforces the real boundary on
+  // every request either way. See shell/pageAccess.
+  const monitor = MONITOR_ITEMS.filter((p) => canSeeNavPage(user, p));
+  const infrastructure = INFRASTRUCTURE_ITEMS.filter((p) => canSeeNavPage(user, p));
+  const admin = ADMIN_ITEMS.filter((p) => canSeeNavPage(user, p));
 
   return (
     <>
@@ -101,10 +102,7 @@ function SidebarBody() {
       <nav className="scroll-thin flex-1 overflow-y-auto px-3 pt-4">
         <NavSection label="Monitor" items={monitor} />
         <NavSection label="Infrastructure" items={infrastructure} />
-        {/* Only a caller Atlas itself has told us can manage users sees this
-            — see CurrentUser.can_manage_users. The backend enforces the real
-            boundary independently on every /users request either way. */}
-        {user?.can_manage_users ? <NavSection label="Admin" items={ADMIN_ITEMS} /> : null}
+        <NavSection label="Admin" items={admin} />
       </nav>
 
       <div className="border-t border-border px-4 py-3">

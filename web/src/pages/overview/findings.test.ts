@@ -37,7 +37,7 @@ function node(over: Partial<Node> = {}): Node {
   return {
     node_id: "n1", hostname: "host-1", status: "up",
     first_seen_at: "2026-01-01T00:00:00Z", last_seen_at: "2026-01-01T00:00:00Z",
-    seconds_since_seen: 1,
+    seconds_since_seen: 1, alerts_muted_until: null, archived_at: null,
     ...over,
   };
 }

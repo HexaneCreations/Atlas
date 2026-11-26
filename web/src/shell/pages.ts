@@ -1,4 +1,5 @@
 import {
+  Bell,
   LayoutDashboard,
   Server,
   Container,
@@ -10,7 +11,7 @@ import {
   Users,
   type LucideIcon,
 } from "lucide-react";
-import type { Page } from "../api/types";
+import type { CurrentUser, Page } from "../api/types";
 
 /**
  * The single source of truth for Atlas's pages: the sidebar's grouping and
@@ -25,8 +26,12 @@ export interface NavPage {
   section: "Monitor" | "Infrastructure" | "Admin";
   /** The pageauthz page this route belongs to — mirrors
    *  internal/core/pageauthz.Page. Drives nav-hide and route redirects via
-   *  shell/pageAccess, using CurrentUser.page_access from GET /auth/me. */
-  page: Page;
+   *  shell/pageAccess, using CurrentUser.page_access from GET /auth/me.
+   *  Absent for a page that is no pageauthz page; it has a `flag` instead. */
+  page?: Page;
+  /** Shown only to a caller for whom GET /auth/me reports this true, whatever
+   *  its page access: these reach privileged control-plane surfaces. */
+  flag?: keyof Pick<CurrentUser, "can_manage_users" | "can_manage_notifications">;
 }
 
 export const NAV_PAGES: NavPage[] = [
@@ -38,8 +43,6 @@ export const NAV_PAGES: NavPage[] = [
   { to: "/cron", label: "Scheduled jobs", icon: Clock, section: "Infrastructure", page: "cron" },
   { to: "/ports", label: "Ports", icon: Network, section: "Infrastructure", page: "ports" },
   { to: "/disks", label: "Disks", icon: HardDrive, section: "Infrastructure", page: "disks" },
-  // Shown only to a caller CurrentUser.can_manage_users names — see
-  // shell/Sidebar.tsx — never a static nav entry every viewer sees, since
-  // this is the one section that reaches a privileged control-plane surface.
-  { to: "/users", label: "Users", icon: Users, section: "Admin", page: "users" },
+  { to: "/users", label: "Users", icon: Users, section: "Admin", page: "users", flag: "can_manage_users" },
+  { to: "/notifications", label: "Notifications", icon: Bell, section: "Admin", flag: "can_manage_notifications" },
 ];

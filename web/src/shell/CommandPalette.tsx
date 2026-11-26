@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router";
 import { Search } from "lucide-react";
 import { NAV_PAGES } from "./pages";
-import { canReachPage } from "./pageAccess";
+import { canSeeNavPage } from "./pageAccess";
 import { useAuth } from "../auth/AuthContext";
 import { EmptyState, EmptyAction } from "../components/EmptyState";
 import { emptyArt } from "../lib/assets";
@@ -29,15 +29,8 @@ export function CommandPalette() {
 
   // Same gating as the sidebar: a page this caller cannot reach should not
   // be one keystroke away, even though the backend would refuse the request
-  // anyway. Admin stays on can_manage_users; every other page on
-  // page_access (Overview always included — see shell/pageAccess).
-  const pages = useMemo(
-    () =>
-      NAV_PAGES.filter((p) =>
-        p.section === "Admin" ? (user?.can_manage_users ?? false) : canReachPage(user, p.page),
-      ),
-    [user],
-  );
+  // anyway. See shell/pageAccess.
+  const pages = useMemo(() => NAV_PAGES.filter((p) => canSeeNavPage(user, p)), [user]);
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {

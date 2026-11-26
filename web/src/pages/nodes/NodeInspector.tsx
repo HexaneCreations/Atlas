@@ -7,6 +7,7 @@ import { CopyButton } from "../processes/ProcessInspector";
 import { emptyArt } from "../../lib/assets";
 import { nodePrimaryLabel, nodeSecondaryLabel } from "../../lib/nodeIdentity";
 import { formatAgo, formatBytes, formatDuration, formatValue } from "../../format";
+import { AlertMute } from "./AlertMute";
 import { readVitals, type Filesystem, type Interface, type Vitals } from "./nodeMetrics";
 import { UNTAGGED } from "./useNodeTable";
 
@@ -88,6 +89,8 @@ export function NodeInspector({
           <X size={16} />
         </button>
       </header>
+
+      <AlertMute key={node.node_id} node={node} />
 
       <nav className="flex flex-wrap gap-1 border-b border-border px-2 py-1.5" role="tablist">
         {(

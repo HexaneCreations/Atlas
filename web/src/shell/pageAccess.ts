@@ -1,4 +1,5 @@
 import type { CurrentUser, Page } from "../api/types";
+import type { NavPage } from "./pages";
 
 /**
  * Overview is always reachable, whatever GET /auth/me reports.
@@ -26,4 +27,11 @@ export function canReachPage(user: CurrentUser | null, page: Page): boolean {
   if (!user) return false;
   if (ALWAYS_REACHABLE.has(page)) return true;
   return user.page_access.some((entry) => entry.page === page);
+}
+
+/** Whether a nav entry shows: by its flag when it has one, else by page
+ *  access. */
+export function canSeeNavPage(user: CurrentUser | null, nav: NavPage): boolean {
+  if (nav.flag) return user?.[nav.flag] ?? false;
+  return nav.page !== undefined && canReachPage(user, nav.page);
 }

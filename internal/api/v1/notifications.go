@@ -1,7 +1,7 @@
 package v1
 
 import (
-	"encoding/json"
+	"context"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -16,8 +16,10 @@ import (
 
 // NotificationChannelRequest is the body of a create or update request.
 // Secret is write-only: it is accepted here, stored encrypted, and never
-// returned — responses carry only secret_configured. Omitting it on update
-// keeps the stored secret.
+// returned — responses carry only secret_configured and the masked
+// destination. Omitting it on update keeps the stored secret; so does an
+// empty url in it, or, with an empty url, an empty header value, for that
+// part alone (see [notification.PrepareUpdate]).
 type NotificationChannelRequest struct {
 	Name        string         `json:"name"`
 	Type        string         `json:"type"`
@@ -42,6 +44,16 @@ func (req NotificationChannelRequest) toInput() notification.ChannelInput {
 	}
 }
 
+// decodeChannel decodes a create or update request. Its error is not the
+// decoder's own, which can quote the body and is logged.
+func decodeChannel(r *http.Request, op string) (notification.ChannelInput, error) {
+	var req NotificationChannelRequest
+	if err := decodeStrict(r, &req); err != nil {
+		return notification.ChannelInput{}, errs.New(errs.CodeInvalidArgument, "invalid request body").WithOp(op)
+	}
+	return req.toInput(), nil
+}
+
 // NotificationChannelResponse is one notification channel. It never carries
 // the secret, only whether one is configured — see
 // [TestNotificationChannelResponseHasNoSecretField].
@@ -53,16 +65,26 @@ type NotificationChannelResponse struct {
 	MinSeverity      string         `json:"min_severity"`
 	Config           map[string]any `json:"config"`
 	SecretConfigured bool           `json:"secret_configured"`
-	CreatedAt        time.Time      `json:"created_at"`
-	UpdatedAt        time.Time      `json:"updated_at"`
+	// DestinationHost and HeaderNames are all a reader sees of the secret.
+	// Both are empty when it cannot be read.
+	DestinationHost string    `json:"destination_host"`
+	HeaderNames     []string  `json:"header_names"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
 }
 
-func presentChannel(c notification.Channel) NotificationChannelResponse {
+func presentChannel(ctx context.Context, store NotificationStore, c notification.Channel) NotificationChannelResponse {
 	config := c.Config
 	if config == nil {
 		config = map[string]any{}
 	}
+	destination := notification.DescribeDestination(ctx, store, c)
+	headerNames := destination.HeaderNames
+	if headerNames == nil {
+		headerNames = []string{}
+	}
 	return NotificationChannelResponse{
+		DestinationHost: destination.Host, HeaderNames: headerNames,
 		ID: c.ID, Name: c.Name, Type: string(c.Type), Enabled: c.Enabled, MinSeverity: string(c.MinSeverity),
 		Config: config, SecretConfigured: c.SecretConfigured, CreatedAt: c.CreatedAt, UpdatedAt: c.UpdatedAt,
 	}
@@ -99,7 +121,7 @@ func (h *Handler) ListNotificationChannels(w http.ResponseWriter, r *http.Reques
 	}
 	out := make([]NotificationChannelResponse, 0, len(channels))
 	for _, c := range channels {
-		out = append(out, presentChannel(c))
+		out = append(out, presentChannel(r.Context(), store, c))
 	}
 	httpx.JSON(w, r, http.StatusOK, ListNotificationChannelsResponse{Channels: out, Total: len(out)})
 	return nil
@@ -120,7 +142,7 @@ func (h *Handler) GetNotificationChannel(w http.ResponseWriter, r *http.Request)
 	if err != nil {
 		return err
 	}
-	httpx.JSON(w, r, http.StatusOK, presentChannel(c))
+	httpx.JSON(w, r, http.StatusOK, presentChannel(r.Context(), store, c))
 	return nil
 }
 
@@ -135,12 +157,11 @@ func (h *Handler) CreateNotificationChannel(w http.ResponseWriter, r *http.Reque
 		return err
 	}
 
-	var req NotificationChannelRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		return errs.New(errs.CodeInvalidArgument, "invalid request body").WithOp(op)
+	in, err := decodeChannel(r, op)
+	if err != nil {
+		return err
 	}
-	in := req.toInput()
-	if err := in.Validate(); err != nil {
+	if err := in.ValidateNew(); err != nil {
 		return err
 	}
 
@@ -150,7 +171,7 @@ func (h *Handler) CreateNotificationChannel(w http.ResponseWriter, r *http.Reque
 	}
 	logAdminAction(r, "notification channel created",
 		slog.String("channel_id", created.ID), slog.String("channel_type", string(created.Type)))
-	httpx.JSON(w, r, http.StatusCreated, presentChannel(created))
+	httpx.JSON(w, r, http.StatusCreated, presentChannel(r.Context(), store, created))
 	return nil
 }
 
@@ -165,12 +186,12 @@ func (h *Handler) UpdateNotificationChannel(w http.ResponseWriter, r *http.Reque
 		return err
 	}
 
-	var req NotificationChannelRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		return errs.New(errs.CodeInvalidArgument, "invalid request body").WithOp(op)
+	in, err := decodeChannel(r, op)
+	if err != nil {
+		return err
 	}
-	in := req.toInput()
-	if err := in.Validate(); err != nil {
+	in, err = notification.PrepareUpdate(r.Context(), store, r.PathValue("channelID"), in)
+	if err != nil {
 		return err
 	}
 
@@ -181,7 +202,7 @@ func (h *Handler) UpdateNotificationChannel(w http.ResponseWriter, r *http.Reque
 	logAdminAction(r, "notification channel updated",
 		slog.String("channel_id", updated.ID), slog.String("channel_type", string(updated.Type)),
 		slog.Bool("secret_replaced", in.Secret != nil))
-	httpx.JSON(w, r, http.StatusOK, presentChannel(updated))
+	httpx.JSON(w, r, http.StatusOK, presentChannel(r.Context(), store, updated))
 	return nil
 }
 

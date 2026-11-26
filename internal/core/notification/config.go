@@ -65,23 +65,23 @@ var headerDenyList = map[string]bool{
 // them.
 func validateDestinationURL(raw string, allowedHostSuffixes []string, op string) error {
 	if raw == "" {
-		return errs.New(errs.CodeInvalidArgument, "a destination url is required").WithOp(op)
+		return errs.New(errs.CodeInvalidArgument, "a destination url is required").WithOp(op).WithDetail("field", "url")
 	}
 	if len(raw) > MaxDestinationURLLength {
-		return errs.New(errs.CodeInvalidArgument, "the destination url exceeds %d characters", MaxDestinationURLLength).WithOp(op)
+		return errs.New(errs.CodeInvalidArgument, "the destination url exceeds %d characters", MaxDestinationURLLength).WithOp(op).WithDetail("field", "url")
 	}
 	u, err := url.Parse(raw)
 	if err != nil {
-		return errs.New(errs.CodeInvalidArgument, "the destination url is not valid").WithOp(op)
+		return errs.New(errs.CodeInvalidArgument, "the destination url is not valid").WithOp(op).WithDetail("field", "url")
 	}
 	if u.Scheme != "https" {
-		return errs.New(errs.CodeInvalidArgument, "the destination url must use https").WithOp(op)
+		return errs.New(errs.CodeInvalidArgument, "the destination url must use https").WithOp(op).WithDetail("field", "url")
 	}
 	if u.User != nil {
-		return errs.New(errs.CodeInvalidArgument, "the destination url must not carry userinfo").WithOp(op)
+		return errs.New(errs.CodeInvalidArgument, "the destination url must not carry userinfo").WithOp(op).WithDetail("field", "url")
 	}
 	if strings.ContainsAny(raw, "\r\n") {
-		return errs.New(errs.CodeInvalidArgument, "the destination url must not contain a newline").WithOp(op)
+		return errs.New(errs.CodeInvalidArgument, "the destination url must not contain a newline").WithOp(op).WithDetail("field", "url")
 	}
 	if len(allowedHostSuffixes) == 0 {
 		return nil
@@ -93,37 +93,48 @@ func validateDestinationURL(raw string, allowedHostSuffixes []string, op string)
 		}
 	}
 	return errs.New(errs.CodeInvalidArgument,
-		"the destination host %q is not one of %s", host, strings.Join(allowedHostSuffixes, ", ")).WithOp(op)
+		"the destination host %q is not one of %s", host, strings.Join(allowedHostSuffixes, ", ")).WithOp(op).WithDetail("field", "url")
 }
 
 // validateHeaders checks a channel's additional-header config: no more
 // than [MaxHeaderCount], each name and value within its length cap, no
-// denied header name, and no CR or LF in any name or value (which would
-// otherwise let a header value inject a second header or split the
-// request).
+// denied header name, no character HTTP does not allow, and so no CR or LF
+// in any name or value (which would otherwise let a header value inject a
+// second header or split the request).
 func validateHeaders(headers map[string]string, op string) error {
 	if len(headers) > MaxHeaderCount {
-		return errs.New(errs.CodeInvalidArgument, "at most %d headers are allowed, got %d", MaxHeaderCount, len(headers)).WithOp(op)
+		return errs.New(errs.CodeInvalidArgument, "at most %d headers are allowed, got %d", MaxHeaderCount, len(headers)).WithOp(op).WithDetail("field", "headers")
 	}
 	for name, value := range headers {
 		if name == "" {
-			return errs.New(errs.CodeInvalidArgument, "a header name must not be empty").WithOp(op)
+			return errs.New(errs.CodeInvalidArgument, "a header name must not be empty").WithOp(op).WithDetail("field", "headers")
 		}
 		if strings.ContainsAny(name, "\r\n") || strings.ContainsAny(value, "\r\n") {
-			return errs.New(errs.CodeInvalidArgument, "header %q must not contain a newline in its name or value", name).WithOp(op)
+			return errs.New(errs.CodeInvalidArgument, "header %q must not contain a newline in its name or value", name).WithOp(op).WithDetail("field", "headers")
+		}
+		if strings.ContainsFunc(name, notHeaderNameChar) || strings.ContainsFunc(value, notHeaderValueChar) {
+			return errs.New(errs.CodeInvalidArgument, "header %q has a character HTTP does not allow", name).WithOp(op).WithDetail("field", "headers")
 		}
 		if len(name) > MaxHeaderNameLength {
-			return errs.New(errs.CodeInvalidArgument, "header name %q exceeds %d characters", name, MaxHeaderNameLength).WithOp(op)
+			return errs.New(errs.CodeInvalidArgument, "header name %q exceeds %d characters", name, MaxHeaderNameLength).WithOp(op).WithDetail("field", "headers")
 		}
 		if len(value) > MaxHeaderValueLength {
-			return errs.New(errs.CodeInvalidArgument, "header %q value exceeds %d characters", name, MaxHeaderValueLength).WithOp(op)
+			return errs.New(errs.CodeInvalidArgument, "header %q value exceeds %d characters", name, MaxHeaderValueLength).WithOp(op).WithDetail("field", "headers")
 		}
 		if headerDenyList[http.CanonicalHeaderKey(name)] {
-			return errs.New(errs.CodeInvalidArgument, "header %q may not be set by channel config", name).WithOp(op)
+			return errs.New(errs.CodeInvalidArgument, "header %q may not be set by channel config", name).WithOp(op).WithDetail("field", "headers")
 		}
 	}
 	return nil
 }
+
+// notHeaderNameChar reports whether r may not appear in a header name (an
+// RFC 9110 token); net/http refuses to send one that has it.
+func notHeaderNameChar(r rune) bool {
+	return !('a' <= r && r <= 'z' || 'A' <= r && r <= 'Z' || '0' <= r && r <= '9' || strings.ContainsRune("!#$%&'*+-.^_`|~", r))
+}
+
+func notHeaderValueChar(r rune) bool { return r < ' ' && r != '\t' || r == 0x7f }
 
 // maskURL reduces a destination URL to its scheme and host, the only part
 // safe to show a reader who can see a channel exists but must not see

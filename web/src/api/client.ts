@@ -8,13 +8,21 @@ import type {
   ErrorCode,
   GrantPageAccessRequest,
   GrantRoleRequest,
+  ListNotificationChannelsResponse,
+  ListNotificationDeliveriesResponse,
   ListRoleAccessResponse,
   ListUserAuditResponse,
   ListUserPageAccessResponse,
   ListUsersResponse,
+  MuteNodeRequest,
+  NodeAlertsResponse,
+  NotificationChannel,
+  NotificationChannelRequest,
   PutUserAccessRequest,
   PutUserAccessResponse,
   ResetPasswordResponse,
+  TestNotificationDraftRequest,
+  TestNotificationResponse,
   UserAccessResponse,
 } from "./types";
 
@@ -29,10 +37,11 @@ import type {
  *
  * apiGet remains the only verb for monitored-infrastructure data — Atlas is
  * read-only toward what it observes, and this client makes that guarantee
- * visible by offering no write verb for it. The /auth and /users functions
- * below are the deliberate exception: they write to Atlas's own control-plane
- * state — sessions, and the human-user accounts and roles that govern access
- * to Atlas itself — never to a monitored host.
+ * visible by offering no write verb for it. The /auth, /users, /notifications
+ * and node-mute functions below are the deliberate exception: they write to
+ * Atlas's own control-plane state — sessions, the human-user accounts and
+ * roles that govern access to Atlas itself, and who is notified of what —
+ * never to a monitored host.
  */
 
 /** Base path for version 1. Requests are same-origin; see vite.config.ts. */
@@ -45,14 +54,17 @@ export class ApiError extends Error {
   readonly details: Record<string, unknown> | undefined;
   /** Quote this in a bug report to find the exact server-side request. */
   readonly requestId: string | undefined;
+  /** From Retry-After, on a rate-limited response. */
+  readonly retryAfterSeconds: number | undefined;
 
-  constructor(status: number, body: ApiErrorBody) {
+  constructor(status: number, body: ApiErrorBody, retryAfterSeconds?: number) {
     super(body.message);
     this.name = "ApiError";
     this.status = status;
     this.code = body.code;
     this.details = body.details;
     this.requestId = body.request_id;
+    this.retryAfterSeconds = retryAfterSeconds;
   }
 
   /**
@@ -146,7 +158,7 @@ async function toApiError(response: Response): Promise<ApiError> {
     // if it were an Atlas envelope, and fail later at a confusing place.
     const body: unknown = await response.json();
     if (isApiErrorResponse(body)) {
-      return new ApiError(response.status, body.error);
+      return new ApiError(response.status, body.error, retryAfter(response));
     }
   } catch {
     // Fall through to the synthesised error below.
@@ -156,6 +168,11 @@ async function toApiError(response: Response): Promise<ApiError> {
     code: response.status >= 500 ? "unavailable" : "invalid_argument",
     message: `Atlas returned ${response.status} ${response.statusText || ""}`.trim(),
   });
+}
+
+function retryAfter(response: Response): number | undefined {
+  const seconds = Number(response.headers.get("Retry-After"));
+  return seconds > 0 ? seconds : undefined;
 }
 
 /** Narrows an untrusted JSON body to Atlas's error envelope. */
@@ -365,6 +382,71 @@ export async function revokeRoleAccess(userID: string, assignmentID: string): Pr
   await request(`/users/${encodeURIComponent(userID)}/role-access/${encodeURIComponent(assignmentID)}`, {
     method: "DELETE",
   });
+}
+
+// --------------------------------------------------------- Notifications ----
+
+export async function fetchNotificationChannels(signal?: AbortSignal): Promise<ListNotificationChannelsResponse> {
+  return apiGet<ListNotificationChannelsResponse>("/notifications/channels", signal ? { signal } : {});
+}
+
+export async function createNotificationChannel(body: NotificationChannelRequest): Promise<NotificationChannel> {
+  const response = await request("/notifications/channels", {
+    method: "POST",
+    headers: JSON_HEADERS,
+    body: JSON.stringify(body),
+  });
+  return (await response.json()) as NotificationChannel;
+}
+
+export async function updateNotificationChannel(
+  channelID: string,
+  body: NotificationChannelRequest,
+): Promise<NotificationChannel> {
+  const response = await request(`/notifications/channels/${encodeURIComponent(channelID)}`, {
+    method: "PUT",
+    headers: JSON_HEADERS,
+    body: JSON.stringify(body),
+  });
+  return (await response.json()) as NotificationChannel;
+}
+
+export async function deleteNotificationChannel(channelID: string): Promise<void> {
+  await request(`/notifications/channels/${encodeURIComponent(channelID)}`, { method: "DELETE" });
+}
+
+/** Sends a test through a channel as it is being edited. Nothing is stored. */
+export async function testNotificationDraft(body: TestNotificationDraftRequest): Promise<TestNotificationResponse> {
+  const response = await request("/notifications/channels/test", {
+    method: "POST",
+    headers: JSON_HEADERS,
+    body: JSON.stringify(body),
+  });
+  return (await response.json()) as TestNotificationResponse;
+}
+
+export async function fetchNotificationDeliveries(
+  limit: number,
+  signal?: AbortSignal,
+): Promise<ListNotificationDeliveriesResponse> {
+  return apiGet<ListNotificationDeliveriesResponse>(
+    `/notifications/deliveries?limit=${limit}`,
+    signal ? { signal } : {},
+  );
+}
+
+/** Mutes a node's alerts, replacing any mute it already has. */
+export async function muteNodeAlerts(nodeID: string, body: MuteNodeRequest): Promise<NodeAlertsResponse> {
+  const response = await request(`/nodes/${encodeURIComponent(nodeID)}/alerts-mute`, {
+    method: "PUT",
+    headers: JSON_HEADERS,
+    body: JSON.stringify(body),
+  });
+  return (await response.json()) as NodeAlertsResponse;
+}
+
+export async function unmuteNodeAlerts(nodeID: string): Promise<void> {
+  await request(`/nodes/${encodeURIComponent(nodeID)}/alerts-mute`, { method: "DELETE" });
 }
 
 /**

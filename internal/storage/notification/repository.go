@@ -217,8 +217,9 @@ func (r *Repository) DeleteChannel(ctx context.Context, channelID string) error 
 	return nil
 }
 
-// ChannelSecret returns a channel's decrypted secret. Only the dispatcher
-// calls this; nothing that serves a reader does. A secret sealed under a
+// ChannelSecret returns a channel's decrypted secret. It is for sending, and
+// for masking or completing the secret in internal/core/notification; nothing
+// serves it to a reader. A secret sealed under a
 // different key, or altered, is [corenotification.ErrSecretUnreadable]
 // (also matching secretbox.ErrKeyMismatch or ErrDecrypt); no error carries
 // secret material.

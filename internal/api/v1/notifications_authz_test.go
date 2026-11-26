@@ -51,7 +51,7 @@ func notificationActions() []struct {
 	guardAction
 	ok int
 } {
-	const body = `{"name":"ops","type":"teams","enabled":true}`
+	const body = `{"name":"ops","type":"teams","enabled":true,"secret":"{\"url\":\"https://logic.azure.com/x\"}"}`
 	return []struct {
 		guardAction
 		ok int

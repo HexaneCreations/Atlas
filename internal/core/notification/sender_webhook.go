@@ -44,7 +44,7 @@ func DecodeWebhookConfig(config map[string]any) (WebhookConfig, error) {
 	if tmpl, _ := config["template"].(string); tmpl != "" {
 		c.Template = tmpl
 	} else {
-		return WebhookConfig{}, errs.New(errs.CodeInvalidArgument, "a webhook channel needs a template").WithOp(op)
+		return WebhookConfig{}, errs.New(errs.CodeInvalidArgument, "a webhook channel needs a template").WithOp(op).WithDetail("field", "template")
 	}
 	if ct, ok := config["content_type"].(string); ok && ct != "" {
 		c.ContentType = ct
@@ -58,16 +58,17 @@ func DecodeWebhookConfig(config map[string]any) (WebhookConfig, error) {
 func (c WebhookConfig) Validate() error {
 	const op = "notification.WebhookConfig.Validate"
 	if len(c.Template) == 0 {
-		return errs.New(errs.CodeInvalidArgument, "a template is required").WithOp(op)
+		return errs.New(errs.CodeInvalidArgument, "a template is required").WithOp(op).WithDetail("field", "template")
 	}
 	if len(c.Template) > MaxTemplateLength {
-		return errs.New(errs.CodeInvalidArgument, "the template exceeds %d bytes", MaxTemplateLength).WithOp(op)
+		return errs.New(errs.CodeInvalidArgument, "the template exceeds %d bytes", MaxTemplateLength).WithOp(op).WithDetail("field", "template")
 	}
 	if _, err := parseWebhookTemplate(c.Template); err != nil {
-		return errs.New(errs.CodeInvalidArgument, "the template is not valid: %s", err).WithOp(op)
+		return errs.New(errs.CodeInvalidArgument, "the template is not valid").WithOp(op).
+			WithDetail("field", "template").WithDetail("reason", strings.TrimPrefix(err.Error(), "template: webhook:"))
 	}
 	if strings.ContainsAny(c.ContentType, "\r\n") {
-		return errs.New(errs.CodeInvalidArgument, "content_type must not contain a newline").WithOp(op)
+		return errs.New(errs.CodeInvalidArgument, "content_type must not contain a newline").WithOp(op).WithDetail("field", "content_type")
 	}
 	return nil
 }
@@ -110,10 +111,10 @@ func DecodeWebhookSecret(secret string) (WebhookSecret, error) {
 	const op = "notification.DecodeWebhookSecret"
 	var s WebhookSecret
 	if err := json.Unmarshal([]byte(secret), &s); err != nil {
-		return WebhookSecret{}, errs.New(errs.CodeInvalidArgument, "the webhook channel secret is not valid JSON").WithOp(op)
+		return WebhookSecret{}, errs.New(errs.CodeInvalidArgument, "the webhook channel secret is not valid JSON").WithOp(op).WithDetail("field", "url")
 	}
 	if s.URL == "" {
-		return WebhookSecret{}, errs.New(errs.CodeInvalidArgument, "a webhook channel secret needs a url").WithOp(op)
+		return WebhookSecret{}, errs.New(errs.CodeInvalidArgument, "a webhook channel secret needs a url").WithOp(op).WithDetail("field", "url")
 	}
 	return s, nil
 }

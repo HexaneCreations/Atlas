@@ -3,6 +3,7 @@ import { ArrowDown, ArrowUp, ChevronsUpDown } from "lucide-react";
 import { useCollectors, useFleetLatestMetrics, useNodes } from "../api/queries";
 import type { Node, NodeStatus } from "../api/types";
 import { emptyArray } from "../api/empty";
+import { useAuth } from "../auth/AuthContext";
 import { Card } from "../components/Card";
 import { Badge, type Tone } from "../components/Badge";
 import { PageHeader } from "../components/PageHeader";
@@ -15,6 +16,7 @@ import { formatAgo, formatDuration, formatValue } from "../format";
 import { FleetDistribution } from "./nodes/FleetDistribution";
 import { EnvironmentComparison } from "./nodes/EnvironmentComparison";
 import { NodeComparison } from "./nodes/NodeComparison";
+import { MutedBadge } from "./nodes/AlertMute";
 import { NodeInspector } from "./nodes/NodeInspector";
 import { readVitals } from "./nodes/nodeMetrics";
 import { DEFAULT_FILTERS, UNTAGGED, countByStatus, useNodeTable, type SortKey } from "./nodes/useNodeTable";
@@ -49,6 +51,7 @@ const STATUS_OPTIONS: { value: "all" | NodeStatus; label: string }[] = [
  * labelled "not reporting"; none of it is ever rendered as zero.
  */
 export function NodesPage() {
+  const { user } = useAuth();
   const nodes = useNodes();
   const collectors = useCollectors();
   const [selectedID, setSelectedID] = useState<string | null>(null);
@@ -249,6 +252,7 @@ export function NodesPage() {
                       values={fleet.byNode.get(n.node_id) ?? emptyArray()}
                       selected={n.node_id === selectedID}
                       showVitals={!selected}
+                      showMute={user?.can_manage_notifications ?? false}
                       onSelect={() => { setSelectedID(n.node_id === selectedID ? null : n.node_id); }}
                     />
                   ))}
@@ -313,12 +317,14 @@ function NodeRow({
   values,
   selected,
   showVitals,
+  showMute,
   onSelect,
 }: {
   node: Node;
   values: Parameters<typeof readVitals>[0];
   selected: boolean;
   showVitals: boolean;
+  showMute: boolean;
   onSelect: () => void;
 }) {
   const v = readVitals(values);
@@ -344,6 +350,7 @@ function NodeRow({
         <Badge tone={STATUS_TONE[n.status]} pulse={n.status === "down"}>
           {n.status === "up" ? "reporting" : n.status === "down" ? "not reporting" : "stale"}
         </Badge>
+        <MutedBadge mutedUntil={n.alerts_muted_until} visible={showMute} />
       </td>
       <td className="px-3 py-2 text-xs">
         {n.environment ? (

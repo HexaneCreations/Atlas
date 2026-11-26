@@ -103,6 +103,13 @@ export const PAGE_CHROME: Record<string, PageChrome> = {
     pattern: patterns.blueprint,
     accent: gradients.meshViolet,
   },
+  "/notifications": {
+    identity: "Notifications",
+    premise: "Where alerts are sent, and whether they arrived.",
+    hero: heroes.glass,
+    pattern: patterns.blueprint,
+    accent: gradients.auroraPurple,
+  },
 };
 
 /** The chrome for a path. Unknown routes fall back to Mission Control's, so

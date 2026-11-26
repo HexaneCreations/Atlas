@@ -1,5 +1,9 @@
-import { useEffect } from "react";
+import { useEffect, useRef, useState } from "react";
 import { X } from "lucide-react";
+import { FOCUSABLE, focusAfterTab } from "./focusTrap";
+
+/** Open modals, newest last. Only the newest answers the keyboard. */
+const openModals: symbol[] = [];
 
 /**
  * A centered, blocking dialog — distinct from [Drawer]'s side panel.
@@ -23,13 +27,40 @@ export function Modal({
   children: React.ReactNode;
   width?: "sm" | "md" | "lg";
 }) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const onCloseRef = useRef(onClose);
+  // Read while rendering: a child's autoFocus has already moved it by the
+  // time an effect runs.
+  const [opener] = useState(() => (typeof document === "undefined" ? null : document.activeElement));
+
+  useEffect(() => { onCloseRef.current = onClose; }, [onClose]);
+
   useEffect(() => {
+    const id = Symbol("modal");
+    openModals.push(id);
+    const dialog = dialogRef.current;
+    if (dialog && !dialog.contains(document.activeElement)) dialog.focus();
+
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (openModals.at(-1) !== id) return;
+      if (e.key === "Escape") {
+        onCloseRef.current();
+      } else if (e.key === "Tab" && dialog) {
+        const inside = Array.from(dialog.querySelectorAll<HTMLElement>(FOCUSABLE));
+        const next = focusAfterTab(inside, document.activeElement, e.shiftKey);
+        if (next) {
+          e.preventDefault();
+          next.focus();
+        }
+      }
     };
     window.addEventListener("keydown", onKeyDown);
-    return () => { window.removeEventListener("keydown", onKeyDown); };
-  }, [onClose]);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      openModals.splice(openModals.indexOf(id), 1);
+      if (opener instanceof HTMLElement) opener.focus();
+    };
+  }, [opener]);
 
   return (
     <div
@@ -37,11 +68,13 @@ export function Modal({
       onClick={onClose}
     >
       <div
+        ref={dialogRef}
+        tabIndex={-1}
         role="dialog"
         aria-modal="true"
         aria-label={title}
         onClick={(e) => { e.stopPropagation(); }}
-        className={`scroll-thin max-h-[90vh] w-full overflow-y-auto ${width === "lg" ? "max-w-3xl" : width === "md" ? "max-w-md" : "max-w-sm"} rounded-xl border border-border bg-surface p-5 shadow-2xl`}
+        className={`scroll-thin max-h-[90vh] w-full overflow-y-auto ${width === "lg" ? "max-w-3xl" : width === "md" ? "max-w-md" : "max-w-sm"} rounded-xl border border-border bg-surface p-5 shadow-2xl outline-none`}
       >
         <div className="mb-4 flex items-start justify-between gap-3">
           <h2 className="text-card-title font-semibold text-text">{title}</h2>

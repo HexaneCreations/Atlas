@@ -37,6 +37,9 @@ const DisksPage = lazy(() =>
 const UsersPage = lazy(() =>
   import("./pages/UsersPage").then((m) => ({ default: m.UsersPage })),
 );
+const NotificationsPage = lazy(() =>
+  import("./pages/NotificationsPage").then((m) => ({ default: m.NotificationsPage })),
+);
 import { NotFoundPage } from "./pages/ErrorPages";
 import { PageSkeleton } from "./components/Skeleton";
 import { ErrorBoundary } from "./components/ErrorBoundary";
@@ -141,6 +144,10 @@ function AuthenticatedApp({ pathname }: { pathname: string }) {
                     <Route
                       path="/users"
                       element={user?.can_manage_users ? <UsersPage /> : <Navigate to="/" replace />}
+                    />
+                    <Route
+                      path="/notifications"
+                      element={user?.can_manage_notifications ? <NotificationsPage /> : <Navigate to="/" replace />}
                     />
                     <Route path="*" element={<NotFoundPage />} />
                   </Routes>

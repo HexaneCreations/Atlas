@@ -94,11 +94,11 @@ func (in ChannelInput) Validate() error {
 	const op = "notification.ChannelInput.Validate"
 	switch {
 	case strings.TrimSpace(in.Name) == "":
-		return errs.New(errs.CodeInvalidArgument, "a name is required").WithOp(op)
+		return errs.New(errs.CodeInvalidArgument, "a name is required").WithOp(op).WithDetail("field", "name")
 	case !KnownChannelTypes[in.Type]:
-		return errs.New(errs.CodeInvalidArgument, "unknown channel type %q (want email, teams, or webhook)", in.Type).WithOp(op)
+		return errs.New(errs.CodeInvalidArgument, "unknown channel type (want email, teams, or webhook)").WithOp(op).WithDetail("field", "type")
 	case !in.MinSeverity.Valid():
-		return errs.New(errs.CodeInvalidArgument, "min_severity must be warning or critical").WithOp(op)
+		return errs.New(errs.CodeInvalidArgument, "min_severity must be warning or critical").WithOp(op).WithDetail("field", "min_severity")
 	}
 	return nil
 }

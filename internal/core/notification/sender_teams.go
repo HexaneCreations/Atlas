@@ -26,10 +26,10 @@ func DecodeTeamsSecret(secret string) (TeamsSecret, error) {
 	const op = "notification.DecodeTeamsSecret"
 	var s TeamsSecret
 	if err := json.Unmarshal([]byte(secret), &s); err != nil {
-		return TeamsSecret{}, errs.New(errs.CodeInvalidArgument, "the teams channel secret is not valid JSON").WithOp(op)
+		return TeamsSecret{}, errs.New(errs.CodeInvalidArgument, "the teams channel secret is not valid JSON").WithOp(op).WithDetail("field", "url")
 	}
 	if s.URL == "" {
-		return TeamsSecret{}, errs.New(errs.CodeInvalidArgument, "a teams channel secret needs a url").WithOp(op)
+		return TeamsSecret{}, errs.New(errs.CodeInvalidArgument, "a teams channel secret needs a url").WithOp(op).WithDetail("field", "url")
 	}
 	return s, nil
 }

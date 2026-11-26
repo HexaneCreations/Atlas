@@ -5,20 +5,27 @@ import {
   assignRoleAccess,
   fetchUserAccess,
   putUserAccess,
+  createNotificationChannel,
   createUser,
+  deleteNotificationChannel,
   disableUser,
   enableUser,
   forceLogout,
+  fetchNotificationChannels,
+  fetchNotificationDeliveries,
   fetchRoleAccessDefinitions,
   fetchUserAudit,
   fetchUserPageAccess,
   fetchUsers,
   grantPageAccess,
   grantRole,
+  muteNodeAlerts,
   resetPassword,
   revokePageAccess,
   revokeRole,
   revokeRoleAccess,
+  unmuteNodeAlerts,
+  updateNotificationChannel,
 } from "./client";
 import { emptyArray } from "./empty";
 import { useSelectedNodeID } from "../lib/selectedNode";
@@ -48,6 +55,8 @@ import type {
   LatestValue,
   ListNodesResponse,
   MetricsResponse,
+  MuteDuration,
+  NotificationChannelRequest,
   SystemHealth,
   SystemInfo,
   SystemRuntime,
@@ -710,5 +719,81 @@ export function useRevokeRoleAccess() {
     mutationFn: ({ userID, assignmentID }: { userID: string; assignmentID: string }) =>
       revokeRoleAccess(userID, assignmentID),
     onSuccess: (_data, { userID }) => { invalidate(userID); },
+  });
+}
+
+// --------------------------------------------------------- Notifications ----
+
+export const notificationKeys = {
+  channels: ["notifications", "channels"] as const,
+  deliveries: ["notifications", "deliveries"] as const,
+} as const;
+
+/** Whether a notifications request failed because the server has no
+ *  encryption key: a setting to change, not an outage to retry. */
+export function notificationsDisabled(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 503 && error.message.includes("no encryption key");
+}
+
+function notificationsRetryPolicy(failureCount: number, error: Error): boolean {
+  return !notificationsDisabled(error) && retryPolicy(failureCount, error);
+}
+
+export function useNotificationChannels() {
+  return useQuery({
+    queryKey: notificationKeys.channels,
+    queryFn: ({ signal }) => fetchNotificationChannels(signal),
+    retry: notificationsRetryPolicy,
+  });
+}
+
+/** The newest `limit` delivery attempts. */
+export function useNotificationDeliveries(limit: number) {
+  return useQuery({
+    queryKey: [...notificationKeys.deliveries, limit] as const,
+    queryFn: ({ signal }) => fetchNotificationDeliveries(limit, signal),
+    placeholderData: keepPreviousData,
+    refetchInterval: 15_000,
+    retry: notificationsRetryPolicy,
+  });
+}
+
+function useInvalidateNotifications() {
+  const queryClient = useQueryClient();
+  return () => {
+    void queryClient.invalidateQueries({ queryKey: notificationKeys.channels });
+    void queryClient.invalidateQueries({ queryKey: notificationKeys.deliveries });
+  };
+}
+
+/** Creates a channel, or updates it when `channelID` is given. */
+export function useSaveNotificationChannel() {
+  const invalidate = useInvalidateNotifications();
+  return useMutation({
+    mutationFn: ({ channelID, body }: { channelID: string | undefined; body: NotificationChannelRequest }) =>
+      channelID ? updateNotificationChannel(channelID, body) : createNotificationChannel(body),
+    // The variables hold the URL and header values: not kept once unused.
+    gcTime: 0,
+    onSuccess: invalidate,
+  });
+}
+
+export function useDeleteNotificationChannel() {
+  const invalidate = useInvalidateNotifications();
+  return useMutation({
+    mutationFn: (channelID: string) => deleteNotificationChannel(channelID),
+    onSuccess: invalidate,
+  });
+}
+
+/** Mutes a node's alerts, or unmutes it when `duration` is null. */
+export function useMuteNode() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ nodeID, duration }: { nodeID: string; duration: MuteDuration | null }) => {
+      if (duration) await muteNodeAlerts(nodeID, { duration });
+      else await unmuteNodeAlerts(nodeID);
+    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: nodeKeys.all, exact: true }),
   });
 }

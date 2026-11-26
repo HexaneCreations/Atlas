@@ -637,7 +637,7 @@ func newWriteEndpointTestServer(t *testing.T, seedUser user.User, authz v1.Autho
 	return srv
 }
 
-const validChannelBody = `{"name":"ops-teams","type":"teams","config":{"label":"ops"}}`
+const validChannelBody = `{"name":"ops-hook","type":"webhook","enabled":true,"config":{"template":"{{.msg}}"},"secret":"{\"url\":\"https://hooks.example.com/x\"}"}`
 
 // The representative case: registering a notification channel — the
 // concrete risk named in review — requires authentication at all.
@@ -705,8 +705,8 @@ func TestCreateNotificationChannelSucceedsWhenGranted(t *testing.T) {
 		t.Fatalf("store received %d channels, want 1", len(notifications.channels))
 	}
 	for _, c := range notifications.channels {
-		if c.Name != "ops-teams" || c.Type != notification.ChannelTeams || c.Config["label"] != "ops" {
-			t.Errorf("stored channel = %+v, want the teams channel ops-teams", c)
+		if c.Name != "ops-hook" || c.Type != notification.ChannelWebhook || c.Config["template"] != "{{.msg}}" {
+			t.Errorf("stored channel = %+v, want the webhook channel ops-hook", c)
 		}
 	}
 }

@@ -17,7 +17,6 @@ import (
 	"github.com/hexane/atlas/internal/api"
 	"github.com/hexane/atlas/internal/core/notification"
 	"github.com/hexane/atlas/internal/core/user"
-	"github.com/hexane/atlas/internal/platform/errs"
 	"github.com/hexane/atlas/internal/platform/log"
 )
 
@@ -48,14 +47,6 @@ func (s *recordingSender) calls() int {
 type engineStore struct {
 	*fakeNotificationStore
 	mu sync.Mutex
-}
-
-func (s *engineStore) ChannelSecret(_ context.Context, id string) (string, error) {
-	secret, ok := s.secrets[id]
-	if !ok {
-		return "", errs.New(errs.CodeFailedPrecondition, "no secret")
-	}
-	return secret, nil
 }
 
 func (s *engineStore) Enqueue(_ context.Context, n notification.Notification, channels []notification.Channel) (int, error) {
@@ -372,7 +363,7 @@ func newNotificationServerWith(t *testing.T, store *fakeNotificationStore, sende
 
 func TestChannelChangesAreLoggedWithoutSecrets(t *testing.T) {
 	f := newTestSendFixture(t)
-	body := `{"name":"new","type":"webhook","secret":` + string(mustJSON(t, webhookSecret("https://hooks.example.com/"+secretPath))) + `}`
+	body := `{"name":"new","type":"webhook","config":{"template":"{{.msg}}"},"secret":` + string(mustJSON(t, webhookSecret("https://hooks.example.com/"+secretPath))) + `}`
 	for _, a := range []guardAction{
 		{"create", http.MethodPost, "/notifications/channels", body},
 		{"update", http.MethodPut, "/notifications/channels/chan-1", body},

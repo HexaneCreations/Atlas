@@ -182,6 +182,9 @@ type SLOStore interface {
 type NotificationStore interface {
 	ListChannels(ctx context.Context) ([]notification.Channel, error)
 	GetChannel(ctx context.Context, id string) (notification.Channel, error)
+	// ChannelSecret is for [notification.PrepareUpdate] and
+	// [notification.DescribeDestination] only; handlers never read it.
+	ChannelSecret(ctx context.Context, channelID string) (string, error)
 	CreateChannel(ctx context.Context, in notification.ChannelInput) (notification.Channel, error)
 	UpdateChannel(ctx context.Context, id string, in notification.ChannelInput) (notification.Channel, error)
 	DeleteChannel(ctx context.Context, id string) error
