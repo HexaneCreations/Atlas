@@ -195,7 +195,12 @@ describe("the lists", () => {
       created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z",
     };
     const html = renderToStaticMarkup(<DeliveryList deliveries={[d, { ...d, id: "d2", channel_id: "gone" }]} channelNames={new Map([["c1", "ops hook"]])} />);
-    for (const text of ["ops hook", "Webhook", "firing", "failed", "The destination returned status 500"]) expect(html).toContain(text);
+    for (const text of ["ops hook", "Webhook", "firing", "node_down", "failed", "The destination returned status 500"]) expect(html).toContain(text);
+    const recovered = renderToStaticMarkup(
+      <DeliveryList deliveries={[{ ...d, kind: "recovered", title: "Container exited" }]} channelNames={new Map()} />,
+    );
+    expect(recovered).toContain("Recovered: Container exited");
+    expect(recovered).toContain(">recovered<");
     expect(html).not.toContain("T0KEN");
     expect(html).not.toContain("<button");
   });

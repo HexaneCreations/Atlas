@@ -4,6 +4,7 @@ import { ApiError, testNotificationDraft } from "../../api/client";
 import { notificationsDisabled } from "../../api/queries";
 import type { NotificationChannel, TestNotificationDraftRequest } from "../../api/types";
 import {
+  deliveryTitle,
   parseHeaders,
   runTest,
   secondsLeft,
@@ -262,5 +263,19 @@ describe("shortError", () => {
     expect(shortError('deliver webhook: Post h: malformed HTTP response "/T0KEN')).not.toContain("T0KEN");
     expect(shortError("a".repeat(500))).toHaveLength(120);
     expect(shortError(undefined)).toBe("");
+  });
+});
+
+describe("deliveryTitle", () => {
+  const base = { title: "Container exited", trigger: "container_exit" };
+  it("prefixes the title by kind like the Teams card", () => {
+    expect(deliveryTitle({ ...base, kind: "firing" })).toBe("Container exited");
+    expect(deliveryTitle({ ...base, kind: "escalated" })).toBe("Escalated: Container exited");
+    expect(deliveryTitle({ ...base, kind: "recovered" })).toBe("Recovered: Container exited");
+    expect(deliveryTitle({ ...base, kind: "flapping" })).toBe("Flapping: Container exited");
+    expect(deliveryTitle({ kind: "test", title: "Atlas test notification", trigger: "" })).toBe("Atlas test notification");
+  });
+  it("falls back to the trigger when a row has no title", () => {
+    expect(deliveryTitle({ kind: "recovered", trigger: "node_down" })).toBe("Recovered: node_down");
   });
 });

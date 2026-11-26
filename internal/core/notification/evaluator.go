@@ -547,6 +547,9 @@ func (e *Evaluator) evaluateSubjectWithTitle(
 	}
 	if kind != "" {
 		title, message := titleMessage(kind, notifySeverity)
+		if kind == KindFlapping {
+			message = flappingMessage(message, rule.CooldownSeconds)
+		}
 		n := Notification{
 			// current, not next: see eventAnchor and the fix-round report's
 			// item 1 for why the id must be built only from a timestamp this
@@ -600,6 +603,36 @@ func (e *Evaluator) evaluateSubjectWithTitle(
 	e.logger.Log(ctx, level, "notification state transition",
 		slog.String("trigger", string(trigger)), slog.String("node_id", nodeID), slog.String("state", string(next.State)))
 	return next.State
+}
+
+// flappingMessage keeps the condition text and says why this is not a
+// plain firing.
+func flappingMessage(condition string, cooldownSeconds int) string {
+	if condition != "" && !strings.ContainsAny(condition[len(condition)-1:], ".!?") {
+		condition += "."
+	}
+	return strings.TrimSpace(condition + " This alert fired again within the cooldown window (" +
+		cooldownText(cooldownSeconds) + "). Further repeats are suppressed until it recovers.")
+}
+
+// cooldownText formats a cooldown for a reader: "30 min", "1 h 30 min",
+// "45 s".
+func cooldownText(seconds int) string {
+	if seconds <= 0 {
+		return "0 s"
+	}
+	h, m, s := seconds/3600, seconds%3600/60, seconds%60
+	var parts []string
+	if h > 0 {
+		parts = append(parts, fmt.Sprintf("%d h", h))
+	}
+	if m > 0 {
+		parts = append(parts, fmt.Sprintf("%d min", m))
+	}
+	if s > 0 {
+		parts = append(parts, fmt.Sprintf("%d s", s))
+	}
+	return strings.Join(parts, " ")
 }
 
 // silenceText is how long a node has been silent, to the minute once it

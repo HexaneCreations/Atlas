@@ -607,3 +607,51 @@ func TestExitCodeText(t *testing.T) {
 		}
 	}
 }
+
+func TestContainerExitFlappingMessageSaysWhy(t *testing.T) {
+	h := newWorkloadHarness(t)
+	h.containers["web"] = fakeContainer{up: 1}
+	h.tick()
+	h.containers["web"] = fakeContainer{up: 0, exitCode: 137}
+	h.tick()
+	h.containers["web"] = fakeContainer{up: 1}
+	h.ticks(5)                                                // recovers
+	h.containers["web"] = fakeContainer{up: 0, exitCode: 137} // inside the 1800s cooldown
+	h.tick()
+	h.wantKinds(KindFiring, KindRecovered, KindFlapping)
+
+	const exited = "container web (compose project shop, service svc-web) exited with code 137 " +
+		"(killed: usually out of memory or a stop timeout)"
+	sent := h.notifier.all()
+	if sent[0].Message != exited {
+		t.Errorf("firing message = %q, want %q", sent[0].Message, exited)
+	}
+	if want := "container web (compose project shop, service svc-web) is running"; sent[1].Message != want {
+		t.Errorf("recovered message = %q, want %q", sent[1].Message, want)
+	}
+	want := exited + ". This alert fired again within the cooldown window (30 min). " +
+		"Further repeats are suppressed until it recovers."
+	if sent[2].Message != want || sent[2].Title != "Container exited" {
+		t.Errorf("flapping = %q / %q, want %q / %q", sent[2].Title, sent[2].Message, "Container exited", want)
+	}
+}
+
+func TestCooldownText(t *testing.T) {
+	t.Parallel()
+	for seconds, want := range map[int]string{
+		0: "0 s", 45: "45 s", 60: "1 min", 90: "1 min 30 s", 1800: "30 min", 3600: "1 h", 5400: "1 h 30 min", 86400: "24 h",
+	} {
+		if got := cooldownText(seconds); got != want {
+			t.Errorf("cooldownText(%d) = %q, want %q", seconds, got, want)
+		}
+	}
+}
+
+func TestFlappingMessageDoesNotDoubleThePeriod(t *testing.T) {
+	t.Parallel()
+	got := flappingMessage("the node is down.", 600)
+	if want := "the node is down. This alert fired again within the cooldown window (10 min). " +
+		"Further repeats are suppressed until it recovers."; got != want {
+		t.Errorf("flappingMessage = %q, want %q", got, want)
+	}
+}

@@ -2,6 +2,7 @@ import { ApiError } from "../../api/client";
 import type {
   NotificationChannel,
   NotificationChannelRequest,
+  NotificationDelivery,
   NotificationChannelType,
   NotificationSeverity,
   TestNotificationDraftRequest,
@@ -264,4 +265,16 @@ export function shortError(text: string | undefined): string {
   if (status?.[1]) return `The destination returned status ${status[1]}`;
   const plain = text.replace(/"[^"]*"?/g, "…");
   return plain.length > 120 ? `${plain.slice(0, 119)}…` : plain;
+}
+
+const KIND_PREFIX: Partial<Record<NotificationDelivery["kind"], string>> = {
+  escalated: "Escalated: ",
+  recovered: "Recovered: ",
+  flapping: "Flapping: ",
+};
+
+/** A delivery's title as the Teams card shows it: prefixed by its kind. */
+export function deliveryTitle(d: Pick<NotificationDelivery, "kind" | "title" | "trigger">): string {
+  const title = d.title === undefined || d.title === "" ? d.trigger : d.title;
+  return (KIND_PREFIX[d.kind] ?? "") + title;
 }
