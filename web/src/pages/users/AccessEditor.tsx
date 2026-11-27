@@ -39,6 +39,7 @@ const PAGE_LABEL: Record<Page, string> = {
   cron: "Scheduled jobs",
   ports: "Ports",
   disks: "Disks",
+  websites: "Websites",
 };
 
 export interface NodeInfo {

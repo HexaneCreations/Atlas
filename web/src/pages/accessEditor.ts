@@ -36,10 +36,11 @@ export const ALL_PAGES: readonly Page[] = [
   "cron",
   "ports",
   "disks",
+  "websites",
 ];
 
 /** Pages with no per-node concept — mirrors pageauthz.FleetOnlyPages. */
-export const FLEET_ONLY_PAGES: ReadonlySet<Page> = new Set<Page>(["overview", "nodes", "users"]);
+export const FLEET_ONLY_PAGES: ReadonlySet<Page> = new Set<Page>(["overview", "nodes", "users", "websites"]);
 
 export const NODE_PAGES: readonly Page[] = ALL_PAGES.filter((p) => !FLEET_ONLY_PAGES.has(p));
 

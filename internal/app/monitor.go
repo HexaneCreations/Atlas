@@ -20,13 +20,21 @@ type monitorPipeline struct {
 	pool   *postgres.Pool
 	key    *secretbox.Key
 	cfg    config.Monitoring
+	prober *coremonitor.Prober
 
 	mu        sync.RWMutex
 	scheduler *coremonitor.Scheduler
 }
 
 func newMonitorPipeline(logger *slog.Logger, pool *postgres.Pool, key *secretbox.Key, cfg config.Monitoring) *monitorPipeline {
-	return &monitorPipeline{logger: logger, pool: pool, key: key, cfg: cfg}
+	return &monitorPipeline{logger: logger, pool: pool, key: key, cfg: cfg,
+		prober: coremonitor.NewProber(coremonitor.ProberOptions{AllowPrivate: cfg.AllowPrivateTargets})}
+}
+
+// Tester runs on-demand tests through the scheduler's own prober, so a test
+// gets exactly the address guard, timeouts and redirect policy of a check.
+func (p *monitorPipeline) Tester() *coremonitor.Tester {
+	return coremonitor.NewTester(p.prober, coremonitor.MaxConcurrentTests)
 }
 
 func (p *monitorPipeline) Name() string { return "monitor.prober" }
@@ -34,7 +42,7 @@ func (p *monitorPipeline) Name() string { return "monitor.prober" }
 func (p *monitorPipeline) Start(ctx context.Context) error {
 	scheduler := coremonitor.NewScheduler(coremonitor.SchedulerOptions{
 		Store:         storagemonitor.NewRepository(p.pool.DB(), p.key),
-		Checker:       coremonitor.NewProber(coremonitor.ProberOptions{AllowPrivate: p.cfg.AllowPrivateTargets}),
+		Checker:       p.prober,
 		Outage:        coremonitor.NewOutageDetector(p.cfg.Canaries),
 		Logger:        p.logger,
 		MaxConcurrent: p.cfg.MaxConcurrentChecks,
@@ -86,6 +94,9 @@ func (l lazyMonitorStore) ListMonitors(ctx context.Context) ([]coremonitor.View,
 }
 func (l lazyMonitorStore) GetMonitor(ctx context.Context, id string) (coremonitor.View, error) {
 	return l.repo().GetMonitor(ctx, id)
+}
+func (l lazyMonitorStore) StoredMonitor(ctx context.Context, id string) (coremonitor.Monitor, coremonitor.Secret, error) {
+	return l.repo().StoredMonitor(ctx, id)
 }
 func (l lazyMonitorStore) CreateMonitor(ctx context.Context, m coremonitor.Monitor, s coremonitor.Secret, by string) (coremonitor.View, error) {
 	return l.repo().CreateMonitor(ctx, m, s, by)

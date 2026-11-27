@@ -61,6 +61,13 @@ func (f *fakeMonitors) GetMonitor(_ context.Context, id string) (monitor.View, e
 	f.touch()
 	return f.get(id)
 }
+func (f *fakeMonitors) StoredMonitor(_ context.Context, id string) (monitor.Monitor, monitor.Secret, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.touch()
+	v, err := f.get(id)
+	return v.Monitor, f.secrets[id], err
+}
 func (f *fakeMonitors) CreateMonitor(_ context.Context, m monitor.Monitor, s monitor.Secret, by string) (monitor.View, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -166,14 +173,14 @@ type monitorFixture struct {
 	logs   *lockedBuffer
 }
 
-func newMonitorFixture(t *testing.T, authz v1.Authorizer, store *fakeMonitors) *monitorFixture {
+func newMonitorFixture(t *testing.T, authz v1.Authorizer, store *fakeMonitors, opts ...func(*api.Deps)) *monitorFixture {
 	t.Helper()
 	u := testUser(t, "web-admin", "correct horse battery staple")
-	srv := newWriteEndpointTestServer(t, u, authz, nil, func(d *api.Deps) {
+	srv := newWriteEndpointTestServer(t, u, authz, nil, append([]func(*api.Deps){func(d *api.Deps) {
 		if store != nil {
 			d.Monitors = store
 		}
-	})
+	}}, opts...)...)
 	f := &monitorFixture{t: t, store: store, logs: &lockedBuffer{}}
 	logger := slog.New(slog.NewJSONHandler(f.logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

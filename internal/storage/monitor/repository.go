@@ -164,6 +164,32 @@ func (r *Repository) GetMonitor(ctx context.Context, monitorID string) (coremoni
 	return v, nil
 }
 
+// StoredMonitor returns a monitor's configuration and decrypted secret
+// for an on-demand test. It only reads.
+func (r *Repository) StoredMonitor(ctx context.Context, monitorID string) (coremonitor.Monitor, coremonitor.Secret, error) {
+	const op = "monitor.Repository.StoredMonitor"
+	var m coremonitor.Monitor
+	var method, bodyEncoding, authType string
+	var ciphertext []byte
+	var keyID *string
+	dest := append(monitorDest(&m, &method, &bodyEncoding, &authType), &ciphertext, &keyID)
+	err := r.pool.QueryRow(ctx, `SELECT `+monitorColumns+`, m.secret_ciphertext, m.secret_key_id
+		FROM monitors m WHERE m.id = $1`, monitorID).Scan(dest...)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return coremonitor.Monitor{}, coremonitor.Secret{}, notFound(op, monitorID)
+	}
+	if err != nil {
+		return coremonitor.Monitor{}, coremonitor.Secret{}, errs.Wrap(err, errs.CodeUnavailable, "could not read the monitor").WithOp(op)
+	}
+	finishMonitor(&m, method, bodyEncoding, authType)
+	secret, ok := r.open(monitorID, ciphertext, keyID)
+	if !ok {
+		return coremonitor.Monitor{}, coremonitor.Secret{}, errs.New(errs.CodeFailedPrecondition,
+			"the monitor's stored credentials cannot be decrypted with the configured key; enter them again").WithOp(op)
+	}
+	return m, secret, nil
+}
+
 // ListMonitors returns every monitor with its live state, by group
 // position, then name.
 func (r *Repository) ListMonitors(ctx context.Context) ([]coremonitor.View, error) {

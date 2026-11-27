@@ -103,6 +103,13 @@ export const PAGE_CHROME: Record<string, PageChrome> = {
     pattern: patterns.blueprint,
     accent: gradients.meshViolet,
   },
+  "/websites": {
+    identity: "Website Monitoring",
+    premise: "Whether your sites answer, how fast, and for how long.",
+    hero: heroes.ocean,
+    pattern: patterns.grid,
+    accent: gradients.auroraBlue,
+  },
   "/notifications": {
     identity: "Notifications",
     premise: "Where alerts are sent, and whether they arrived.",

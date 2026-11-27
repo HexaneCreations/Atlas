@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { AccessBundle, AccessPageGrant, AccessRoleGrant, EditableRole, Page, UserAccessResponse } from "../api/types";
 import {
+  ALL_PAGES,
   EMPTY_ACCESS,
   FLEET,
+  FLEET_ONLY_PAGES,
+  NODE_PAGES,
   applyEdit,
   changeText,
   diff,
@@ -132,7 +135,7 @@ describe("applyEdit", () => {
     const d = applyEdit(withBundle, toDraft(withBundle), { kind: "selectAll", row: "n1" });
     expect(d.pages.n1).toEqual(["processes", "services", "cron", "ports", "disks"]);
     const f = applyEdit(withBundle, d, { kind: "selectAll", row: FLEET });
-    expect(f.pages[FLEET]).toEqual(["overview", "nodes", "users", "processes", "services", "cron", "ports", "disks"]);
+    expect(f.pages[FLEET]).toEqual(["overview", "nodes", "users", "processes", "services", "cron", "ports", "disks", "websites"]);
     expect(f.pages.n1).toBeUndefined();
   });
 });
@@ -170,6 +173,25 @@ describe("toBody", () => {
       ],
       pages: [{ page: "ports", node_id: "n1", fleet_wide: false }],
     });
+  });
+});
+
+describe("websites page grants", () => {
+  // Before websites was in ALL_PAGES, opening and saving a user dropped it.
+  it("a direct websites grant survives load, an unrelated edit and save", () => {
+    const s = server({ roles: [role("viewer")], pages: [page("websites"), page("ports")] });
+    const d = toDraft(s);
+    expect(d.pages[FLEET]).toContain("websites");
+    expect(diff(s, d)).toEqual([]);
+    const edited = applyEdit(s, d, { kind: "page", row: FLEET, page: "disks", on: true });
+    expect(toBody(edited).pages).toContainEqual({ page: "websites", fleet_wide: true });
+    expect(lines(s, edited).some((l) => l.includes("ebsites"))).toBe(false);
+  });
+
+  it("is fleet-only, like the server's pageauthz.FleetOnlyPages", () => {
+    expect(FLEET_ONLY_PAGES.has("websites")).toBe(true);
+    expect(NODE_PAGES).not.toContain("websites");
+    expect(ALL_PAGES).toContain("websites");
   });
 });
 

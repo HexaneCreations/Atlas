@@ -136,9 +136,13 @@ type Deps struct {
 	// Monitors stores website monitors; nil makes their endpoints answer
 	// 503. MonitorProbe reports the prober's connectivity and may be nil.
 	// MonitorAllowPrivateTargets is monitoring.allow_private_targets.
+	// MonitorTester runs on-demand tests; nil makes the test endpoint
+	// answer 503. MonitorTestLimiter nil uses [notification.NewTestLimiter].
 	Monitors                   MonitorStore
 	MonitorProbe               MonitorProbe
 	MonitorAllowPrivateTargets bool
+	MonitorTester              MonitorTester
+	MonitorTestLimiter         *notification.TestLimiter
 	// Users, Sessions and Authz back human-user authentication and
 	// authorization (see internal/core/user). Nil disables login and leaves
 	// every node-scoped read unauthenticated, the same convention as the
@@ -293,6 +297,9 @@ func NewHandler(deps Deps) *Handler {
 	if deps.NotificationTestLimiter == nil {
 		deps.NotificationTestLimiter = notification.NewTestLimiter(time.Now)
 	}
+	if deps.MonitorTestLimiter == nil {
+		deps.MonitorTestLimiter = notification.NewTestLimiter(time.Now)
+	}
 	return &Handler{deps: deps}
 }
 
@@ -348,6 +355,7 @@ func (h *Handler) Mount(mux Registrar) {
 
 	mux.Handle("GET "+Prefix+"/monitors", httpx.Handler(h.ListMonitors))
 	mux.Handle("POST "+Prefix+"/monitors", httpx.Handler(h.CreateMonitor))
+	mux.Handle("POST "+Prefix+"/monitors/test", httpx.Handler(h.TestMonitorDraft))
 	mux.Handle("GET "+Prefix+"/monitors/{monitorID}", httpx.Handler(h.GetMonitor))
 	mux.Handle("PUT "+Prefix+"/monitors/{monitorID}", httpx.Handler(h.UpdateMonitor))
 	mux.Handle("DELETE "+Prefix+"/monitors/{monitorID}", httpx.Handler(h.DeleteMonitor))

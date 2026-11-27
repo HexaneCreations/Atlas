@@ -77,6 +77,7 @@ const PAGES: Page[] = [
   "cron",
   "ports",
   "disks",
+  "websites",
   "users",
 ];
 
@@ -91,6 +92,7 @@ const PAGE_ROUTE: Record<Page, string> = {
   cron: "/cron",
   ports: "/ports",
   disks: "/disks",
+  websites: "/websites",
   users: "/users",
 };
 

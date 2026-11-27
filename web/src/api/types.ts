@@ -295,7 +295,8 @@ export type Page =
   | "cron"
   | "ports"
   | "disks"
-  | "users";
+  | "users"
+  | "websites";
 
 /**
  * One page-access grant: a direct page grant (`page` set) or a RoleAccess
@@ -1041,4 +1042,177 @@ export interface InstallCommand {
 export interface ListInstallCommandsResponse {
   install_commands: InstallCommand[];
   total: number;
+}
+
+// ------------------------------------------------------ Website monitors ----
+// internal/api/v1's monitors.go response shapes.
+
+export type MonitorStatus = "unknown" | "up" | "pending" | "down";
+/** Why a check failed: a fixed category, never text from the site. */
+export type MonitorFailure = "" | "dns" | "connect" | "tls" | "timeout" | "http_status" | "keyword" | "redirect" | "blocked";
+export type MonitorMethod = "GET" | "HEAD" | "POST";
+export type MonitorAuthType = "none" | "basic" | "bearer";
+export type MonitorBodyEncoding = "json" | "form" | "text";
+
+export interface MonitorHeartbeat {
+  time: string;
+  status: MonitorStatus;
+  status_code: number | null;
+  response_ms: number | null;
+  failure: MonitorFailure;
+}
+
+export interface MonitorLive {
+  status: MonitorStatus;
+  status_since: string;
+  down_since: string | null;
+  consecutive_failures: number;
+  last_check_at: string | null;
+  last_status_code: number | null;
+  last_response_ms: number | null;
+  last_failure: MonitorFailure;
+  next_check_at: string;
+  cert_expires_at: string | null;
+}
+
+/**
+ * One monitor. Without notifications.manage the server redacts it: `url`
+ * loses its query string, and `auth_type`, `header_names`,
+ * `secret_configured`, `created_by` and `updated_by` are absent.
+ */
+export interface Monitor {
+  id: string;
+  name: string;
+  type: "http";
+  url: string;
+  host: string;
+  method: MonitorMethod;
+  interval_seconds: number;
+  retries: number;
+  retry_interval_seconds: number;
+  timeout_seconds: number;
+  max_redirects: number;
+  accepted_status: string[];
+  body_encoding: MonitorBodyEncoding;
+  keyword: string;
+  recovery_successes: number;
+  cert_notify: boolean;
+  cert_warn_days: number;
+  cert_crit_days: number;
+  group_id: string;
+  description: string;
+  tags: string[];
+  active: boolean;
+  alerts_muted_until: string | null;
+  auth_type?: MonitorAuthType;
+  header_names?: string[];
+  secret_configured?: boolean;
+  created_at: string;
+  created_by?: string;
+  updated_at: string;
+  updated_by?: string;
+  redacted: boolean;
+  live: MonitorLive;
+  /** Absent when nothing was counted in the last day. */
+  uptime_24h?: number | null;
+  /** The newest checks, oldest first; only in the list. */
+  heartbeats?: MonitorHeartbeat[];
+}
+
+export interface MonitorGroup {
+  id: string;
+  name: string;
+  position: number;
+}
+
+export interface MonitorProbeState {
+  offline: boolean;
+  since: string | null;
+}
+
+/** GET /api/v1/monitors */
+export interface ListMonitorsResponse {
+  monitors: Monitor[];
+  groups: MonitorGroup[];
+  probe: MonitorProbeState;
+}
+
+/** GET /api/v1/monitors/{id}: null where nothing was counted. */
+export interface MonitorDetail extends Monitor {
+  uptime: { day: number | null; week: number | null; month: number | null };
+}
+
+export interface MonitorHeartbeatsResponse {
+  monitor_id: string;
+  heartbeats: MonitorHeartbeat[];
+}
+
+export interface MonitorEvent {
+  id: string;
+  time: string;
+  kind: "down" | "up";
+  status_code: number | null;
+  failure: MonitorFailure;
+  duration_seconds: number | null;
+}
+
+export interface MonitorEventsResponse {
+  monitor_id: string;
+  events: MonitorEvent[];
+}
+
+/** A null value keeps the stored value for that header name. */
+export interface MonitorHeaderRequest {
+  name: string;
+  value: string | null;
+}
+
+/**
+ * POST /api/v1/monitors and PUT /api/v1/monitors/{id}. An omitted field
+ * takes its default on create and keeps its value on update; an omitted
+ * secret field keeps what is stored, and `headers` replaces the whole set.
+ */
+export interface MonitorRequest {
+  name?: string;
+  url?: string;
+  method?: MonitorMethod;
+  interval_seconds?: number;
+  retries?: number;
+  retry_interval_seconds?: number;
+  timeout_seconds?: number;
+  max_redirects?: number;
+  accepted_status?: string[];
+  body_encoding?: MonitorBodyEncoding;
+  keyword?: string;
+  cert_notify?: boolean;
+  cert_warn_days?: number;
+  cert_crit_days?: number;
+  group_id?: string;
+  description?: string;
+  tags?: string[];
+  auth_type?: MonitorAuthType;
+  headers?: MonitorHeaderRequest[];
+  basic_username?: string;
+  basic_password?: string;
+  bearer_token?: string;
+  body?: string;
+}
+
+/** POST /api/v1/monitors/test: a draft, plus the saved monitor whose
+ *  configuration and secrets fill in what it leaves out. */
+export interface TestMonitorRequest extends MonitorRequest {
+  monitor_id?: string;
+}
+
+/** The whole of a test's outcome. */
+export interface TestMonitorResponse {
+  status: "up" | "down";
+  failure: MonitorFailure;
+  status_code: number | null;
+  response_ms: number | null;
+}
+
+export interface MonitorGroupRequest {
+  name?: string;
+  position?: number;
 }

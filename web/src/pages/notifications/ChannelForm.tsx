@@ -24,7 +24,7 @@ import {
 } from "./channelModel";
 import { DEFAULT_TEMPLATE, DENIED_HEADERS, TEAMS_HOST_SUFFIXES, TEMPLATE_VARIABLES } from "./channelRules";
 
-const INPUT =
+export const INPUT =
   "w-full rounded-lg border border-border bg-bg px-3 py-2 text-sm text-text outline-none focus-visible:ring-2 focus-visible:ring-primary disabled:opacity-60";
 
 /** Creates a channel, or edits and deletes a saved one. */
@@ -284,7 +284,7 @@ function describe(field: ChannelField, errors: ChannelErrors) {
   };
 }
 
-function Field({
+export function Field({
   id,
   label,
   error,

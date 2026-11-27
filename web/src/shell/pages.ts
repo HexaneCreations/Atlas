@@ -1,5 +1,6 @@
 import {
   Bell,
+  Globe,
   LayoutDashboard,
   Server,
   Container,
@@ -40,6 +41,7 @@ export const NAV_PAGES: NavPage[] = [
   { to: "/containers", label: "Containers", icon: Container, section: "Monitor", page: "containers" },
   { to: "/processes", label: "Processes", icon: Cpu, section: "Monitor", page: "processes" },
   { to: "/services", label: "Services", icon: Layers, section: "Monitor", page: "services" },
+  { to: "/websites", label: "Websites", icon: Globe, section: "Monitor", page: "websites" },
   { to: "/cron", label: "Scheduled jobs", icon: Clock, section: "Infrastructure", page: "cron" },
   { to: "/ports", label: "Ports", icon: Network, section: "Infrastructure", page: "ports" },
   { to: "/disks", label: "Disks", icon: HardDrive, section: "Infrastructure", page: "disks" },

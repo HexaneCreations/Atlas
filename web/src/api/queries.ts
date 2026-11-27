@@ -13,7 +13,18 @@ import {
   fetchUserAccess,
   putUserAccess,
   createInstallCommand,
+  createMonitor,
+  createMonitorGroup,
   createNotificationChannel,
+  deleteMonitor,
+  deleteMonitorGroup,
+  fetchMonitor,
+  fetchMonitorEvents,
+  fetchMonitorHeartbeats,
+  fetchMonitors,
+  setMonitorActive,
+  updateMonitor,
+  updateMonitorGroup,
   createUser,
   deleteNotificationChannel,
   disableUser,
@@ -72,6 +83,8 @@ import type {
   ListNodesResponse,
   MetricsResponse,
   MuteDuration,
+  MonitorGroupRequest,
+  MonitorRequest,
   NotificationChannelRequest,
   SystemHealth,
   SystemInfo,
@@ -892,6 +905,107 @@ export function useRevokeInstallCommand() {
   const invalidate = useInvalidateInstallCommands();
   return useMutation({
     mutationFn: (id: string) => revokeInstallCommand(id),
+    onSuccess: invalidate,
+  });
+}
+
+// ------------------------------------------------------ Website monitors ----
+
+/** How often the Websites page re-reads monitors: a check runs at most
+ *  every 20s, so this shows each one within half an interval. */
+export const MONITOR_REFRESH_MS = 10_000;
+
+export const monitorKeys = {
+  all: ["monitors"] as const,
+  list: ["monitors", "list"] as const,
+  detail: (id: string) => ["monitors", "detail", id] as const,
+  heartbeats: (id: string) => ["monitors", "heartbeats", id] as const,
+  events: (id: string) => ["monitors", "events", id] as const,
+};
+
+export function useMonitors() {
+  return useQuery({
+    queryKey: monitorKeys.list,
+    queryFn: ({ signal }) => fetchMonitors(signal),
+    refetchInterval: MONITOR_REFRESH_MS,
+  });
+}
+
+export function useMonitor(id: string) {
+  return useQuery({
+    queryKey: monitorKeys.detail(id),
+    queryFn: ({ signal }) => fetchMonitor(id, signal),
+    refetchInterval: MONITOR_REFRESH_MS,
+  });
+}
+
+/** The last day of raw checks, for the response time chart. */
+export function useMonitorHeartbeats(id: string) {
+  return useQuery({
+    queryKey: monitorKeys.heartbeats(id),
+    queryFn: ({ signal }) => fetchMonitorHeartbeats(id, new Date(Date.now() - 86_400_000).toISOString(), signal),
+    refetchInterval: MONITOR_REFRESH_MS * 3,
+  });
+}
+
+export function useMonitorEvents(id: string) {
+  return useQuery({
+    queryKey: monitorKeys.events(id),
+    queryFn: ({ signal }) => fetchMonitorEvents(id, signal),
+    refetchInterval: MONITOR_REFRESH_MS * 3,
+  });
+}
+
+function useInvalidateMonitors() {
+  const queryClient = useQueryClient();
+  return () => queryClient.invalidateQueries({ queryKey: monitorKeys.all });
+}
+
+/** Creates a monitor, or updates it when `monitorID` is given. */
+export function useSaveMonitor() {
+  const invalidate = useInvalidateMonitors();
+  return useMutation({
+    mutationFn: ({ monitorID, body }: { monitorID: string | undefined; body: MonitorRequest }) =>
+      monitorID ? updateMonitor(monitorID, body) : createMonitor(body),
+    // The variables hold credentials, header values and the body.
+    gcTime: 0,
+    onSuccess: invalidate,
+  });
+}
+
+export function useSetMonitorActive() {
+  const invalidate = useInvalidateMonitors();
+  return useMutation({
+    mutationFn: ({ monitorID, active }: { monitorID: string; active: boolean }) => setMonitorActive(monitorID, active),
+    onSuccess: invalidate,
+  });
+}
+
+export function useDeleteMonitor() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (monitorID: string) => deleteMonitor(monitorID),
+    onSuccess: (_data, monitorID) => {
+      queryClient.removeQueries({ queryKey: monitorKeys.detail(monitorID) });
+      return queryClient.invalidateQueries({ queryKey: monitorKeys.list });
+    },
+  });
+}
+
+/** Creates a group, or renames it when `groupID` is given. */
+export function useSaveMonitorGroup() {
+  const invalidate = useInvalidateMonitors();
+  return useMutation({
+    mutationFn: ({ groupID, body }: { groupID: string | undefined; body: MonitorGroupRequest }) =>
+      groupID ? updateMonitorGroup(groupID, body) : createMonitorGroup(body),
+    onSuccess: invalidate,
+  });
+}
+
+export function useDeleteMonitorGroup() {
+  const invalidate = useInvalidateMonitors();
+  return useMutation({
+    mutationFn: (groupID: string) => deleteMonitorGroup(groupID),
     onSuccess: invalidate,
   });
 }

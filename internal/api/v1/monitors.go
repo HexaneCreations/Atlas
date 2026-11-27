@@ -3,6 +3,7 @@ package v1
 import (
 	"context"
 	"log/slog"
+	"math"
 	"net/http"
 	"slices"
 	"strconv"
@@ -22,6 +23,9 @@ import (
 type MonitorStore interface {
 	ListMonitors(ctx context.Context) ([]monitor.View, error)
 	GetMonitor(ctx context.Context, monitorID string) (monitor.View, error)
+	// StoredMonitor returns the configuration and secret a test of a saved
+	// monitor starts from. It must only read.
+	StoredMonitor(ctx context.Context, monitorID string) (monitor.Monitor, monitor.Secret, error)
 	CreateMonitor(ctx context.Context, m monitor.Monitor, s monitor.Secret, by string) (monitor.View, error)
 	UpdateMonitor(ctx context.Context, monitorID string, apply monitor.UpdateFunc, by string) (monitor.View, error)
 	SetMonitorActive(ctx context.Context, monitorID string, active bool, by string) (monitor.View, error)
@@ -38,6 +42,11 @@ type MonitorStore interface {
 	CreateGroup(ctx context.Context, g monitor.Group) (monitor.Group, error)
 	UpdateGroup(ctx context.Context, g monitor.Group) (monitor.Group, error)
 	DeleteGroup(ctx context.Context, groupID string) error
+}
+
+// MonitorTester runs on-demand checks. Satisfied by [*monitor.Tester].
+type MonitorTester interface {
+	Test(ctx context.Context, m monitor.Monitor, s monitor.Secret) (monitor.Result, error)
 }
 
 // MonitorProbe reports the prober's own connectivity.
@@ -541,6 +550,95 @@ func (h *Handler) DeleteMonitor(w http.ResponseWriter, r *http.Request) error {
 	}
 	logAdminAction(r, "monitor deleted", slog.String("monitor_id", monitorID))
 	w.WriteHeader(http.StatusNoContent)
+	return nil
+}
+
+// TestMonitorRequest is a draft monitor to check once: a create request,
+// plus the saved monitor whose configuration and stored secrets fill in
+// whatever the draft leaves out.
+type TestMonitorRequest struct {
+	MonitorRequest
+	MonitorID string `json:"monitor_id,omitempty"`
+}
+
+// TestMonitorResponse is a test's outcome. Nothing from the response body,
+// its headers or an error's text is included.
+type TestMonitorResponse struct {
+	Status     string `json:"status"`
+	Failure    string `json:"failure"`
+	StatusCode *int   `json:"status_code"`
+	ResponseMS *int   `json:"response_ms"`
+}
+
+// testCheckTimeout bounds a whole test, a little above the longest timeout
+// a check may have, so the check's own timeout is what normally ends it.
+const testCheckTimeout = monitor.MaxTimeoutSeconds*time.Second + 5*time.Second
+
+// TestMonitorDraft checks a draft, or a saved monitor with draft changes,
+// once. It stores nothing and leaves the monitor's live state, counters and
+// events alone. The audit line names only the target host.
+func (h *Handler) TestMonitorDraft(w http.ResponseWriter, r *http.Request) error {
+	const op = "v1.Handler.TestMonitorDraft"
+	store, err := h.monitorWriter(r, op)
+	if err != nil {
+		return err
+	}
+	if h.deps.MonitorTester == nil {
+		return errs.New(errs.CodeUnavailable, "website tests are not available on this instance").WithOp(op)
+	}
+	var req TestMonitorRequest
+	if decodeStrict(r, &req) != nil {
+		// Not the decoder's own text, which can quote the body and is logged.
+		return errs.New(errs.CodeInvalidArgument, "invalid request body").WithOp(op)
+	}
+	// A test needs no name; an empty one keeps the placeholder or stored name.
+	if req.Name != nil && strings.TrimSpace(*req.Name) == "" {
+		req.Name = nil
+	}
+	base, stored := monitor.Defaults(), monitor.Secret{}
+	base.Name = "test"
+	if req.MonitorID != "" {
+		if base, stored, err = store.StoredMonitor(r.Context(), req.MonitorID); err != nil {
+			return err
+		}
+	} else if req.URL == nil {
+		return errs.New(errs.CodeInvalidArgument, "url is required").WithOp(op).WithDetail("field", "url")
+	}
+	m, secret, err := h.buildMonitor(req.MonitorRequest, base, stored)
+	if err != nil {
+		return err
+	}
+	host := strings.ToLower(monitor.Host(m.URL))
+	audit := func(outcome string) {
+		logAdminAction(r, "monitor tested", slog.String("monitor_id", req.MonitorID), slog.String("host", host),
+			slog.String("outcome", outcome))
+	}
+	principal, _ := session.PrincipalFrom(r.Context())
+	if retryAfter, ok := h.deps.MonitorTestLimiter.Allow(principal.UserID, "monitor-host:"+host); !ok {
+		audit("rate_limited")
+		w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(retryAfter.Seconds()))))
+		return errs.New(errs.CodeRateLimited, "too many website tests; try again shortly").WithOp(op)
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), testCheckTimeout)
+	defer cancel()
+	res, err := h.deps.MonitorTester.Test(ctx, m, secret)
+	if err != nil {
+		audit("busy")
+		return err
+	}
+	out := TestMonitorResponse{Status: string(monitor.StatusDown), Failure: string(res.Failure)}
+	if res.Up {
+		out.Status = string(monitor.StatusUp)
+	}
+	if res.StatusCode > 0 {
+		out.StatusCode = &res.StatusCode
+	}
+	if res.StatusCode > 0 || res.ResponseMS > 0 {
+		out.ResponseMS = &res.ResponseMS
+	}
+	audit(out.Status)
+	httpx.JSON(w, r, http.StatusOK, out)
 	return nil
 }
 

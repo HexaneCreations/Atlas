@@ -193,3 +193,110 @@ func TestWebsiteMonitorRoutesAndProbe(t *testing.T) {
 		t.Errorf("delete: %d", code)
 	}
 }
+
+// A test of a saved monitor, while it is up and while it is down, reaches
+// the site but leaves the monitor, its live state, counters, heartbeats and
+// events exactly as they were.
+func TestWebsiteMonitorTestLeavesStateAlone(t *testing.T) {
+	dsn := os.Getenv(testDatabaseURLEnv)
+	if dsn == "" {
+		t.Skipf("%s is not set; run `make db-up` first", testDatabaseURLEnv)
+	}
+	var failing atomic.Bool
+	var hits atomic.Int64
+	site := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		if failing.Load() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = w.Write([]byte("healthy"))
+	}))
+	defer site.Close()
+
+	root := bootServerWith(t, func(c *config.Config) { c.Monitoring.AllowPrivateTargets = true }, nil)
+	base := root + "/api/v1"
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	super := authenticatedTestClient(t, root, "superadmin")
+	code, created := notificationCall(t, super, http.MethodPost, base+"/monitors", fmt.Sprintf(
+		`{"name":"it-test-%d","url":"%s/","bearer_token":"tok","auth_type":"bearer","interval_seconds":20,
+		"retry_interval_seconds":20,"timeout_seconds":5,"retries":0}`, time.Now().UnixNano(), site.URL))
+	if code != http.StatusCreated {
+		t.Fatalf("create: %d %v", code, created)
+	}
+	id, _ := created["id"].(string)
+	t.Cleanup(func() { notificationCall(t, super, http.MethodDelete, base+"/monitors/"+id, "") })
+
+	exec := func(q string) {
+		t.Helper()
+		if _, err := pool.Exec(ctx, q, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	settle := func(want string) {
+		t.Helper()
+		exec(`UPDATE monitor_status SET next_check_at = now() WHERE monitor_id = $1`)
+		deadline := time.Now().Add(20 * time.Second)
+		for {
+			var status string
+			_ = pool.QueryRow(ctx, `SELECT status FROM monitor_status WHERE monitor_id = $1`, id).Scan(&status)
+			if status == want {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("monitor never settled %s", want)
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		// No scheduled check may run while the state is compared.
+		exec(`UPDATE monitor_status SET next_check_at = now() + interval '1 day' WHERE monitor_id = $1`)
+	}
+	snapshot := func() string {
+		t.Helper()
+		var s string
+		if err := pool.QueryRow(ctx, `SELECT concat_ws(' | ',
+			(SELECT (to_jsonb(m) - 'secret_ciphertext')::text || md5(m.secret_ciphertext) FROM monitors m WHERE m.id = $1),
+			(SELECT to_jsonb(s)::text FROM monitor_status s WHERE s.monitor_id = $1),
+			(SELECT count(*)::text || ' ' || coalesce(max(time)::text, '') FROM monitor_heartbeats WHERE monitor_id = $1),
+			(SELECT count(*)::text || ' ' || coalesce(max(time)::text, '') FROM monitor_events WHERE monitor_id = $1))`, id).Scan(&s); err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	var lastTest time.Time
+	test := func(want string) {
+		t.Helper()
+		// The per-target limit allows one test of a host every few seconds.
+		time.Sleep(time.Until(lastTest.Add(5100 * time.Millisecond)))
+		before, n := snapshot(), hits.Load()
+		code, out := notificationCall(t, super, http.MethodPost, base+"/monitors/test", `{"monitor_id":"`+id+`"}`)
+		lastTest = time.Now()
+		if code != http.StatusOK || out["status"] != want {
+			t.Fatalf("test: %d %v, want %s", code, out, want)
+		}
+		if hits.Load() != n+1 {
+			t.Errorf("the site was reached %d times by one test", hits.Load()-n)
+		}
+		if after := snapshot(); after != before {
+			t.Errorf("a test changed the monitor's stored state:\nbefore %s\nafter  %s", before, after)
+		}
+	}
+
+	settle("up")
+	failing.Store(true)
+	test("down") // while up, a failing test
+	failing.Store(false)
+	test("up")
+
+	failing.Store(true)
+	settle("down")
+	failing.Store(false)
+	test("up") // while down, a passing test
+	failing.Store(true)
+	test("down")
+}

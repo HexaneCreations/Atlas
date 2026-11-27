@@ -34,6 +34,9 @@ const PortsPage = lazy(() =>
 const DisksPage = lazy(() =>
   import("./pages/DisksPage").then((m) => ({ default: m.DisksPage })),
 );
+const WebsitesPage = lazy(() =>
+  import("./pages/WebsitesPage").then((m) => ({ default: m.WebsitesPage })),
+);
 const UsersPage = lazy(() =>
   import("./pages/UsersPage").then((m) => ({ default: m.UsersPage })),
 );
@@ -135,6 +138,7 @@ function AuthenticatedApp({ pathname }: { pathname: string }) {
                     />
                     <Route path="/processes" element={<RequirePage page="processes"><ProcessesPage /></RequirePage>} />
                     <Route path="/services" element={<RequirePage page="services"><ServicesPage /></RequirePage>} />
+                    <Route path="/websites" element={<RequirePage page="websites"><WebsitesPage /></RequirePage>} />
                     <Route path="/cron" element={<RequirePage page="cron"><CronPage /></RequirePage>} />
                     <Route path="/ports" element={<RequirePage page="ports"><PortsPage /></RequirePage>} />
                     <Route path="/disks" element={<RequirePage page="disks"><DisksPage /></RequirePage>} />

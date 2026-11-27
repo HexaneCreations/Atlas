@@ -169,6 +169,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*App, error) {
 		Monitors:                   lazyMonitorStore{pool: pool, key: notificationKey},
 		MonitorProbe:               monitorPipe,
 		MonitorAllowPrivateTargets: cfg.Monitoring.AllowPrivateTargets,
+		MonitorTester:              monitorPipe.Tester(),
 
 		Users:          lazyUserStore{pool: pool},
 		Sessions:       lazyUserStore{pool: pool},

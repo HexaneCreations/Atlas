@@ -11,6 +11,14 @@ import type {
   GrantPageAccessRequest,
   GrantRoleRequest,
   ListInstallCommandsResponse,
+  ListMonitorsResponse,
+  Monitor,
+  MonitorDetail,
+  MonitorEventsResponse,
+  MonitorGroup,
+  MonitorGroupRequest,
+  MonitorHeartbeatsResponse,
+  MonitorRequest,
   ListNodeAlertRulesResponse,
   ListNotificationChannelsResponse,
   ListNotificationDeliveriesResponse,
@@ -27,6 +35,8 @@ import type {
   PutUserAccessResponse,
   ResetPasswordResponse,
   TestNotificationDraftRequest,
+  TestMonitorRequest,
+  TestMonitorResponse,
   TestNotificationResponse,
   UserAccessResponse,
 } from "./types";
@@ -471,6 +481,69 @@ export async function setNodeAlertRule(nodeID: string, key: string, enabled: boo
 
 export async function resetNodeAlertRule(nodeID: string, key: string): Promise<void> {
   await request(`${alertRulesPath(nodeID)}/${encodeURIComponent(key)}`, { method: "DELETE" });
+}
+
+// ------------------------------------------------------ Website monitors ----
+
+const monitorPath = (id: string) => `/monitors/${encodeURIComponent(id)}`;
+const groupPath = (id: string) => `/monitor-groups/${encodeURIComponent(id)}`;
+
+async function sendJSON<T>(path: string, method: string, body: unknown): Promise<T> {
+  const response = await request(path, { method, headers: JSON_HEADERS, body: JSON.stringify(body) });
+  return (await response.json()) as T;
+}
+
+export async function fetchMonitors(signal?: AbortSignal): Promise<ListMonitorsResponse> {
+  return apiGet<ListMonitorsResponse>("/monitors", signal ? { signal } : {});
+}
+
+export async function fetchMonitor(id: string, signal?: AbortSignal): Promise<MonitorDetail> {
+  return apiGet<MonitorDetail>(monitorPath(id), signal ? { signal } : {});
+}
+
+/** Raw checks since `since`, oldest first. */
+export async function fetchMonitorHeartbeats(id: string, since: string, signal?: AbortSignal): Promise<MonitorHeartbeatsResponse> {
+  return apiGet<MonitorHeartbeatsResponse>(
+    `${monitorPath(id)}/heartbeats?since=${encodeURIComponent(since)}&limit=2000`,
+    signal ? { signal } : {},
+  );
+}
+
+export async function fetchMonitorEvents(id: string, signal?: AbortSignal): Promise<MonitorEventsResponse> {
+  return apiGet<MonitorEventsResponse>(`${monitorPath(id)}/events?limit=50`, signal ? { signal } : {});
+}
+
+export async function createMonitor(body: MonitorRequest): Promise<Monitor> {
+  return sendJSON<Monitor>("/monitors", "POST", body);
+}
+
+export async function updateMonitor(id: string, body: MonitorRequest): Promise<Monitor> {
+  return sendJSON<Monitor>(monitorPath(id), "PUT", body);
+}
+
+export async function setMonitorActive(id: string, active: boolean): Promise<Monitor> {
+  return sendJSON<Monitor>(`${monitorPath(id)}/active`, "PUT", { active });
+}
+
+export async function deleteMonitor(id: string): Promise<void> {
+  await request(monitorPath(id), { method: "DELETE" });
+}
+
+/** Checks a draft once. Nothing is stored. */
+export async function testMonitorDraft(body: TestMonitorRequest): Promise<TestMonitorResponse> {
+  return sendJSON<TestMonitorResponse>("/monitors/test", "POST", body);
+}
+
+export async function createMonitorGroup(body: MonitorGroupRequest): Promise<MonitorGroup> {
+  return sendJSON<MonitorGroup>("/monitor-groups", "POST", body);
+}
+
+export async function updateMonitorGroup(id: string, body: MonitorGroupRequest): Promise<MonitorGroup> {
+  return sendJSON<MonitorGroup>(groupPath(id), "PUT", body);
+}
+
+export async function deleteMonitorGroup(id: string): Promise<void> {
+  await request(groupPath(id), { method: "DELETE" });
 }
 
 // ------------------------------------------------- Fleet: install codes ----
