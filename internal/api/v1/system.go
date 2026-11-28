@@ -293,6 +293,8 @@ func (h *Handler) resolvedNode(scope inventory.Scope) string {
 // Handler serves the version 1 API.
 type Handler struct {
 	deps Deps
+	// logScans bounds concurrent ranged container-log reads.
+	logScans *scanLimiter
 }
 
 // NewHandler builds the v1 handler.
@@ -303,7 +305,10 @@ func NewHandler(deps Deps) *Handler {
 	if deps.MonitorTestLimiter == nil {
 		deps.MonitorTestLimiter = notification.NewTestLimiter(time.Now)
 	}
-	return &Handler{deps: deps}
+	h := &Handler{deps: deps}
+	cfg := h.logRangeConfig()
+	h.logScans = newScanLimiter(cfg.MaxScansPerNode, cfg.MaxScansPerUser)
+	return h
 }
 
 // Mount registers every v1 route on mux.

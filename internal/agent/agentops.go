@@ -17,14 +17,14 @@ import (
 // No second Docker integration; this is two lines of channel adaptation over
 // the existing one.
 func containerLogsFunc(dockerPlugin *docker.Plugin) libp2ptransport.ContainerLogsFunc {
-	return func(ctx context.Context, containerID string, tail int, since time.Time, follow, timestamps bool) (<-chan libp2ptransport.LogLine, <-chan error, error) {
+	return func(ctx context.Context, containerID string, tail int, since, until time.Time, follow, timestamps bool) (<-chan libp2ptransport.LogLine, <-chan error, error) {
 		client := dockerPlugin.DockerClient()
 		if client == nil {
 			return nil, nil, fmt.Errorf("docker is not available on this host")
 		}
 
 		lines, errCh := client.Logs(ctx, containerID, docker.LogOptions{
-			Follow: follow, Tail: tail, Since: since, Timestamps: timestamps,
+			Follow: follow, Tail: tail, Since: since, Until: until, Timestamps: timestamps,
 		})
 
 		out := make(chan libp2ptransport.LogLine)

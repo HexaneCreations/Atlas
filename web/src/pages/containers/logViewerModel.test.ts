@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { LogLine } from "../../api/types";
 import {
-  canLoadOlder,
   compensateScrollTopForPrepend,
   containerLogsPath,
   dedupeLiveBurst,
@@ -9,7 +8,6 @@ import {
   isNearBottom,
   logFileName,
   mergeLogLines,
-  nextTail,
   renderLogText,
 } from "./logViewerModel";
 
@@ -80,18 +78,6 @@ describe("compensateScrollTopForPrepend", () => {
 
   it("keeps a reader who was at the very top pinned to the same content, not the top", () => {
     expect(compensateScrollTopForPrepend(0, 3000, 5000)).toBe(2000);
-  });
-});
-
-describe("nextTail / canLoadOlder", () => {
-  it("doubles up to the server cap", () => {
-    expect(nextTail(200)).toBe(400);
-    expect(nextTail(4000)).toBe(5000);
-  });
-
-  it("stops offering more once the cap is reached", () => {
-    expect(canLoadOlder(5000)).toBe(false);
-    expect(canLoadOlder(4999)).toBe(true);
   });
 });
 

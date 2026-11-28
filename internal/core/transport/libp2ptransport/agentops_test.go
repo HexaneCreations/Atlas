@@ -109,7 +109,7 @@ func setupAgentOpsHosts(t *testing.T) (serverHost, agentHost host.Host) {
 }
 
 func fixedLinesFunc(lines []LogLine) ContainerLogsFunc {
-	return func(context.Context, string, int, time.Time, bool, bool) (<-chan LogLine, <-chan error, error) {
+	return func(context.Context, string, int, time.Time, time.Time, bool, bool) (<-chan LogLine, <-chan error, error) {
 		out := make(chan LogLine, len(lines))
 		for _, l := range lines {
 			out <- l
@@ -122,7 +122,7 @@ func fixedLinesFunc(lines []LogLine) ContainerLogsFunc {
 }
 
 func erroringLogsFunc(msg string) ContainerLogsFunc {
-	return func(context.Context, string, int, time.Time, bool, bool) (<-chan LogLine, <-chan error, error) {
+	return func(context.Context, string, int, time.Time, time.Time, bool, bool) (<-chan LogLine, <-chan error, error) {
 		return nil, nil, fmt.Errorf("%s", msg)
 	}
 }
@@ -206,7 +206,7 @@ func TestRequestContainerLogsFollow(t *testing.T) {
 	serverHost, agentHost := setupAgentOpsHosts(t)
 
 	produced := make(chan LogLine)
-	logsFunc := func(ctx context.Context, _ string, _ int, _ time.Time, follow, _ bool) (<-chan LogLine, <-chan error, error) {
+	logsFunc := func(ctx context.Context, _ string, _ int, _, _ time.Time, follow, _ bool) (<-chan LogLine, <-chan error, error) {
 		if !follow {
 			t.Errorf("expected Follow=true to reach the agent-side func")
 		}
@@ -272,7 +272,7 @@ func TestRequestContainerLogsCancellationReachesAgentContext(t *testing.T) {
 
 	started := make(chan struct{})
 	agentCtxDone := make(chan struct{})
-	logsFunc := func(ctx context.Context, _ string, _ int, _ time.Time, _, _ bool) (<-chan LogLine, <-chan error, error) {
+	logsFunc := func(ctx context.Context, _ string, _ int, _, _ time.Time, _, _ bool) (<-chan LogLine, <-chan error, error) {
 		out := make(chan LogLine)
 		errCh := make(chan error, 1)
 		close(started)
@@ -409,7 +409,7 @@ func TestHandleAgentOpsStreamRejectsUnregisteredPeer(t *testing.T) {
 	serverA, serverB, agentHost := setupTwoControlPlaneHosts(t)
 
 	called := false
-	logs := func(context.Context, string, int, time.Time, bool, bool) (<-chan LogLine, <-chan error, error) {
+	logs := func(context.Context, string, int, time.Time, time.Time, bool, bool) (<-chan LogLine, <-chan error, error) {
 		called = true
 		return nil, nil, nil
 	}
@@ -441,7 +441,7 @@ func TestHandleAgentOpsStreamRefusesUnauthorizedContainerLogs(t *testing.T) {
 	serverHost, agentHost := setupAgentOpsHosts(t)
 
 	called := false
-	logs := func(context.Context, string, int, time.Time, bool, bool) (<-chan LogLine, <-chan error, error) {
+	logs := func(context.Context, string, int, time.Time, time.Time, bool, bool) (<-chan LogLine, <-chan error, error) {
 		called = true
 		return nil, nil, nil
 	}
@@ -664,7 +664,7 @@ func TestRequestContainerLogsLargeStreamNoDeadlock(t *testing.T) {
 	serverHost, agentHost := setupAgentOpsHosts(t)
 
 	const total = 2000
-	logsFunc := func(ctx context.Context, _ string, _ int, _ time.Time, _, _ bool) (<-chan LogLine, <-chan error, error) {
+	logsFunc := func(ctx context.Context, _ string, _ int, _, _ time.Time, _, _ bool) (<-chan LogLine, <-chan error, error) {
 		out := make(chan LogLine) // unbuffered: forces real backpressure
 		errCh := make(chan error, 1)
 		go func() {
@@ -716,7 +716,7 @@ func TestSessionLimiterBoundsConcurrencyAndReleases(t *testing.T) {
 
 	release := make(chan struct{})
 	started := make(chan struct{}, 2)
-	logsFunc := func(ctx context.Context, _ string, _ int, _ time.Time, _, _ bool) (<-chan LogLine, <-chan error, error) {
+	logsFunc := func(ctx context.Context, _ string, _ int, _, _ time.Time, _, _ bool) (<-chan LogLine, <-chan error, error) {
 		started <- struct{}{}
 		out := make(chan LogLine)
 		errCh := make(chan error, 1)
@@ -773,4 +773,102 @@ func TestSessionLimiterBoundsConcurrencyAndReleases(t *testing.T) {
 		t.Fatal("limiter slot was not released after the first session completed")
 	}
 	_ = frames3
+}
+
+// --- protocol version 2: until, negotiated per request ---------------------
+
+type recordedCall struct {
+	since, until time.Time
+	tail         int
+}
+
+func recordingLogsFunc(calls chan<- recordedCall) ContainerLogsFunc {
+	return func(_ context.Context, _ string, tail int, since, until time.Time, _, _ bool) (<-chan LogLine, <-chan error, error) {
+		calls <- recordedCall{since: since, until: until, tail: tail}
+		out := make(chan LogLine)
+		close(out)
+		errCh := make(chan error, 1)
+		close(errCh)
+		return out, errCh, nil
+	}
+}
+
+func lastFrame(t *testing.T, frames <-chan AgentOpFrame) AgentOpFrame {
+	t.Helper()
+	var last AgentOpFrame
+	for f := range frames {
+		last = f
+	}
+	return last
+}
+
+// A version 2 Agent serves version 1 requests (a current production control
+// plane) and passes Until through only on version 2.
+func TestAgentServesVersionOneAndTwoRequests(t *testing.T) {
+	serverHost, agentHost := setupAgentOpsHosts(t)
+	calls := make(chan recordedCall, 4)
+	RegisterAgentOpsHandler(agentHost, recordingLogsFunc(calls), NewSessionLimiter(4), acceptAnyPeer(true))
+	since := time.Date(2026, 1, 1, 10, 0, 0, 123_000_000, time.UTC)
+	until := since.Add(time.Hour)
+
+	for _, c := range []struct {
+		version   int
+		wantUntil time.Time
+	}{
+		{1, time.Time{}}, // a version 1 request never carries until; an extra field is ignored
+		{2, until},
+	} {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		frames, err := RequestContainerLogs(ctx, serverHost, agentHost.ID(), AgentOpRequest{ProtocolVersion: c.version,
+			Op: AgentOpContainerLogs, ContainerID: "c1", Since: since.Format(time.RFC3339Nano), Until: until.Format(time.RFC3339Nano)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if f := lastFrame(t, frames); f.Type != "end" {
+			t.Fatalf("version %d: last frame %+v", c.version, f)
+		}
+		cancel()
+		got := <-calls
+		if !got.since.Equal(since) || !got.until.Equal(c.wantUntil) {
+			t.Errorf("version %d: since %v until %v, want %v %v", c.version, got.since, got.until, since, c.wantUntil)
+		}
+	}
+}
+
+// An unknown version gets the error frame version 1 Agents already send, the
+// signal a control plane falls back on.
+func TestAgentRefusesAnUnknownVersionWithTheVersionOneFrame(t *testing.T) {
+	serverHost, agentHost := setupAgentOpsHosts(t)
+	RegisterAgentOpsHandler(agentHost, fixedLinesFunc(nil), NewSessionLimiter(4), acceptAnyPeer(true))
+	for _, v := range []int{0, AgentOpsProtocolVersion + 1} {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		frames, err := RequestContainerLogs(ctx, serverHost, agentHost.ID(),
+			AgentOpRequest{ProtocolVersion: v, Op: AgentOpContainerLogs, ContainerID: "c1"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		f := lastFrame(t, frames)
+		cancel()
+		if f.Type != "error" || !IsUnsupportedVersion(f.Reason) || f.Reason != fmt.Sprintf("unsupported protocol version %d", v) {
+			t.Errorf("version %d: frame %+v", v, f)
+		}
+	}
+	if IsUnsupportedVersion("docker is not available on this host") {
+		t.Error("an unrelated error read as a version refusal")
+	}
+}
+
+func TestAgentRejectsAMalformedUntil(t *testing.T) {
+	serverHost, agentHost := setupAgentOpsHosts(t)
+	RegisterAgentOpsHandler(agentHost, fixedLinesFunc(nil), NewSessionLimiter(4), acceptAnyPeer(true))
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	frames, err := RequestContainerLogs(ctx, serverHost, agentHost.ID(),
+		AgentOpRequest{ProtocolVersion: 2, Op: AgentOpContainerLogs, ContainerID: "c1", Until: "yesterday"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f := lastFrame(t, frames); f.Type != "error" {
+		t.Errorf("frame = %+v, want an error", f)
+	}
 }

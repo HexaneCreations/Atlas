@@ -476,6 +476,8 @@ func (f *fakeRemoteLogSource) ContainerLogs(ctx context.Context, nodeID, contain
 	return f.lines, f.errCh
 }
 
+func (f *fakeRemoteLogSource) SupportsUntil(string) bool { return true }
+
 func (f *fakeRemoteLogSource) calledCtx() context.Context {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -615,5 +617,23 @@ func TestContainerLogsFollowRemoteUnavailableWithNoRemoteLogSource(t *testing.T)
 	}
 	if resp == nil || resp.StatusCode != http.StatusServiceUnavailable {
 		t.Errorf("status = %v, want %d", statusOf(resp), http.StatusServiceUnavailable)
+	}
+}
+
+// Following is only for a range that ends now: a past range is never
+// presented as live.
+func TestContainerLogsFollowRefusesABoundedRange(t *testing.T) {
+	t.Parallel()
+	srv := newFollowTestServer(t, &fakeDockerClient{containers: []docker.Container{{ID: testContainerID, Name: "web"}}})
+	for _, query := range []string{"until=2026-01-01T00:00:00Z", "before=2026-01-01T00:00:00Z", "since=nonsense", "since=2999-01-01T00:00:00Z"} {
+		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+		_, resp, err := websocket.Dial(ctx, wsURL(srv, "/api/v1/containers/web/logs/follow?"+query), nil)
+		cancel()
+		if resp != nil && resp.Body != nil {
+			_ = resp.Body.Close()
+		}
+		if err == nil || resp == nil || resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("%s: status %v, want 400", query, statusOf(resp))
+		}
 	}
 }

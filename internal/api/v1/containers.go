@@ -152,6 +152,10 @@ type RemoteLogSource interface {
 	// does, so containerLogSource and followLogs below handle a local and a
 	// remote session identically.
 	ContainerLogs(ctx context.Context, nodeID, containerID string, opts docker.LogOptions) (<-chan docker.LogLine, <-chan error)
+	// SupportsUntil reports whether nodeID's Agent is believed able to end a
+	// read at LogOptions.Until. False only after the Agent refused one;
+	// such a read fails with [docker.ErrUntilUnsupported].
+	SupportsUntil(nodeID string) bool
 }
 
 // ListContainersResponse is the container collection.
@@ -345,18 +349,43 @@ const (
 	maxLogTail     = 5000
 )
 
-// LogLineResponse is one line of container output.
+// LogLineResponse is one line of container output. Message is the
+// container's own text, untrusted: a client renders it as text.
 type LogLineResponse struct {
 	Time    time.Time     `json:"time"`
 	Stream  docker.Stream `json:"stream"`
 	Message string        `json:"message"`
+	// Truncated is true when the line was longer than one response carries
+	// and Message is its start.
+	Truncated bool `json:"truncated,omitempty"`
 }
 
-// ContainerLogsResponse is a batch of log lines.
+// ContainerLogsResponse is a batch of log lines, oldest first. The fields
+// after Total describe a ranged read (since, until, before, limit) and are
+// absent or false for a plain tail.
 type ContainerLogsResponse struct {
 	ContainerID string            `json:"container_id"`
 	Lines       []LogLineResponse `json:"lines"`
 	Total       int               `json:"total"`
+	// Since and Until are the range read; Until is absent for one that ends
+	// now.
+	Since *time.Time `json:"since,omitempty"`
+	Until *time.Time `json:"until,omitempty"`
+	// More says older lines exist in the range; pass NextBefore as before
+	// to read them.
+	More       bool       `json:"more"`
+	NextBefore *time.Time `json:"next_before,omitempty"`
+	// Truncated: the response size cap dropped older lines of this page.
+	Truncated bool `json:"truncated"`
+	// ScanLimited: reading stopped at the scan limit or deadline; narrow
+	// the range.
+	ScanLimited bool `json:"scan_limited"`
+	// AvailableSince is the oldest line the container still has, set when
+	// the range starts before it.
+	AvailableSince *time.Time `json:"available_since,omitempty"`
+	// Fallback: the node's Agent cannot end a read at a time, so the
+	// server did; large ranges are slower.
+	Fallback bool `json:"fallback"`
 }
 
 // ContainerLogs returns the tail of a container's logs.
@@ -380,6 +409,11 @@ func (h *Handler) ContainerLogs(w http.ResponseWriter, r *http.Request) error {
 	if id == "" {
 		return errs.New(errs.CodeInvalidArgument, "a container id is required").
 			WithOp(op).WithDetail("field", "containerID")
+	}
+
+	q := r.URL.Query()
+	if q.Has("until") || q.Has("before") || q.Has("limit") {
+		return h.containerLogsRange(w, r, scope, id)
 	}
 
 	tail := defaultLogTail
@@ -500,6 +534,19 @@ func (h *Handler) ContainerLogsFollow(w http.ResponseWriter, r *http.Request) er
 		}
 		tail = min(n, maxLogTail)
 	}
+	// Following is live by definition: a range that ends in the past is read
+	// with GET /logs instead, never shown as if it were streaming.
+	if q := r.URL.Query(); q.Has("until") || q.Has("before") {
+		return errs.New(errs.CodeInvalidArgument, "following needs a range that ends now; leave out until and before").
+			WithOp(op).WithDetail("field", "until")
+	}
+	since, _, err := parseLogTime(r.URL.Query(), "since")
+	if err != nil {
+		return err
+	}
+	if since.After(time.Now()) {
+		return errs.New(errs.CodeInvalidArgument, "since is in the future").WithOp(op).WithDetail("field", "since")
+	}
 
 	// Pre-upgrade container resolution only happens for the local case: it
 	// needs a synchronous Containers() call this Handler can make directly,
@@ -552,9 +599,9 @@ func (h *Handler) ContainerLogsFollow(w http.ResponseWriter, r *http.Request) er
 	var lines <-chan docker.LogLine
 	var errCh <-chan error
 	if isLocal {
-		lines, errCh = client.Logs(ctx, id, docker.LogOptions{Follow: true, Tail: tail})
+		lines, errCh = client.Logs(ctx, id, docker.LogOptions{Follow: true, Tail: tail, Since: since})
 	} else {
-		lines, errCh = h.deps.RemoteLogs.ContainerLogs(ctx, scope.NodeID, id, docker.LogOptions{Follow: true, Tail: tail})
+		lines, errCh = h.deps.RemoteLogs.ContainerLogs(ctx, scope.NodeID, id, docker.LogOptions{Follow: true, Tail: tail, Since: since})
 	}
 	h.followLogs(ctx, conn, lines, errCh)
 	return nil

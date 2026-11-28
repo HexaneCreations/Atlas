@@ -1,5 +1,6 @@
 import {
   keepPreviousData,
+  useInfiniteQuery,
   useMutation,
   useQueries,
   useQuery,
@@ -69,6 +70,7 @@ import type {
   CollectorsResponse,
   ContainerDetail,
   ContainerLogsResponse,
+  LogRange,
   AssignRoleAccessRequest,
   CreateInstallCommandRequest,
   CreateUserRequest,
@@ -340,7 +342,8 @@ export const containerKeys = {
   list: (nodeID: string) => ["containers", nodeID] as const,
   // tail is part of the key so "load older logs" (a bigger tail request) is
   // its own cache entry rather than silently reusing a smaller one.
-  logs: (nodeID: string, id: string, tail: number) => ["containers", nodeID, id, "logs", tail] as const,
+  logRange: (nodeID: string, id: string, since: string, until: string) =>
+    ["containers", nodeID, id, "logs", since, until] as const,
   detail: (id: string) => ["containers", id, "detail"] as const,
 } as const;
 
@@ -529,22 +532,33 @@ export function useMounts(nodeID: string | undefined) {
   });
 }
 
-/** The tail of one container's logs. */
-export function useContainerLogs(containerID: string | null, nodeID: string | undefined, tail = 200) {
-  return useQuery({
-    queryKey: containerKeys.logs(nodeID ?? "", containerID ?? "", tail),
-    queryFn: ({ signal }) =>
+/** Lines per page of a ranged log read. */
+export const LOG_PAGE_LIMIT = 500;
+
+/** The query string of one page of a log range. */
+export function logRangeQuery(range: LogRange, nodeID: string | undefined, limit: number, before?: string): string {
+  const q = new URLSearchParams({ since: range.since, limit: String(limit), node: nodeID ?? "" });
+  if (range.until) q.set("until", range.until);
+  if (before) q.set("before", before);
+  return q.toString();
+}
+
+/** One container's logs for a time range: the newest page first, then older
+ *  pages by cursor ("load more"). Not refetched on a timer: a range that
+ *  ends now stays current through the live follow instead. */
+export function useContainerLogRange(containerID: string | null, nodeID: string | undefined, range: LogRange) {
+  return useInfiniteQuery({
+    queryKey: containerKeys.logRange(nodeID ?? "", containerID ?? "", range.since, range.until ?? "now"),
+    queryFn: ({ signal, pageParam }) =>
       apiGet<ContainerLogsResponse>(
-        `/containers/${encodeURIComponent(containerID ?? "")}/logs?tail=${tail}&node=${encodeURIComponent(nodeID ?? "")}`,
+        `/containers/${encodeURIComponent(containerID ?? "")}/logs?${logRangeQuery(range, nodeID, LOG_PAGE_LIMIT, pageParam)}`,
         { signal },
       ),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (last) => (last.more && last.next_before ? last.next_before : undefined),
     enabled: Boolean(containerID),
-    refetchInterval: REFRESH_INTERVAL_MS,
     retry: retryPolicy,
-    // tail is part of the key, so "load older logs" (a bigger tail) is a new
-    // cache entry — without this, data would go briefly undefined while it
-    // loads, collapsing the log viewer's height mid-read.
-    placeholderData: keepPreviousData,
+    staleTime: Infinity,
   });
 }
 

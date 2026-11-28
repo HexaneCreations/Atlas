@@ -13,6 +13,7 @@ package docker
 
 import (
 	"context"
+	"errors"
 	"time"
 )
 
@@ -286,9 +287,18 @@ type LogOptions struct {
 	Tail int
 	// Since restricts to lines after this time.
 	Since time.Time
+	// Until restricts to lines up to this time; the read ends there. Docker
+	// applies Tail before Since and Until, so Tail with a past Until usually
+	// returns nothing: a bounded window is read whole.
+	Until time.Time
 	// Timestamps prefixes each line with the daemon's timestamp.
 	Timestamps bool
 }
+
+// ErrUntilUnsupported is returned (wrapped) by a log source that cannot end
+// a read at LogOptions.Until: a version 1 Agent. The caller bounds the read
+// itself instead.
+var ErrUntilUnsupported = errors.New("this agent cannot end a log read at a time; it needs a newer agent")
 
 // Stream is which output a log line came from.
 type Stream string

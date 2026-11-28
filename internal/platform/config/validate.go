@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/hexane/atlas/internal/platform/secretbox"
 )
@@ -64,6 +65,7 @@ func (c *Config) Validate() error {
 	}
 	c.Notifications.validate(v)
 	c.Monitoring.validate(v)
+	c.ContainerLogs.validate(v)
 
 	if err := c.Logging.Validate(); err != nil {
 		v.addf("logging", "%s", err)
@@ -80,6 +82,24 @@ func (n Notifications) validate(v *violations) {
 	}
 	if _, err := secretbox.ParseKey(n.EncryptionKey.Reveal()); err != nil {
 		v.addf("notifications.encryption_key", "%s (want %d random bytes, base64-encoded)", err, secretbox.KeySize)
+	}
+}
+
+func (l ContainerLogs) validate(v *violations) {
+	if l.MaxRange < time.Minute || l.MaxRange > 31*24*time.Hour {
+		v.addf("container_logs.max_range", "must be between 1m and 744h, got %s", l.MaxRange)
+	}
+	if l.ScanMaxLines < 1000 || l.ScanMaxLines > 10_000_000 {
+		v.addf("container_logs.scan_max_lines", "must be between 1000 and 10000000, got %d", l.ScanMaxLines)
+	}
+	if l.ScanMaxBytes < 1<<20 || l.ScanMaxBytes > 4<<30 {
+		v.addf("container_logs.scan_max_bytes", "must be between 1 MiB and 4 GiB, got %d", l.ScanMaxBytes)
+	}
+	if l.ScanTimeout < time.Second || l.ScanTimeout > 10*time.Minute {
+		v.addf("container_logs.scan_timeout", "must be between 1s and 10m, got %s", l.ScanTimeout)
+	}
+	if l.MaxScansPerNode < 1 || l.MaxScansPerNode > 64 || l.MaxScansPerUser < 1 || l.MaxScansPerUser > 64 {
+		v.addf("container_logs.max_scans_per_node", "max_scans_per_node and max_scans_per_user must be between 1 and 64")
 	}
 }
 

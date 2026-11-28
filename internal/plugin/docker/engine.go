@@ -475,6 +475,9 @@ func (c *engineClient) Logs(ctx context.Context, containerID string, opts LogOpt
 		if !opts.Since.IsZero() {
 			dockerOpts.Since = opts.Since.Format(time.RFC3339Nano)
 		}
+		if !opts.Until.IsZero() {
+			dockerOpts.Until = opts.Until.Format(time.RFC3339Nano)
+		}
 
 		reader, err := c.api.ContainerLogs(ctx, containerID, dockerOpts)
 		if err != nil {

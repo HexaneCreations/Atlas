@@ -636,16 +636,42 @@ export interface ListContainersResponse {
   running: number;
 }
 
+/** One line of container output. `message` is the container's own text:
+ *  untrusted, always rendered as text. */
 export interface LogLine {
   time: string;
   stream: "stdout" | "stderr";
   message: string;
+  /** The line was longer than a response carries; message is its start. */
+  truncated?: boolean;
 }
 
+/** A log range as the API takes it: UTC instants. until null ends now, and
+ *  only such a range can be followed live. */
+export interface LogRange {
+  since: string;
+  until: string | null;
+}
+
+/** GET /containers/{id}/logs, oldest line first. The fields after `total`
+ *  describe a ranged read (since/until/before/limit). */
 export interface ContainerLogsResponse {
   container_id: string;
   lines: LogLine[];
   total: number;
+  since?: string;
+  until?: string;
+  /** Older lines exist in the range; pass next_before as before. */
+  more?: boolean;
+  next_before?: string;
+  /** The response cap dropped older lines of this page. */
+  truncated?: boolean;
+  /** Reading stopped at the scan limit or deadline: narrow the range. */
+  scan_limited?: boolean;
+  /** The container keeps nothing older; the range starts before this. */
+  available_since?: string;
+  /** The node's agent cannot end a read at a time; the server did. */
+  fallback?: boolean;
 }
 
 /** Process scheduler state, normalised across platforms. */

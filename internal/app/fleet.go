@@ -60,6 +60,9 @@ type fleetPipeline struct {
 	// stale or missing entry surfaces naturally as a failed stream open, not
 	// as a separate liveness check.
 	peerByNode map[string]peer.ID
+	// noUntil records nodes whose Agent refused a version 2 request, and
+	// when; see SupportsUntil.
+	noUntil map[string]time.Time
 	// grants is the CP-side AgentOps authorization check — see ContainerLogs.
 	// Set once at Start.
 	grants corefleet.GrantStore
@@ -259,6 +262,34 @@ func (f *fleetPipeline) recordAgentPeer(id corefleet.PeerIdentity, pid peer.ID) 
 	f.peerByNode[id.NodeID] = pid
 }
 
+// noUntilRecheck is how long a refusal of version 2 is believed before the
+// Agent is asked again: an upgraded Agent keeps its Peer ID, so nothing else
+// says it changed. A wrong belief costs one refused request.
+const noUntilRecheck = 10 * time.Minute
+
+// SupportsUntil implements v1.RemoteLogSource: false only while a recent
+// version 2 request to nodeID's Agent was refused. Unknown is true: the
+// first ranged read finds out.
+func (f *fleetPipeline) SupportsUntil(nodeID string) bool {
+	f.mu.RLock()
+	at, refused := f.noUntil[nodeID]
+	f.mu.RUnlock()
+	return !refused || time.Since(at) > noUntilRecheck
+}
+
+func (f *fleetPipeline) setSupportsUntil(nodeID string, ok bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if ok {
+		delete(f.noUntil, nodeID)
+		return
+	}
+	if f.noUntil == nil {
+		f.noUntil = map[string]time.Time{}
+	}
+	f.noUntil[nodeID] = time.Now()
+}
+
 // ContainerLogs implements v1.RemoteLogSource: it proxies a live log session
 // to nodeID's Agent over AgentOps, using whichever Peer ID recordAgentPeer
 // last saw that node dial in from. Returns the same two-channel shape
@@ -303,8 +334,9 @@ func (f *fleetPipeline) ContainerLogs(ctx context.Context, nodeID, containerID s
 		return lines, errCh
 	}
 
+	// Version 1 unless the read needs Until, so every Agent serves it.
 	req := libp2ptransport.AgentOpRequest{
-		ProtocolVersion: libp2ptransport.AgentOpsProtocolVersion,
+		ProtocolVersion: libp2ptransport.AgentOpsMinProtocolVersion,
 		Op:              libp2ptransport.AgentOpContainerLogs,
 		ContainerID:     containerID,
 		Tail:            opts.Tail,
@@ -312,7 +344,11 @@ func (f *fleetPipeline) ContainerLogs(ctx context.Context, nodeID, containerID s
 		Timestamps:      opts.Timestamps,
 	}
 	if !opts.Since.IsZero() {
-		req.Since = opts.Since.Format(time.RFC3339)
+		req.Since = opts.Since.UTC().Format(time.RFC3339Nano)
+	}
+	if !opts.Until.IsZero() {
+		req.ProtocolVersion = libp2ptransport.AgentOpsUntilVersion
+		req.Until = opts.Until.UTC().Format(time.RFC3339Nano)
 	}
 
 	frames, err := libp2ptransport.RequestContainerLogs(ctx, p2pHost, pid, req)
@@ -327,6 +363,9 @@ func (f *fleetPipeline) ContainerLogs(ctx context.Context, nodeID, containerID s
 		defer close(lines)
 		defer close(errCh)
 		for frame := range frames {
+			if req.Until != "" && frame.Type != "error" {
+				f.setSupportsUntil(nodeID, true)
+			}
 			switch frame.Type {
 			case "line":
 				select {
@@ -335,6 +374,12 @@ func (f *fleetPipeline) ContainerLogs(ctx context.Context, nodeID, containerID s
 					return
 				}
 			case "error":
+				if req.Until != "" && libp2ptransport.IsUnsupportedVersion(frame.Reason) {
+					f.setSupportsUntil(nodeID, false)
+					errCh <- errs.Wrap(docker.ErrUntilUnsupported, errs.CodeFailedPrecondition,
+						"the agent does not support log time ranges").WithOp(op).WithDetail("node", nodeID)
+					return
+				}
 				errCh <- fmt.Errorf("%s", frame.Reason)
 				return
 			default: // "end"

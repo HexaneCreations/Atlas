@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/host"
@@ -30,10 +31,36 @@ const AgentOpsProtocolID = "/atlas/agentops/1.0.0"
 // like any other endpoint, not flipping on a capability at runtime.
 const AgentOpContainerLogs = "container_logs"
 
-// AgentOpsProtocolVersion is sent as every request's ProtocolVersion field,
-// checked by [RegisterAgentOpsHandler], so a future incompatible change has
-// somewhere to be detected rather than silently misinterpreted.
-const AgentOpsProtocolVersion = 1
+// AgentOpsProtocolVersion is the newest request version this build speaks,
+// checked by [RegisterAgentOpsHandler], so a change has somewhere to be
+// detected rather than silently misinterpreted.
+//
+// Version 2 adds Until. Negotiation is per request, with no handshake: a
+// control plane sends version 1 unless it needs Until, so a version 1 Agent
+// and a version 1 control plane keep working with this build unchanged. A
+// version 1 Agent answers a version 2 request with its existing
+// "unsupported protocol version 2" error frame ([IsUnsupportedVersion]);
+// the control plane then knows that Agent cannot bound a read by time and
+// falls back to bounding it itself.
+const AgentOpsProtocolVersion = 2
+
+// AgentOpsMinProtocolVersion is the oldest request version an Agent built
+// from this code still serves.
+const AgentOpsMinProtocolVersion = 1
+
+// AgentOpsUntilVersion is the first request version that carries Until.
+const AgentOpsUntilVersion = 2
+
+// unsupportedVersionReason starts the error frame an Agent sends for a
+// request version it does not serve. Version 1 Agents send exactly this
+// text, so it must not change.
+const unsupportedVersionReason = "unsupported protocol version"
+
+// IsUnsupportedVersion reports whether an error frame's reason says the
+// Agent does not serve the request's version.
+func IsUnsupportedVersion(reason string) bool {
+	return strings.HasPrefix(reason, unsupportedVersionReason)
+}
 
 // AgentOpRequest is the control-plane-to-Agent request, sent once as JSON as
 // the first message on the stream. There is no handshake of its own: the
@@ -46,8 +73,12 @@ type AgentOpRequest struct {
 	Tail            int    `json:"tail,omitempty"`
 	// Since is RFC 3339, matching the convention the plain HTTP
 	// /containers/{id}/logs endpoint already uses for its own ?since= query
-	// parameter.
-	Since      string `json:"since,omitempty"`
+	// parameter. Fractional seconds are accepted by every version.
+	Since string `json:"since,omitempty"`
+	// Until (version 2) is RFC 3339: no line after it is sent, and the read
+	// ends there. A version 1 Agent never sees it: a request that sets it
+	// is version 2, which such an Agent refuses.
+	Until      string `json:"until,omitempty"`
 	Follow     bool   `json:"follow"`
 	Timestamps bool   `json:"timestamps,omitempty"`
 }
@@ -81,7 +112,8 @@ type LogLine struct {
 // adapter over the Agent's existing docker.Client.Logs, so this package
 // never depends on internal/plugin/docker either. Its shape mirrors
 // docker.Client.Logs exactly: two channels, no buffering, ctx-cancellable.
-type ContainerLogsFunc func(ctx context.Context, containerID string, tail int, since time.Time, follow, timestamps bool) (<-chan LogLine, <-chan error, error)
+// A zero since or until leaves that end open.
+type ContainerLogsFunc func(ctx context.Context, containerID string, tail int, since, until time.Time, follow, timestamps bool) (<-chan LogLine, <-chan error, error)
 
 // Concurrency and timeout tuning. Small, fixed constants for this milestone
 // — see the SessionLimiter doc for why a limit exists at all, and
@@ -251,8 +283,8 @@ func handleAgentOpsStream(s network.Stream, lookup AgentOpsRelationshipLookup, l
 
 	enc := json.NewEncoder(s)
 
-	if req.ProtocolVersion != AgentOpsProtocolVersion {
-		_ = enc.Encode(AgentOpFrame{Type: "error", Reason: fmt.Sprintf("unsupported protocol version %d", req.ProtocolVersion)})
+	if req.ProtocolVersion < AgentOpsMinProtocolVersion || req.ProtocolVersion > AgentOpsProtocolVersion {
+		_ = enc.Encode(AgentOpFrame{Type: "error", Reason: fmt.Sprintf("%s %d", unsupportedVersionReason, req.ProtocolVersion)})
 		return
 	}
 
@@ -271,11 +303,19 @@ func handleAgentOpsStream(s network.Stream, lookup AgentOpsRelationshipLookup, l
 	}
 	defer limiter.release()
 
-	var since time.Time
+	var since, until time.Time
 	if req.Since != "" {
 		if t, err := time.Parse(time.RFC3339, req.Since); err == nil {
 			since = t
 		}
+	}
+	if req.Until != "" && req.ProtocolVersion >= AgentOpsUntilVersion {
+		t, err := time.Parse(time.RFC3339, req.Until)
+		if err != nil {
+			_ = enc.Encode(AgentOpFrame{Type: "error", Reason: "until is not an RFC 3339 time"})
+			return
+		}
+		until = t
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), maxSessionDuration)
@@ -307,7 +347,7 @@ func handleAgentOpsStream(s network.Stream, lookup AgentOpsRelationshipLookup, l
 		cancel()
 	}()
 
-	lines, errCh, err := logs(ctx, req.ContainerID, req.Tail, since, req.Follow, req.Timestamps)
+	lines, errCh, err := logs(ctx, req.ContainerID, req.Tail, since, until, req.Follow, req.Timestamps)
 	if err != nil {
 		_ = enc.Encode(AgentOpFrame{Type: "error", Reason: err.Error()})
 		return

@@ -83,30 +83,6 @@ export function mergeLogLines(historical: LogLine[], liveSoFar: LogLine[]): LogL
   return [...historical, ...dedupeLiveBurst(historical, liveSoFar)];
 }
 
-// -------------------------------------------------------------- history ---
-
-/** Server-side cap, mirrored from internal/api/v1/containers.go's
- *  maxLogTail — "Load older" must stop offering more once a request for this
- *  many lines would be capped anyway, since a same-sized response at that
- *  point means there is nothing older left to reveal, not that the request
- *  failed. */
-export const MAX_LOG_TAIL = 5000;
-
-/** The next tail size "Load older logs" should request. Docker's log API has
- *  no cursor — this is a bigger tail window, not incremental pagination —
- *  so it doubles the request rather than adding a fixed page size, keeping
- *  the number of clicks needed to reach old history roughly logarithmic. */
-export function nextTail(currentTail: number): number {
-  return Math.min(currentTail * 2, MAX_LOG_TAIL);
-}
-
-/** Whether "Load older logs" has anything left to offer. Once the tail is
- *  already at the server's cap, another request would return the identical
- *  window. */
-export function canLoadOlder(currentTail: number): boolean {
-  return currentTail < MAX_LOG_TAIL;
-}
-
 // ---------------------------------------------------------------- search ---
 
 export interface LogMatch {
@@ -115,8 +91,8 @@ export interface LogMatch {
   end: number;
 }
 
-/** Every occurrence of `query` across `lines`, case-insensitive. Client-side
- *  only, over whatever is currently loaded — no query backend. */
+/** Every occurrence of `query` across `lines`, case-insensitive, over
+ *  whatever is currently loaded. */
 export function findMatches(lines: LogLine[], query: string): LogMatch[] {
   if (!query) return [];
   const needle = query.toLowerCase();

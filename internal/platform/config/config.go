@@ -89,6 +89,23 @@ type Config struct {
 	Fleet         Fleet                `yaml:"fleet" json:"fleet" env:"FLEET"`
 	Notifications Notifications        `yaml:"notifications" json:"notifications" env:"NOTIFICATIONS"`
 	Monitoring    Monitoring           `yaml:"monitoring" json:"monitoring" env:"MONITORING"`
+	ContainerLogs ContainerLogs        `yaml:"container_logs" json:"container_logs" env:"CONTAINER_LOGS"`
+}
+
+// ContainerLogs bounds reading a container's logs for a time range.
+type ContainerLogs struct {
+	// MaxRange is the longest from-to range one request may ask for.
+	MaxRange time.Duration `yaml:"max_range" json:"max_range" env:"MAX_RANGE"`
+	// ScanMaxLines and ScanMaxBytes stop one historical read, which must
+	// read every line of its window to find the newest ones before the end
+	// of the range, before it costs too much; the answer then says so.
+	ScanMaxLines int   `yaml:"scan_max_lines" json:"scan_max_lines" env:"SCAN_MAX_LINES"`
+	ScanMaxBytes int64 `yaml:"scan_max_bytes" json:"scan_max_bytes" env:"SCAN_MAX_BYTES"`
+	// ScanTimeout bounds one request's reading, all windows together.
+	ScanTimeout time.Duration `yaml:"scan_timeout" json:"scan_timeout" env:"SCAN_TIMEOUT"`
+	// MaxScansPerNode and MaxScansPerUser bound concurrent historical reads.
+	MaxScansPerNode int `yaml:"max_scans_per_node" json:"max_scans_per_node" env:"MAX_SCANS_PER_NODE"`
+	MaxScansPerUser int `yaml:"max_scans_per_user" json:"max_scans_per_user" env:"MAX_SCANS_PER_USER"`
 }
 
 // Monitoring configures the website monitors atlas-server probes.
@@ -383,6 +400,10 @@ func Default() Config {
 			MaxRequestsPerMinute: 240, // 4/s sustained: well above a 15s collection interval, even with spool replay
 		},
 		Monitoring: Monitoring{MaxConcurrentChecks: 16},
+		ContainerLogs: ContainerLogs{
+			MaxRange: 24 * time.Hour, ScanMaxLines: 200_000, ScanMaxBytes: 50 << 20, ScanTimeout: 60 * time.Second,
+			MaxScansPerNode: 2, MaxScansPerUser: 2,
+		},
 	}
 }
 

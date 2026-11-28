@@ -14,7 +14,7 @@ func TestContainerLogsFuncErrorsWhenDockerUnavailable(t *testing.T) {
 	dockerPlugin := docker.New(docker.Options{}) // never Init'd: DockerClient() is nil
 
 	fn := containerLogsFunc(dockerPlugin)
-	_, _, err := fn(t.Context(), "c1", 100, time.Time{}, false, false)
+	_, _, err := fn(t.Context(), "c1", 100, time.Time{}, time.Time{}, false, false)
 	if err == nil {
 		t.Fatal("expected an error when Docker is not available on this host")
 	}
