@@ -1,8 +1,11 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { Plus, Send, Trash2, X } from "lucide-react";
 import { testMonitorDraft } from "../../api/client";
-import { useSaveMonitor } from "../../api/queries";
-import type { Monitor, MonitorAuthType, MonitorBodyEncoding, MonitorGroup, MonitorMethod } from "../../api/types";
+import { useNotificationChannels, useSaveMonitor } from "../../api/queries";
+import { emptyArray } from "../../api/empty";
+import type {
+  Monitor, MonitorAuthType, MonitorBodyEncoding, MonitorGroup, MonitorMethod, NotificationChannel,
+} from "../../api/types";
 import { Button } from "../../components/Button";
 import { Modal, ModalActions } from "../../components/Modal";
 import { useToast } from "../../components/Toast";
@@ -10,6 +13,7 @@ import { Field, INPUT } from "../notifications/ChannelForm";
 import {
   RULES,
   hasQueryString,
+  selectedChannels,
   keepsCredentials,
   runMonitorTest,
   secondsLeft,
@@ -43,6 +47,8 @@ export function MonitorFormModal({
   const [test, setTest] = useState<MonitorTestResult | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const save = useSaveMonitor();
+  const channelsQuery = useNotificationChannels();
+  const channels = channelsQuery.data?.channels ?? emptyArray<NotificationChannel>();
   const { push } = useToast();
 
   const wait = secondsLeft(test, now);
@@ -95,7 +101,8 @@ export function MonitorFormModal({
           submit();
         }}
       >
-        <MonitorFields draft={draft} monitor={monitor} groups={groups} errors={errors} onChange={change} />
+        <MonitorFields draft={draft} monitor={monitor} groups={groups} channels={channels}
+          channelsUnavailable={channelsQuery.isError} errors={errors} onChange={change} />
         <div aria-live="polite" className="mt-4 text-sm">
           {errors.form ? <p className="text-danger">{errors.form}</p> : null}
           {Object.keys(errors).length > 0 && !errors.form ? <p className="text-danger">Fix the fields marked above.</p> : null}
@@ -199,12 +206,16 @@ export function MonitorFields({
   draft: d,
   monitor,
   groups,
+  channels = [],
+  channelsUnavailable = false,
   errors,
   onChange,
 }: {
   draft: MonitorDraft;
   monitor: Monitor | null;
   groups: readonly MonitorGroup[];
+  channels?: readonly NotificationChannel[];
+  channelsUnavailable?: boolean;
   errors: MonitorErrors;
   onChange: (patch: Partial<MonitorDraft>) => void;
 }) {
@@ -449,8 +460,59 @@ export function MonitorFields({
           <NumberField field="cert_crit_days" label="Critical (days before)" value={d.certCritDays} errors={errors} min={0}
             max={364} onChange={(certCritDays) => { onChange({ certCritDays }); }} />
         </div>
-        {/* 13b: alert rules and notification channel selection for this monitor go here. */}
       </Section>
+
+      <Section title="Notifications">
+        <ChannelPicker
+          channels={channels}
+          unavailable={channelsUnavailable}
+          selected={selectedChannels(d, channels)}
+          onChange={(channelIDs) => { onChange({ channelIDs }); }}
+        />
+      </Section>
+    </div>
+  );
+}
+
+/** Which channels the monitor alerts. None selected means it alerts no
+ *  one, and says so. */
+export function ChannelPicker({
+  channels,
+  unavailable,
+  selected,
+  onChange,
+}: {
+  channels: readonly NotificationChannel[];
+  unavailable: boolean;
+  selected: readonly string[];
+  onChange: (channelIDs: string[]) => void;
+}) {
+  if (unavailable) return <p className="text-sm text-text-muted">Notification channels cannot be loaded right now.</p>;
+  const toggle = (id: string, on: boolean) => {
+    onChange(on ? [...selected.filter((s) => s !== id), id] : selected.filter((s) => s !== id));
+  };
+  return (
+    <div role="group" aria-label="Notification channels" aria-describedby="monitor-channels-help" className="flex flex-col gap-2">
+      {channels.length === 0 ? (
+        <p className="text-sm text-text-muted">No notification channels exist yet. Add one on the Notifications page.</p>
+      ) : (
+        channels.map((c) => (
+          <label key={c.id} className="flex items-center gap-2 text-sm text-text">
+            <input type="checkbox" checked={selected.includes(c.id)} onChange={(e) => { toggle(c.id, e.target.checked); }} />
+            <span>{c.name}</span>
+            <span className="text-xs text-text-muted">{c.type}{c.enabled ? "" : ", disabled"}</span>
+          </label>
+        ))
+      )}
+      {selected.length === 0 ? (
+        <p id="monitor-channels-help" role="status" className="text-sm text-warning">
+          No notifications configured: this website alerts no one when it goes down or its certificate expires.
+        </p>
+      ) : (
+        <p id="monitor-channels-help" className="text-xs text-text-muted">
+          Alerts for this website go to the selected channels only. Channels marked as a monitor default start selected on new websites.
+        </p>
+      )}
     </div>
   );
 }

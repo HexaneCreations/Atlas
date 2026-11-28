@@ -30,6 +30,8 @@ type MonitorStore interface {
 	UpdateMonitor(ctx context.Context, monitorID string, apply monitor.UpdateFunc, by string) (monitor.View, error)
 	SetMonitorActive(ctx context.Context, monitorID string, active bool, by string) (monitor.View, error)
 	DeleteMonitor(ctx context.Context, monitorID string) error
+	// SetMonitorChannels replaces the monitor's channel selection.
+	SetMonitorChannels(ctx context.Context, monitorID string, channelIDs []string) ([]string, error)
 
 	RecentHeartbeats(ctx context.Context, monitorIDs []string, n int) (map[string][]monitor.Heartbeat, error)
 	UptimeSince(ctx context.Context, monitorIDs []string, since time.Time) (map[string]monitor.UptimeCount, error)
@@ -87,40 +89,45 @@ type MonitorLiveResponse struct {
 // the authentication, header and audit fields are left out. No response
 // ever carries a header value, credential or request body.
 type MonitorResponse struct {
-	ID                   string              `json:"id"`
-	Name                 string              `json:"name"`
-	Type                 string              `json:"type"`
-	URL                  string              `json:"url"`
-	Host                 string              `json:"host"`
-	Method               string              `json:"method"`
-	IntervalSeconds      int                 `json:"interval_seconds"`
-	Retries              int                 `json:"retries"`
-	RetryIntervalSeconds int                 `json:"retry_interval_seconds"`
-	TimeoutSeconds       int                 `json:"timeout_seconds"`
-	MaxRedirects         int                 `json:"max_redirects"`
-	AcceptedStatus       []string            `json:"accepted_status"`
-	BodyEncoding         string              `json:"body_encoding"`
-	Keyword              string              `json:"keyword"`
-	RecoverySuccesses    int                 `json:"recovery_successes"`
-	CertNotify           bool                `json:"cert_notify"`
-	CertWarnDays         int                 `json:"cert_warn_days"`
-	CertCritDays         int                 `json:"cert_crit_days"`
-	GroupID              string              `json:"group_id"`
-	Description          string              `json:"description"`
-	Tags                 []string            `json:"tags"`
-	Active               bool                `json:"active"`
-	AlertsMutedUntil     *time.Time          `json:"alerts_muted_until"`
-	AuthType             string              `json:"auth_type,omitempty"`
-	HeaderNames          []string            `json:"header_names,omitempty"`
-	SecretConfigured     *bool               `json:"secret_configured,omitempty"`
-	CreatedAt            time.Time           `json:"created_at"`
-	CreatedBy            string              `json:"created_by,omitempty"`
-	UpdatedAt            time.Time           `json:"updated_at"`
-	UpdatedBy            string              `json:"updated_by,omitempty"`
-	Redacted             bool                `json:"redacted"`
-	Live                 MonitorLiveResponse `json:"live"`
-	Uptime24h            *float64            `json:"uptime_24h,omitempty"`
-	Heartbeats           []HeartbeatResponse `json:"heartbeats,omitempty"`
+	ID                   string     `json:"id"`
+	Name                 string     `json:"name"`
+	Type                 string     `json:"type"`
+	URL                  string     `json:"url"`
+	Host                 string     `json:"host"`
+	Method               string     `json:"method"`
+	IntervalSeconds      int        `json:"interval_seconds"`
+	Retries              int        `json:"retries"`
+	RetryIntervalSeconds int        `json:"retry_interval_seconds"`
+	TimeoutSeconds       int        `json:"timeout_seconds"`
+	MaxRedirects         int        `json:"max_redirects"`
+	AcceptedStatus       []string   `json:"accepted_status"`
+	BodyEncoding         string     `json:"body_encoding"`
+	Keyword              string     `json:"keyword"`
+	RecoverySuccesses    int        `json:"recovery_successes"`
+	CertNotify           bool       `json:"cert_notify"`
+	CertWarnDays         int        `json:"cert_warn_days"`
+	CertCritDays         int        `json:"cert_crit_days"`
+	GroupID              string     `json:"group_id"`
+	Description          string     `json:"description"`
+	Tags                 []string   `json:"tags"`
+	Active               bool       `json:"active"`
+	AlertsMutedUntil     *time.Time `json:"alerts_muted_until"`
+	AuthType             string     `json:"auth_type,omitempty"`
+	HeaderNames          []string   `json:"header_names,omitempty"`
+	SecretConfigured     *bool      `json:"secret_configured,omitempty"`
+	CreatedAt            time.Time  `json:"created_at"`
+	CreatedBy            string     `json:"created_by,omitempty"`
+	UpdatedAt            time.Time  `json:"updated_at"`
+	UpdatedBy            string     `json:"updated_by,omitempty"`
+	Redacted             bool       `json:"redacted"`
+	// NotificationsConfigured is false when no channel is selected: the
+	// monitor then notifies no one. ChannelIDs is the selection itself,
+	// shown only to readers who manage notifications.
+	NotificationsConfigured bool                `json:"notifications_configured"`
+	ChannelIDs              *[]string           `json:"channel_ids,omitempty"`
+	Live                    MonitorLiveResponse `json:"live"`
+	Uptime24h               *float64            `json:"uptime_24h,omitempty"`
+	Heartbeats              []HeartbeatResponse `json:"heartbeats,omitempty"`
 }
 
 // MonitorGroupResponse is one group.
@@ -193,6 +200,9 @@ type MonitorRequest struct {
 	BasicPassword        *string                 `json:"basic_password"`
 	BearerToken          *string                 `json:"bearer_token"`
 	Body                 *string                 `json:"body"`
+	// ChannelIDs is the notification channel selection. Omitted on create
+	// selects every channel flagged monitor_default; on update, keeps it.
+	ChannelIDs *[]string `json:"channel_ids"`
 }
 
 // SetMonitorActiveRequest is PUT /monitors/{id}/active.
@@ -242,6 +252,10 @@ func (req MonitorRequest) apply(m *monitor.Monitor) {
 	if req.AuthType != nil {
 		m.AuthType = monitor.AuthType(*req.AuthType)
 	}
+	m.ChannelIDs = nil
+	if req.ChannelIDs != nil {
+		m.ChannelIDs = nonNilIDs(*req.ChannelIDs)
+	}
 }
 
 func (req MonitorRequest) secretInput() monitor.SecretInput {
@@ -262,6 +276,11 @@ func (req MonitorRequest) secretInput() monitor.SecretInput {
 func (h *Handler) buildMonitor(req MonitorRequest, base monitor.Monitor, stored monitor.Secret) (monitor.Monitor, monitor.Secret, error) {
 	m := base
 	req.apply(&m)
+	if req.ChannelIDs != nil {
+		if err := validateChannelIDs(*req.ChannelIDs); err != nil {
+			return monitor.Monitor{}, monitor.Secret{}, err
+		}
+	}
 	secret, names, err := monitor.MergeSecret(stored, req.secretInput(), m.AuthType, m.Method)
 	if err != nil {
 		return monitor.Monitor{}, monitor.Secret{}, err
@@ -284,8 +303,8 @@ func presentMonitor(v monitor.View, full bool) MonitorResponse {
 		TimeoutSeconds: v.TimeoutSeconds, MaxRedirects: v.MaxRedirects, AcceptedStatus: v.AcceptedStatus,
 		BodyEncoding: string(v.BodyEncoding), Keyword: v.Keyword, RecoverySuccesses: v.RecoverySuccesses,
 		CertNotify: v.CertNotify, CertWarnDays: v.CertWarnDays, CertCritDays: v.CertCritDays, GroupID: v.GroupID,
-		Description: v.Description, Tags: v.Tags, Active: v.Active, AlertsMutedUntil: v.AlertsMutedUntil,
-		CreatedAt: v.CreatedAt, UpdatedAt: v.UpdatedAt,
+		Description: v.Description, Tags: v.Tags, Active: v.Active, AlertsMutedUntil: presentMute(v.AlertsMutedUntil, time.Now()),
+		CreatedAt: v.CreatedAt, UpdatedAt: v.UpdatedAt, NotificationsConfigured: len(v.ChannelIDs) > 0,
 		Live: MonitorLiveResponse{
 			Status: string(v.Live.Status), StatusSince: v.Live.StatusSince, DownSince: v.Live.DownSince,
 			ConsecutiveFailures: v.Live.ConsecutiveFailures, LastCheckAt: v.Live.LastCheckAt,
@@ -297,6 +316,8 @@ func presentMonitor(v monitor.View, full bool) MonitorResponse {
 		configured := v.SecretConfigured
 		out.AuthType, out.HeaderNames, out.SecretConfigured = string(v.AuthType), v.HeaderNames, &configured
 		out.CreatedBy, out.UpdatedBy = v.CreatedBy, v.UpdatedBy
+		ids := nonNilIDs(v.ChannelIDs)
+		out.ChannelIDs = &ids
 		if out.HeaderNames == nil {
 			out.HeaderNames = []string{}
 		}
@@ -764,6 +785,9 @@ type MonitorEventResponse struct {
 	StatusCode      *int      `json:"status_code"`
 	Failure         string    `json:"failure"`
 	DurationSeconds *int      `json:"duration_seconds"`
+	// CertExpiresAt is set on the cert_warn, cert_crit and cert_renewed
+	// events.
+	CertExpiresAt *time.Time `json:"cert_expires_at"`
 }
 
 // MonitorEvents returns a monitor's events, newest first: at most ?limit
@@ -793,7 +817,7 @@ func (h *Handler) MonitorEvents(w http.ResponseWriter, r *http.Request) error {
 	out := make([]MonitorEventResponse, 0, len(events))
 	for _, e := range events {
 		out = append(out, MonitorEventResponse{ID: e.ID, Time: e.Time, Kind: string(e.Kind), StatusCode: e.StatusCode,
-			Failure: string(e.Failure), DurationSeconds: e.DurationSeconds})
+			Failure: string(e.Failure), DurationSeconds: e.DurationSeconds, CertExpiresAt: e.CertExpiresAt})
 	}
 	httpx.JSON(w, r, http.StatusOK, map[string]any{"monitor_id": v.ID, "events": out})
 	return nil

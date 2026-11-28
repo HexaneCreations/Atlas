@@ -30,7 +30,7 @@ function button(tree: ReactNode, label: string) {
 function channel(over: Partial<NotificationChannel> = {}): NotificationChannel {
   return {
     id: "c1", name: "ops hook", type: "webhook", enabled: true, min_severity: "critical",
-    config: { template: "{{.msg}}" }, secret_configured: true, destination_host: "hooks.example.com",
+    config: { template: "{{.msg}}" }, secret_configured: true, monitor_default: false, destination_host: "hooks.example.com",
     header_names: ["X-Api"], created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z", ...over,
   };
 }
@@ -95,7 +95,7 @@ describe("ChannelFields", () => {
   it("shows the body and headers for a webhook only", () => {
     expect(render(null)).not.toContain("Request body");
     const html = render(null, { type: "webhook" });
-    for (const text of ["Request body", "Additional headers", "Reset to default", "msg, eventJSON, nodeJSON, ruleJSON"]) {
+    for (const text of ["Request body", "Additional headers", "Reset to default", "msg, eventJSON, nodeJSON, monitorJSON, ruleJSON", "Select for new websites"]) {
       expect(html).toContain(text);
     }
   });

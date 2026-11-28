@@ -11,6 +11,7 @@ import (
 	"github.com/hexane/atlas/internal/platform/postgres"
 	"github.com/hexane/atlas/internal/platform/secretbox"
 	"github.com/hexane/atlas/internal/storage/metric"
+	storagemonitor "github.com/hexane/atlas/internal/storage/monitor"
 	storagenotification "github.com/hexane/atlas/internal/storage/notification"
 )
 
@@ -33,6 +34,9 @@ type notificationPipeline struct {
 	// defaultInterval is collection.default_interval, which a collector
 	// declaring no interval of its own runs at.
 	defaultInterval time.Duration
+	// probeOffline reports the website prober's own loss of connectivity;
+	// set once in app.New, before Start.
+	probeOffline func() bool
 
 	mu        sync.RWMutex
 	engine    *corenotification.Engine
@@ -59,9 +63,12 @@ func (p *notificationPipeline) Start(ctx context.Context) error {
 
 	repo := storagenotification.NewRepository(p.pool.DB(), p.key)
 	metricRepo := metric.NewRepository(p.pool.DB())
+	monitorRepo := storagemonitor.NewRepository(p.pool.DB(), p.key)
 	engine := corenotification.NewEngine(corenotification.Options{
 		Channels: repo, Deliveries: repo, Logger: p.logger,
-		NodeInfo: nodeInfoAdapter{repo: metricRepo},
+		NodeInfo:        nodeInfoAdapter{repo: metricRepo},
+		MonitorChannels: monitorRepo,
+		MonitorInfo:     monitorRepo,
 		Senders: map[corenotification.ChannelType]corenotification.Sender{
 			corenotification.ChannelTeams:   corenotification.NewTeamsSender(),
 			corenotification.ChannelWebhook: corenotification.NewWebhookSender(),
@@ -73,6 +80,8 @@ func (p *notificationPipeline) Start(ctx context.Context) error {
 		Nodes:       evaluatorNodeAdapter{repo: metricRepo},
 		Metrics:     evaluatorMetricAdapter{repo: metricRepo},
 		LocalNodeID: p.localNodeID,
+
+		Monitors: monitorRepo, MonitorStates: repo, ProbeOffline: p.probeOffline,
 
 		ContainerCollectorInterval: intervals[containerCollectorID],
 		ServiceCollectorInterval:   intervals[serviceCollectorID],
@@ -239,4 +248,23 @@ func (l lazyNotificationStore) ClearNodeRuleEnabled(
 }
 func (l lazyNotificationStore) UnarchiveNode(ctx context.Context, nodeID string) error {
 	return l.repo().UnarchiveNode(ctx, nodeID)
+}
+func (l lazyNotificationStore) ListMonitorRules(ctx context.Context, monitorID string) ([]corenotification.SubjectRule, error) {
+	return l.repo().ListMonitorRules(ctx, monitorID)
+}
+func (l lazyNotificationStore) SetMonitorRuleEnabled(
+	ctx context.Context, monitorID string, trigger corenotification.Trigger, enabled bool, updatedBy string,
+) (corenotification.SubjectRule, error) {
+	return l.repo().SetMonitorRuleEnabled(ctx, monitorID, trigger, enabled, updatedBy)
+}
+func (l lazyNotificationStore) ClearMonitorRuleEnabled(
+	ctx context.Context, monitorID string, trigger corenotification.Trigger, updatedBy string,
+) (corenotification.SubjectRule, error) {
+	return l.repo().ClearMonitorRuleEnabled(ctx, monitorID, trigger, updatedBy)
+}
+func (l lazyNotificationStore) MuteMonitor(ctx context.Context, monitorID string, until time.Time) (*time.Time, error) {
+	return l.repo().MuteMonitor(ctx, monitorID, until)
+}
+func (l lazyNotificationStore) EndMonitorMuteExplicitly(ctx context.Context, monitorID string) (bool, error) {
+	return l.repo().EndMonitorMuteExplicitly(ctx, monitorID)
 }

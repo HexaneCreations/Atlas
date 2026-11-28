@@ -73,8 +73,10 @@ type Channel struct {
 	// Config holds non-secret settings only.
 	Config           map[string]any
 	SecretConfigured bool
-	CreatedAt        time.Time
-	UpdatedAt        time.Time
+	// MonitorDefault pre-selects the channel for new website monitors.
+	MonitorDefault bool
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
 }
 
 // ChannelInput is a channel to create or the replacement for an existing
@@ -86,6 +88,8 @@ type ChannelInput struct {
 	MinSeverity Severity
 	Config      map[string]any
 	Secret      *string
+	// MonitorDefault nil keeps the stored value on update, false on create.
+	MonitorDefault *bool
 }
 
 // Validate reports whether the input is well formed. Type-specific config is
@@ -113,24 +117,30 @@ const (
 	TriggerContainerExit    Trigger = "container_exit"
 	TriggerContainerRestart Trigger = "container_restart"
 	TriggerServiceFailed    Trigger = "service_failed"
+	// TriggerWebsiteDown and TriggerWebsiteCertExpiry have a monitor, not a
+	// node, as their subject.
+	TriggerWebsiteDown       Trigger = "website_down"
+	TriggerWebsiteCertExpiry Trigger = "website_cert_expiry"
 )
 
 // KnownTriggers are every trigger a rule may name.
 var KnownTriggers = map[Trigger]bool{
 	TriggerNodeDown: true, TriggerDiskPct: true, TriggerRAMPct: true,
 	TriggerContainerExit: true, TriggerContainerRestart: true, TriggerServiceFailed: true,
+	TriggerWebsiteDown: true, TriggerWebsiteCertExpiry: true,
 }
 
 // UsesThresholds reports whether the trigger compares a percentage against
 // warn/crit thresholds.
 func (t Trigger) UsesThresholds() bool { return t == TriggerDiskPct || t == TriggerRAMPct }
 
-// RuleSpec is a stored rule row. NodeID "" is the global default for its
-// trigger and must be complete; a node override may leave any field nil to
-// inherit the global value.
+// RuleSpec is a stored rule row. NodeID and MonitorID both "" is the
+// global default for its trigger and must be complete; a node or monitor
+// override may leave any field nil to inherit the global value.
 type RuleSpec struct {
 	Trigger         Trigger
 	NodeID          string
+	MonitorID       string
 	Enabled         *bool
 	WarnThreshold   *float64
 	CritThreshold   *float64
@@ -146,7 +156,21 @@ type RuleSpec struct {
 }
 
 // IsGlobal reports whether the spec is a trigger's global default.
-func (s RuleSpec) IsGlobal() bool { return s.NodeID == "" }
+func (s RuleSpec) IsGlobal() bool { return s.NodeID == "" && s.MonitorID == "" }
+
+// scope is the override's subject key: the node id, or "m:" and the
+// monitor id; "" for the global rule.
+func (s RuleSpec) scope() string {
+	if s.MonitorID != "" {
+		return MonitorScope(s.MonitorID)
+	}
+	return s.NodeID
+}
+
+// MonitorScope is a monitor's subject key, the form a monitor takes in
+// every place a node id goes: rule resolution and event ids. A node id
+// never contains a colon.
+func MonitorScope(monitorID string) string { return "m:" + monitorID }
 
 // Validate checks the spec on its own: a known trigger, non-negative
 // durations, ordered thresholds, and, for a global row, every field set.
@@ -154,6 +178,12 @@ func (s RuleSpec) Validate() error {
 	const op = "notification.RuleSpec.Validate"
 	if !KnownTriggers[s.Trigger] {
 		return errs.New(errs.CodeInvalidArgument, "unknown trigger %q", s.Trigger).WithOp(op)
+	}
+	if s.NodeID != "" && s.MonitorID != "" {
+		return errs.New(errs.CodeInvalidArgument, "a rule overrides one node or one monitor, not both").WithOp(op)
+	}
+	if kind := s.Trigger.SubjectKind(); (kind == SubjectMonitor && s.NodeID != "") || (kind == SubjectNode && s.MonitorID != "") {
+		return errs.New(errs.CodeInvalidArgument, "trigger %q does not apply to that subject", s.Trigger).WithOp(op)
 	}
 	for name, v := range map[string]*int{
 		"for_seconds": s.ForSeconds, "recovery_seconds": s.RecoverySeconds, "cooldown_seconds": s.CooldownSeconds,
@@ -270,10 +300,12 @@ const (
 	StateRecovering StateKind = "recovering"
 )
 
-// State is the evaluator's memory for one (trigger, node, subject).
+// State is the evaluator's memory for one (trigger, node or monitor,
+// subject). Exactly one of NodeID and MonitorID is set.
 type State struct {
-	Trigger Trigger
-	NodeID  string
+	Trigger   Trigger
+	NodeID    string
+	MonitorID string
 	// Subject is "" for node-level triggers, else the mountpoint, container
 	// name or unit name.
 	Subject          string
@@ -313,14 +345,33 @@ const (
 // Notification is one rendered message to fan out to channels. EventID is
 // the dedupe key: offering it to a channel twice creates one delivery.
 type Notification struct {
-	EventID  string
-	Kind     Kind
-	Trigger  Trigger
-	NodeID   string
-	Subject  string
-	Severity Severity
-	Title    string
-	Message  string
+	EventID string
+	Kind    Kind
+	Trigger Trigger
+	NodeID  string
+	// MonitorID is set, and NodeID empty, for a website monitor's alert.
+	// Such a notification goes only to the monitor's selected channels.
+	MonitorID string
+	Subject   string
+	Severity  Severity
+	Title     string
+	Message   string
+	// Details are the facts a monitor notification renders; see
+	// [MonitorDetails]. Never a name, URL or credential.
+	Details MonitorDetails
+}
+
+// MonitorDetails are a monitor alert's facts, stored with each delivery.
+// The monitor's name and host are not among them: they are resolved when
+// the delivery is sent.
+type MonitorDetails struct {
+	Failure       string     `json:"failure,omitempty"`
+	StatusCode    *int       `json:"status_code,omitempty"`
+	ResponseMS    *int       `json:"response_ms,omitempty"`
+	DownSince     *time.Time `json:"down_since,omitempty"`
+	OutageSeconds *int       `json:"outage_seconds,omitempty"`
+	CertExpiresAt *time.Time `json:"cert_expires_at,omitempty"`
+	CertDaysLeft  *int       `json:"cert_days_left,omitempty"`
 }
 
 // Delivery is one (event, channel) delivery record.
@@ -332,14 +383,19 @@ type Delivery struct {
 	Kind        Kind
 	Trigger     Trigger
 	NodeID      string
+	MonitorID   string
 	Subject     string
 	Severity    Severity
 	Title       string
 	Message     string
-	// NodeName and NodeAddress are resolved by [Engine] just before Send
-	// and never stored; "" when unknown.
+	Details     MonitorDetails
+	// NodeName and NodeAddress, or MonitorName and MonitorHost, are
+	// resolved by [Engine] just before Send and never stored; "" when
+	// unknown.
 	NodeName      string
 	NodeAddress   string
+	MonitorName   string
+	MonitorHost   string
 	Status        Status
 	Attempts      int
 	NextAttemptAt time.Time

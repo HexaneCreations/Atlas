@@ -223,7 +223,7 @@ func (e *Evaluator) evaluateTrigger(ctx context.Context, rule Rule, t workloadTr
 			}
 			current, found = begun, true
 		}
-		e.evaluateSubjectWithTitle(ctx, rule, t.trigger, nodeID, subject, current, found, v.condition, v.value, severityOf, now,
+		e.evaluateSubjectWithTitle(ctx, rule, t.trigger, nodeRef(nodeID), subject, current, found, v.condition, v.value, severityOf, now,
 			func(Kind, Severity) (string, string) { return v.title, v.message }, track)
 	}
 }

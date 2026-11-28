@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ChevronDown, ChevronRight } from "lucide-react";
+import { BellOff, ChevronDown, ChevronRight } from "lucide-react";
 import type { Monitor, MonitorGroup, MonitorStatus } from "../../api/types";
 import { Badge } from "../../components/Badge";
 import { FilterSelect, SearchInput } from "../../components/Toolbar";
@@ -147,6 +147,12 @@ function MonitorRow({ monitor: m, selected, onSelect }: { monitor: Monitor; sele
             {m.host}
           </span>
         </span>
+        {m.notifications_configured ? null : (
+          <span title="No notifications configured" className="shrink-0 text-warning">
+            <BellOff size={14} aria-hidden="true" />
+            <span className="sr-only">No notifications configured</span>
+          </span>
+        )}
         <Badge tone={uptimeTone(m.uptime_24h)}>
           <span className="sr-only">Uptime last 24 hours </span>
           {formatUptime(m.uptime_24h)}

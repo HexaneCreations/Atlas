@@ -61,6 +61,18 @@ type NodeInfoSource interface {
 	NodeInfo(ctx context.Context, nodeID string) (name, address string, err error)
 }
 
+// MonitorChannelSource is a website monitor's channel selection: a monitor
+// notification goes to these channels only, and to none when there are none.
+type MonitorChannelSource interface {
+	MonitorChannelIDs(ctx context.Context, monitorID string) ([]string, error)
+}
+
+// MonitorInfoSource resolves a monitor's name and URL host at send time,
+// like [NodeInfoSource]. The host is never more of the URL than that.
+type MonitorInfoSource interface {
+	MonitorInfo(ctx context.Context, monitorID string) (name, host string, err error)
+}
+
 // nodeInfoTimeout bounds one lookup so a slow database never holds a
 // claimed delivery's lease much longer than its send.
 const nodeInfoTimeout = 2 * time.Second
@@ -124,6 +136,8 @@ type Engine struct {
 	deliveries DeliveryStore
 	senders    map[ChannelType]Sender
 	nodeInfo   NodeInfoSource
+	monitorCh  MonitorChannelSource
+	monitorInf MonitorInfoSource
 	logger     *slog.Logger
 
 	maxAttempts       int
@@ -156,7 +170,12 @@ type Options struct {
 	// NodeInfo, when set, fills [Delivery.NodeName] and
 	// [Delivery.NodeAddress] just before each send.
 	NodeInfo NodeInfoSource
-	Logger   *slog.Logger
+	// MonitorChannels selects a monitor notification's channels; nil sends
+	// monitor notifications nowhere. MonitorInfo fills [Delivery.MonitorName]
+	// and [Delivery.MonitorHost] just before each send.
+	MonitorChannels MonitorChannelSource
+	MonitorInfo     MonitorInfoSource
+	Logger          *slog.Logger
 
 	MaxAttempts      int
 	BackoffBase      time.Duration
@@ -202,7 +221,8 @@ func NewEngine(opts Options) *Engine {
 		opts.RetentionInterval = DefaultRetentionInterval
 	}
 	return &Engine{
-		channels: opts.Channels, deliveries: opts.Deliveries, senders: opts.Senders, nodeInfo: opts.NodeInfo, logger: opts.Logger,
+		channels: opts.Channels, deliveries: opts.Deliveries, senders: opts.Senders, nodeInfo: opts.NodeInfo,
+		monitorCh: opts.MonitorChannels, monitorInf: opts.MonitorInfo, logger: opts.Logger,
 		maxAttempts: opts.MaxAttempts, backoffBase: opts.BackoffBase, backoffMax: opts.BackoffMax,
 		dispatchInterval: opts.DispatchInterval, batchSize: opts.BatchSize, concurrency: opts.Concurrency,
 		lease: opts.Lease, retentionInterval: opts.RetentionInterval,
@@ -223,9 +243,16 @@ func (e *Engine) Notify(ctx context.Context, n Notification) error {
 		return err
 	}
 
+	var selected map[string]bool
+	if n.MonitorID != "" {
+		if selected, err = e.monitorChannelSet(ctx, n); err != nil {
+			return err
+		}
+	}
+
 	enabled := make([]Channel, 0, len(channels))
 	for _, c := range channels {
-		if !c.Enabled {
+		if !c.Enabled || (selected != nil && !selected[c.ID]) {
 			continue
 		}
 		// A test notification always reaches every enabled channel,
@@ -248,6 +275,25 @@ func (e *Engine) Notify(ctx context.Context, n Notification) error {
 	}
 	e.nudge()
 	return nil
+}
+
+// monitorChannelSet is a monitor notification's selected channels; empty
+// (never nil) when none are selected, so nothing is sent.
+func (e *Engine) monitorChannelSet(ctx context.Context, n Notification) (map[string]bool, error) {
+	set := map[string]bool{}
+	if e.monitorCh == nil {
+		return set, nil
+	}
+	ids, err := e.monitorCh.MonitorChannelIDs(ctx, n.MonitorID)
+	if err != nil {
+		e.logger.ErrorContext(ctx, "could not read a website's notification channels",
+			slog.String("event_id", n.EventID), slog.String("error", err.Error()))
+		return nil, err
+	}
+	for _, id := range ids {
+		set[id] = true
+	}
+	return set, nil
 }
 
 // nudge wakes Run's loop into dispatching now instead of waiting out the
@@ -427,10 +473,14 @@ func (c *nodeInfoCache) entry(nodeID string) *nodeInfoEntry {
 	return en
 }
 
-// resolveNode fills d's node name and address. It never fails the
-// delivery: on any error the fields stay empty and the sender falls back
-// to the node id.
+// resolveNode fills d's node name and address, or its monitor's name and
+// host. It never fails the delivery: on any error the fields stay empty and
+// the sender falls back to the id.
 func (e *Engine) resolveNode(ctx context.Context, d *Delivery, cache *nodeInfoCache) {
+	if d.MonitorID != "" {
+		e.resolveMonitor(ctx, d, cache)
+		return
+	}
 	if e.nodeInfo == nil || d.NodeID == "" {
 		return
 	}
@@ -447,6 +497,25 @@ func (e *Engine) resolveNode(ctx context.Context, d *Delivery, cache *nodeInfoCa
 		en.name, en.address = name, address
 	})
 	d.NodeName, d.NodeAddress = en.name, en.address
+}
+
+func (e *Engine) resolveMonitor(ctx context.Context, d *Delivery, cache *nodeInfoCache) {
+	if e.monitorInf == nil {
+		return
+	}
+	en := cache.entry(MonitorScope(d.MonitorID))
+	en.once.Do(func() {
+		lookupCtx, cancel := context.WithTimeout(ctx, nodeInfoTimeout)
+		defer cancel()
+		name, host, err := e.monitorInf.MonitorInfo(lookupCtx, d.MonitorID)
+		if err != nil {
+			e.logger.DebugContext(ctx, "could not resolve a notification's website; sending with its id",
+				slog.String("monitor_id", d.MonitorID), slog.String("error", Redact(err.Error())))
+			return
+		}
+		en.name, en.address = name, host
+	})
+	d.MonitorName, d.MonitorHost = en.name, en.address
 }
 
 // send attempts one delivery against its already-resolved channel: looks

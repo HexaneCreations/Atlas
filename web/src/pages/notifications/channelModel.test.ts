@@ -30,7 +30,7 @@ function hook(over: Partial<ChannelDraft> = {}): ChannelDraft {
 function saved(over: Partial<NotificationChannel> = {}): NotificationChannel {
   return {
     id: "c1", name: "ops", type: "webhook", enabled: true, min_severity: "critical",
-    config: { template: "{{.msg}}", content_type: "text/plain" }, secret_configured: true,
+    config: { template: "{{.msg}}", content_type: "text/plain" }, secret_configured: true, monitor_default: false,
     destination_host: "hooks.example.com", header_names: ["X-Api", "X-Old"],
     created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z", ...over,
   };
@@ -132,9 +132,10 @@ describe("editing", () => {
 
   it("sends no secret when neither the URL nor the headers changed", () => {
     expect(toRequest(toDraft(saved()), saved())).toEqual({
-      name: "ops", type: "webhook", enabled: true, min_severity: "critical",
+      name: "ops", type: "webhook", enabled: true, min_severity: "critical", monitor_default: false,
       config: { template: "{{.msg}}", content_type: "text/plain" },
     });
+    expect(toRequest(toDraft(saved({ monitor_default: true })), saved()).monitor_default).toBe(true);
     const teams = saved({ type: "teams", config: {}, header_names: [] });
     expect(toRequest(toDraft(teams), teams)).not.toHaveProperty("secret");
   });

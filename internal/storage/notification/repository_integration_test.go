@@ -366,9 +366,15 @@ func TestSeededGlobalRules(t *testing.T) {
 			t.Errorf("%s = %+v", tc.trigger, r)
 		}
 	}
+	for _, trigger := range []corenotification.Trigger{corenotification.TriggerWebsiteDown, corenotification.TriggerWebsiteCertExpiry} {
+		r, err := repo.EffectiveRule(ctx, trigger, "")
+		if err != nil || !r.Enabled || r.ForSeconds != 0 || r.RecoverySeconds != 0 || r.CooldownSeconds != 1800 || !r.SendRecovery {
+			t.Errorf("%s = %+v, %v; want enabled with zero holds", trigger, r, err)
+		}
+	}
 	rules, err := repo.ListRules(ctx)
-	if err != nil || len(rules) != 6 {
-		t.Fatalf("ListRules = %d rules, %v; want the 6 seeded globals", len(rules), err)
+	if err != nil || len(rules) != 8 {
+		t.Fatalf("ListRules = %d rules, %v; want the 8 seeded globals", len(rules), err)
 	}
 }
 

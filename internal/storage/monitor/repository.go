@@ -122,7 +122,8 @@ func scanView(row pgx.Row) (coremonitor.View, error) {
 	var method, bodyEncoding, authType, status, failure string
 	dest := append(monitorDest(&v.Monitor, &method, &bodyEncoding, &authType),
 		&status, &v.Live.ConsecutiveFailures, &v.Live.StatusSince, &v.Live.DownSince, &v.Live.LastCheckAt,
-		&v.Live.LastStatusCode, &v.Live.LastResponseMS, &failure, &v.Live.NextCheckAt, &v.Live.CertExpiresAt)
+		&v.Live.LastStatusCode, &v.Live.LastResponseMS, &failure, &v.Live.NextCheckAt, &v.Live.CertExpiresAt,
+		&v.ChannelIDs)
 	if err := row.Scan(dest...); err != nil {
 		return coremonitor.View{}, err
 	}
@@ -132,7 +133,8 @@ func scanView(row pgx.Row) (coremonitor.View, error) {
 	return v, nil
 }
 
-const viewQuery = `SELECT ` + monitorColumns + `, ` + liveColumns + `
+const viewQuery = `SELECT ` + monitorColumns + `, ` + liveColumns + `,
+	ARRAY(SELECT c.channel_id FROM monitor_channels c WHERE c.monitor_id = m.id ORDER BY c.channel_id)
 	FROM monitors m JOIN monitor_status s ON s.monitor_id = m.id`
 
 func notFound(op, monitorID string) error {
@@ -246,6 +248,14 @@ func (r *Repository) CreateMonitor(ctx context.Context, m coremonitor.Monitor, s
 		VALUES ($1, now() + make_interval(secs => random() * LEAST($2, 10)))`, m.ID, m.IntervalSeconds); err != nil {
 		return coremonitor.View{}, writeError(op, err)
 	}
+	if m.ChannelIDs == nil {
+		if _, err = tx.Exec(ctx, `INSERT INTO monitor_channels (monitor_id, channel_id)
+			SELECT $1, id FROM notification_channels WHERE monitor_default`, m.ID); err != nil {
+			return coremonitor.View{}, writeError(op, err)
+		}
+	} else if err = replaceChannels(ctx, tx, op, m.ID, m.ChannelIDs); err != nil {
+		return coremonitor.View{}, err
+	}
 	v, err := scanView(tx.QueryRow(ctx, viewQuery+` WHERE m.id = $1`, m.ID))
 	if err != nil {
 		return coremonitor.View{}, errs.Wrap(err, errs.CodeUnavailable, "could not read the new monitor").WithOp(op)
@@ -337,6 +347,11 @@ func (r *Repository) UpdateMonitor(ctx context.Context, monitorID string, apply 
 		next.CertCritDays, next.GroupID, next.Description, nonNil(next.Tags), string(next.AuthType),
 		nonNil(next.HeaderNames), ct, kid, by); err != nil {
 		return coremonitor.View{}, writeError(op, err)
+	}
+	if next.ChannelIDs != nil {
+		if err = replaceChannels(ctx, tx, op, monitorID, next.ChannelIDs); err != nil {
+			return coremonitor.View{}, err
+		}
 	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE monitor_status SET next_check_at = LEAST(next_check_at, now() + make_interval(secs => random() * 5))
@@ -569,7 +584,7 @@ func (r *Repository) Uptime(ctx context.Context, monitorID string, now time.Time
 func (r *Repository) Events(ctx context.Context, monitorID string, before time.Time, limit int) ([]coremonitor.Event, error) {
 	const op = "monitor.Repository.Events"
 	rows, err := r.pool.Query(ctx, `
-		SELECT id, monitor_id, time, kind, status_code, failure, duration_seconds FROM monitor_events
+		SELECT id, monitor_id, time, kind, status_code, failure, duration_seconds, cert_expires_at FROM monitor_events
 		WHERE monitor_id = $1 AND time < $2 ORDER BY time DESC, id DESC LIMIT $3`, monitorID, before, limit)
 	if err != nil {
 		return nil, errs.Wrap(err, errs.CodeUnavailable, "could not read the monitor events").WithOp(op)
@@ -579,7 +594,7 @@ func (r *Repository) Events(ctx context.Context, monitorID string, before time.T
 	for rows.Next() {
 		var e coremonitor.Event
 		var kind, failure string
-		if err := rows.Scan(&e.ID, &e.MonitorID, &e.Time, &kind, &e.StatusCode, &failure, &e.DurationSeconds); err != nil {
+		if err := rows.Scan(&e.ID, &e.MonitorID, &e.Time, &kind, &e.StatusCode, &failure, &e.DurationSeconds, &e.CertExpiresAt); err != nil {
 			return nil, errs.Wrap(err, errs.CodeInternal, "could not read a monitor event").WithOp(op)
 		}
 		e.Kind, e.Failure = coremonitor.EventKind(kind), coremonitor.Failure(failure)

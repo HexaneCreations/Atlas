@@ -26,6 +26,7 @@ type CheckRecord struct {
 	Heartbeat     Status
 	Result        Result
 	Event         *Event
+	CertEvent     *Event
 	NextCheckAt   time.Time
 	CertExpiresAt *time.Time
 }
@@ -219,8 +220,12 @@ func (s *Scheduler) check(ctx context.Context, d Due) {
 	if event != nil {
 		event.MonitorID = m.ID
 	}
+	certEvent := CertEvent(m, d.Counters, r.CertExpiresAt, now)
+	if certEvent != nil {
+		certEvent.MonitorID = m.ID
+	}
 	rec := CheckRecord{
-		MonitorID: m.ID, At: now, Counters: next, Heartbeat: beat, Result: r, Event: event,
+		MonitorID: m.ID, At: now, Counters: next, Heartbeat: beat, Result: r, Event: event, CertEvent: certEvent,
 		NextCheckAt: now.Add(NextInterval(m, next)), CertExpiresAt: r.CertExpiresAt,
 	}
 	if err := s.o.Store.RecordCheck(ctx, rec); err != nil {
@@ -228,7 +233,7 @@ func (s *Scheduler) check(ctx context.Context, d Due) {
 		return
 	}
 	level := slog.LevelDebug
-	if event != nil {
+	if event != nil || certEvent != nil {
 		level = slog.LevelInfo
 	}
 	log.Log(ctx, level, "website check", slog.String("status", string(next.Status)),

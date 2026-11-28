@@ -1,8 +1,14 @@
 import { useState } from "react";
-import { Pause, Pencil, Play, Trash2, WifiOff } from "lucide-react";
-import { useDeleteMonitor, useMonitor, useMonitorEvents, useMonitorHeartbeats, useSetMonitorActive } from "../../api/queries";
+import { BellOff, Pause, Pencil, Play, Trash2, WifiOff } from "lucide-react";
+import {
+  useDeleteMonitor, useMonitor, useMonitorAlertRules, useMonitorEvents, useMonitorHeartbeats, useMuteMonitor,
+  useNotificationChannels, useSetMonitorActive, useSetMonitorAlertRule, useSetMonitorChannels,
+} from "../../api/queries";
 import { emptyArray } from "../../api/empty";
-import type { MonitorDetail as Detail, MonitorEvent, MonitorGroup, MonitorHeartbeat, MonitorProbeState } from "../../api/types";
+import type {
+  MonitorDetail as Detail, MonitorEvent, MonitorEventKind, MonitorGroup, MonitorHeartbeat, MonitorProbeState,
+  MuteDuration, NotificationChannel,
+} from "../../api/types";
 import { Badge } from "../../components/Badge";
 import { Button } from "../../components/Button";
 import { Card, CardHeader } from "../../components/Card";
@@ -11,7 +17,9 @@ import { QueryState } from "../../components/QueryState";
 import { useToast } from "../../components/Toast";
 import { formatDateTime, formatDuration } from "../../format";
 import { messageFor } from "../../lib/apiMessage";
-import { DeleteMonitorConfirm } from "./MonitorForm";
+import { AlertMuteView } from "../nodes/AlertMute";
+import { AlertRulesView } from "../nodes/AlertRules";
+import { ChannelPicker, DeleteMonitorConfirm } from "./MonitorForm";
 import {
   FAILURE_LABEL,
   certDaysLeft,
@@ -50,11 +58,145 @@ export function MonitorDetail({
     <div className="flex flex-col gap-4">
       {probe?.offline ? <ProbeOfflineBanner probe={probe} /> : null}
       <StatusHeader monitor={m} groups={groups} canManage={canManage} onEdit={onEdit} onDeleted={onDeleted} />
-      <UptimeStats monitor={m} />
-      <ResponseTimeChart monitorID={m.id} />
-      <EventsList monitorID={m.id} />
-      {/* 13b: alert rules, notification channels and mute for this monitor go here. */}
+      {canManage ? <DetailTabs monitor={m} /> : <Overview monitorID={m.id} monitor={m} />}
     </div>
+  );
+}
+
+type Tab = "overview" | "alerts";
+
+function DetailTabs({ monitor: m }: { monitor: Detail }) {
+  const [tab, setTab] = useState<Tab>("overview");
+  const tabs: { id: Tab; label: string }[] = [
+    { id: "overview", label: "Overview" },
+    { id: "alerts", label: "Alert rules" },
+  ];
+  return (
+    <>
+      <div role="tablist" aria-label="Website details" className="flex gap-1 border-b border-border">
+        {tabs.map((t) => (
+          <button
+            key={t.id}
+            type="button"
+            role="tab"
+            id={`monitor-tab-${t.id}`}
+            aria-selected={tab === t.id}
+            aria-controls={`monitor-panel-${t.id}`}
+            onClick={() => { setTab(t.id); }}
+            className={`-mb-px border-b-2 px-3 py-2 text-sm font-medium focus-visible:ring-2 focus-visible:ring-primary focus-visible:outline-none ${
+              tab === t.id ? "border-primary text-text" : "border-transparent text-text-muted hover:text-text"
+            }`}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+      <div role="tabpanel" id={`monitor-panel-${tab}`} aria-labelledby={`monitor-tab-${tab}`} className="flex flex-col gap-4">
+        {tab === "overview" ? (
+          <>
+            <NotificationsCard monitor={m} />
+            <Overview monitorID={m.id} monitor={m} />
+          </>
+        ) : (
+          <MonitorAlertRules monitorID={m.id} />
+        )}
+      </div>
+    </>
+  );
+}
+
+function Overview({ monitorID, monitor }: { monitorID: string; monitor: Pick<Detail, "uptime"> }) {
+  return (
+    <>
+      <UptimeStats monitor={monitor} />
+      <ResponseTimeChart monitorID={monitorID} />
+      <EventsList monitorID={monitorID} />
+    </>
+  );
+}
+
+/** Where this website's alerts go, and its mute. Managers only. */
+function NotificationsCard({ monitor: m }: { monitor: Detail }) {
+  const channelsQuery = useNotificationChannels();
+  const channels = channelsQuery.data?.channels ?? emptyArray<NotificationChannel>();
+  const saveChannels = useSetMonitorChannels();
+  const mute = useMuteMonitor();
+  const { push } = useToast();
+  const [editing, setEditing] = useState<string[] | null>(null);
+  const selected = m.channel_ids ?? [];
+  const names = channels.filter((c) => selected.includes(c.id)).map((c) => c.name);
+
+  const setMute = (duration: MuteDuration | null) => {
+    mute.mutate(
+      { monitorID: m.id, duration },
+      { onSuccess: () => { push({ tone: "success", title: `Alerts ${duration ? "muted" : "unmuted"} for ${m.name}` }); } },
+    );
+  };
+  return (
+    <Card level="raised" className="p-0">
+      <div className="px-5 pt-5"><CardHeader title="Notifications" /></div>
+      <div className="flex flex-col gap-3 px-5 pb-4">
+        {editing === null ? (
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-sm text-text">
+              {selected.length === 0 ? (
+                <span className="text-warning">No channels selected: this website alerts no one.</span>
+              ) : (
+                <>Alerts go to {names.length > 0 ? names.join(", ") : `${selected.length} channels`}.</>
+              )}
+            </p>
+            <Button size="sm" onClick={() => { setEditing(selected); }}>Choose channels</Button>
+          </div>
+        ) : (
+          <form
+            className="flex flex-col gap-3"
+            onSubmit={(e) => {
+              e.preventDefault();
+              saveChannels.mutate(
+                { monitorID: m.id, channelIDs: editing },
+                {
+                  onSuccess: () => { push({ tone: "success", title: `Channels saved for ${m.name}` }); setEditing(null); },
+                  onError: (err) => { push({ tone: "danger", title: messageFor(err) }); },
+                },
+              );
+            }}
+          >
+            <ChannelPicker channels={channels} unavailable={channelsQuery.isError} selected={editing} onChange={setEditing} />
+            <div className="flex gap-2">
+              <Button size="sm" type="submit" variant="primary" disabled={saveChannels.isPending}>Save channels</Button>
+              <Button size="sm" type="button" variant="ghost" onClick={() => { setEditing(null); }}>Cancel</Button>
+            </div>
+          </form>
+        )}
+      </div>
+      <AlertMuteView
+        mutedUntil={m.alerts_muted_until}
+        pending={mute.isPending}
+        error={mute.error ? messageFor(mute.error) : null}
+        onSet={setMute}
+      />
+    </Card>
+  );
+}
+
+function MonitorAlertRules({ monitorID }: { monitorID: string }) {
+  const rules = useMonitorAlertRules(monitorID);
+  const change = useSetMonitorAlertRule(monitorID);
+  return (
+    <Card level="raised">
+      <CardHeader title="Alert rules" />
+      {rules.data ? (
+        <AlertRulesView
+          rules={rules.data.rules}
+          subject="website"
+          pendingKey={change.isPending ? change.variables.ruleKey : null}
+          error={change.error ? messageFor(change.error) : null}
+          onChange={(ruleKey, override) => { change.mutate({ ruleKey, override }); }}
+        />
+      ) : (
+        <QueryState isPending={rules.isPending} error={rules.error} onRetry={() => void rules.refetch()} />
+      )}
+    </Card>
   );
 }
 
@@ -114,6 +256,12 @@ export function StatusHeader({
         <Badge tone={status.tone}>{status.label}</Badge>
       </div>
       {m.description ? <p className="mt-3 text-sm text-text-muted">{m.description}</p> : null}
+      {m.notifications_configured ? null : (
+        <p role="status" className="mt-3 flex items-center gap-1.5 text-sm text-warning">
+          <BellOff size={14} aria-hidden="true" />
+          No notifications configured.{canManage ? " Choose channels under Notifications to be alerted." : ""}
+        </p>
+      )}
 
       <dl className="mt-4 grid grid-cols-2 gap-4 sm:grid-cols-4">
         <Stat label="Last check">{m.live.last_check_at ? formatDateTime(m.live.last_check_at) : "Not yet"}</Stat>
@@ -218,7 +366,17 @@ function ResponseTimeChart({ monitorID }: { monitorID: string }) {
   );
 }
 
-const EVENT_TEXT: Record<MonitorEvent["kind"], string> = { down: "Went down", up: "Came back up" };
+const EVENT_TEXT: Record<MonitorEventKind, string> = {
+  down: "Went down",
+  up: "Came back up",
+  cert_warn: "Certificate expiring",
+  cert_crit: "Certificate critical",
+  cert_renewed: "Certificate renewed",
+};
+
+const EVENT_TONE: Record<MonitorEventKind, "danger" | "success" | "warning"> = {
+  down: "danger", up: "success", cert_warn: "warning", cert_crit: "danger", cert_renewed: "success",
+};
 
 export function EventsList({ monitorID }: { monitorID: string }) {
   const query = useMonitorEvents(monitorID);
@@ -231,7 +389,7 @@ export function EventsList({ monitorID }: { monitorID: string }) {
         error={query.error}
         isEmpty={events.length === 0}
         onRetry={() => void query.refetch()}
-        empty={{ title: "No down or up events yet" }}
+        empty={{ title: "No events yet" }}
       />
       {events.length > 0 ? <EventRows events={events} /> : null}
     </Card>
@@ -243,13 +401,14 @@ export function EventRows({ events }: { events: readonly MonitorEvent[] }) {
     <ul className="divide-y divide-border">
       {events.map((e) => (
         <li key={e.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 px-5 py-3 text-sm">
-          <Badge tone={e.kind === "down" ? "danger" : "success"}>{EVENT_TEXT[e.kind]}</Badge>
+          <Badge tone={EVENT_TONE[e.kind]}>{EVENT_TEXT[e.kind]}</Badge>
           <span className="text-text-muted">{formatDateTime(e.time)}</span>
           {e.failure !== "" ? <span className="text-text">{FAILURE_LABEL[e.failure]}</span> : null}
           {e.status_code !== null ? <span className="text-text-muted">status {e.status_code}</span> : null}
           {e.kind === "up" && e.duration_seconds !== null ? (
             <span className="text-text-muted">after {formatDuration(e.duration_seconds)} down</span>
           ) : null}
+          {e.cert_expires_at ? <span className="text-text-muted">expires {formatDateTime(e.cert_expires_at)}</span> : null}
         </li>
       ))}
     </ul>

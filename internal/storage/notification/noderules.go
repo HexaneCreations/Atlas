@@ -24,7 +24,7 @@ func (r *Repository) ListNodeRules(ctx context.Context, nodeID string) ([]coreno
 	if err := nodeKnown(ctx, r.pool, nodeID, op); err != nil {
 		return nil, err
 	}
-	specs, err := rulesWhere(ctx, r.pool, `node_id IS NULL OR node_id = $1`, nodeID)
+	specs, err := rulesWhere(ctx, r.pool, globalRule+` OR node_id = $1`, nodeID)
 	if err != nil {
 		return nil, errs.Wrap(err, errs.CodeUnavailable, "could not read the notification rules").WithOp(op)
 	}
@@ -42,7 +42,7 @@ func (r *Repository) SetNodeRuleEnabled(
 		_, err := tx.Exec(ctx, `
 			INSERT INTO notification_rules (id, trigger, node_id, enabled, updated_at, updated_by)
 			VALUES ($1, $2, $3, $4, now(), $5)
-			ON CONFLICT (trigger, (COALESCE(node_id, ''))) DO UPDATE SET
+			`+ruleScopeConflict+` DO UPDATE SET
 				enabled = EXCLUDED.enabled, updated_at = now(), updated_by = EXCLUDED.updated_by`,
 			id.New(), string(trigger), nodeID, enabled, updatedBy)
 		return err
@@ -119,7 +119,7 @@ func (r *Repository) changeNodeRule(
 }
 
 func nodeRule(ctx context.Context, q querier, nodeID string, trigger corenotification.Trigger) (corenotification.NodeRule, error) {
-	specs, err := rulesWhere(ctx, q, `trigger = $1 AND (node_id IS NULL OR node_id = $2)`, string(trigger), nodeID)
+	specs, err := rulesWhere(ctx, q, `trigger = $1 AND (`+globalRule+` OR node_id = $2)`, string(trigger), nodeID)
 	if err != nil {
 		return corenotification.NodeRule{}, err
 	}
@@ -131,13 +131,18 @@ func nodeRule(ctx context.Context, q querier, nodeID string, trigger corenotific
 	return corenotification.NodeRule{}, errs.New(errs.CodeNotFound, "unknown alert rule %q", trigger)
 }
 
-// ruleEnabled resolves whether trigger is enabled for nodeID as stored now.
-func ruleEnabled(ctx context.Context, q querier, nodeID string, trigger corenotification.Trigger) (bool, error) {
+// ruleEnabled resolves whether trigger is enabled for its subject, nodeID
+// or monitorID, as stored now.
+func ruleEnabled(ctx context.Context, q querier, nodeID, monitorID string, trigger corenotification.Trigger) (bool, error) {
 	entry, ok := corenotification.CatalogEntryFor(trigger)
 	if !ok {
 		return true, nil // not a catalog rule: nothing can disable it
 	}
-	specs, err := rulesWhere(ctx, q, `trigger = $1 AND (node_id IS NULL OR node_id = $2)`, string(trigger), nodeID)
+	scope, id := "node_id", nodeID
+	if monitorID != "" {
+		scope, id = "monitor_id", monitorID
+	}
+	specs, err := rulesWhere(ctx, q, `trigger = $1 AND (`+globalRule+` OR `+scope+` = $2)`, string(trigger), id)
 	if err != nil {
 		return false, err
 	}

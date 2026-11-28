@@ -45,19 +45,21 @@ func migrationFiles(t *testing.T, version int64) (before fstest.MapFS, target st
 }
 
 // snapshot renders every row of the notification tables, minus the columns
-// 0025 adds, in a stable order.
+// 0025 and 0026 add and 0026's seeded website rules, in a stable order.
 func snapshot(t *testing.T, pool *pgxpool.Pool) map[string][]string {
 	t.Helper()
 	out := map[string][]string{}
 	for table, order := range map[string]string{
-		"notification_state":      "trigger, node_id, subject",
-		"notification_rules":      "trigger, node_id NULLS FIRST",
-		"notification_deliveries": "id",
-		"notification_channels":   "id",
-		"nodes":                   "node_id",
+		// Filtered through to_jsonb so the same query runs before and after
+		// the monitor_id columns exist.
+		"notification_state":      "WHERE to_jsonb(t)->>'monitor_id' IS NULL ORDER BY trigger, node_id, subject",
+		"notification_rules":      "WHERE to_jsonb(t)->>'monitor_id' IS NULL AND trigger NOT LIKE 'website%' ORDER BY trigger, node_id NULLS FIRST",
+		"notification_deliveries": "WHERE COALESCE(to_jsonb(t)->>'monitor_id', '') = '' ORDER BY id",
+		"notification_channels":   "ORDER BY id",
+		"nodes":                   "ORDER BY node_id",
 	} {
 		rows, err := pool.Query(context.Background(), fmt.Sprintf(
-			`SELECT (to_jsonb(t) - 'monitor_id' - 'monitor_default')::text FROM %s t ORDER BY %s`, table, order))
+			`SELECT (to_jsonb(t) - 'monitor_id' - 'monitor_default' - 'details')::text FROM %s t %s`, table, order))
 		if err != nil {
 			t.Fatalf("snapshot %s: %v", table, err)
 		}
@@ -95,10 +97,16 @@ func TestMigration0025KeepsNodeNotificationDataIntact(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	secret := "webhook-signing-secret"
-	channel, err := repo.CreateChannel(ctx, channelInput("ops", &secret))
+	// Written as the 0024-era release wrote it: today's CreateChannel also
+	// sets monitor_default, which 0024 does not have.
+	channel := corenotification.Channel{ID: "ch-mig", Type: corenotification.ChannelEmail}
+	sealed, err := key.Seal([]byte("webhook-signing-secret"), []byte(channel.ID))
 	if err != nil {
-		t.Fatalf("CreateChannel on 0024: %v", err)
+		t.Fatal(err)
+	}
+	if _, err = pool.Exec(ctx, `INSERT INTO notification_channels (id, name, type, config, secret_ciphertext, secret_key_id)
+		VALUES ($1, 'ops', 'email', '{}', $2, $3)`, channel.ID, sealed.Ciphertext, sealed.KeyID); err != nil {
+		t.Fatalf("insert a channel on 0024: %v", err)
 	}
 	for _, q := range []string{
 		`INSERT INTO notification_rules (id, trigger, node_id, enabled, warn_threshold, crit_threshold, updated_by)

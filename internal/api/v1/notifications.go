@@ -27,6 +27,9 @@ type NotificationChannelRequest struct {
 	MinSeverity string         `json:"min_severity,omitempty"`
 	Config      map[string]any `json:"config,omitempty"`
 	Secret      *string        `json:"secret,omitempty"`
+	// MonitorDefault pre-selects the channel for new website monitors.
+	// Omitted on update keeps the stored value.
+	MonitorDefault *bool `json:"monitor_default,omitempty"`
 }
 
 func (req NotificationChannelRequest) toInput() notification.ChannelInput {
@@ -40,7 +43,7 @@ func (req NotificationChannelRequest) toInput() notification.ChannelInput {
 	}
 	return notification.ChannelInput{
 		Name: req.Name, Type: notification.ChannelType(req.Type), Enabled: enabled,
-		MinSeverity: minSeverity, Config: req.Config, Secret: req.Secret,
+		MinSeverity: minSeverity, Config: req.Config, Secret: req.Secret, MonitorDefault: req.MonitorDefault,
 	}
 }
 
@@ -65,6 +68,7 @@ type NotificationChannelResponse struct {
 	MinSeverity      string         `json:"min_severity"`
 	Config           map[string]any `json:"config"`
 	SecretConfigured bool           `json:"secret_configured"`
+	MonitorDefault   bool           `json:"monitor_default"`
 	// DestinationHost and HeaderNames are all a reader sees of the secret.
 	// Both are empty when it cannot be read.
 	DestinationHost string    `json:"destination_host"`
@@ -86,7 +90,8 @@ func presentChannel(ctx context.Context, store NotificationStore, c notification
 	return NotificationChannelResponse{
 		DestinationHost: destination.Host, HeaderNames: headerNames,
 		ID: c.ID, Name: c.Name, Type: string(c.Type), Enabled: c.Enabled, MinSeverity: string(c.MinSeverity),
-		Config: config, SecretConfigured: c.SecretConfigured, CreatedAt: c.CreatedAt, UpdatedAt: c.UpdatedAt,
+		Config: config, SecretConfigured: c.SecretConfigured, MonitorDefault: c.MonitorDefault,
+		CreatedAt: c.CreatedAt, UpdatedAt: c.UpdatedAt,
 	}
 }
 
@@ -237,6 +242,7 @@ type NotificationDeliveryResponse struct {
 	Kind          string     `json:"kind"`
 	Trigger       string     `json:"trigger"`
 	NodeID        string     `json:"node_id,omitempty"`
+	MonitorID     string     `json:"monitor_id,omitempty"`
 	Subject       string     `json:"subject,omitempty"`
 	Severity      string     `json:"severity,omitempty"`
 	Title         string     `json:"title,omitempty"`
@@ -289,7 +295,7 @@ func (h *Handler) ListNotificationDeliveries(w http.ResponseWriter, r *http.Requ
 	for _, d := range page.Deliveries {
 		out = append(out, NotificationDeliveryResponse{
 			ID: d.ID, EventID: d.EventID, ChannelID: d.ChannelID, ChannelType: string(d.ChannelType),
-			Kind: string(d.Kind), Trigger: string(d.Trigger), NodeID: d.NodeID, Subject: d.Subject,
+			Kind: string(d.Kind), Trigger: string(d.Trigger), NodeID: d.NodeID, MonitorID: d.MonitorID, Subject: d.Subject,
 			Severity: string(d.Severity), Title: d.Title, Message: d.Message, Status: string(d.Status),
 			Attempts: d.Attempts, NextAttemptAt: d.NextAttemptAt, LastError: d.LastError,
 			DeliveredAt: d.DeliveredAt, CreatedAt: d.CreatedAt, UpdatedAt: d.UpdatedAt,

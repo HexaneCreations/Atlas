@@ -87,8 +87,8 @@ func (f *fakeDeliveryStore) Enqueue(_ context.Context, n Notification, channels 
 		id := "delivery-" + string(rune('a'+f.seq))
 		f.deliveries[id] = &Delivery{
 			ID: id, EventID: n.EventID, ChannelID: c.ID, ChannelType: c.Type, Kind: n.Kind, Trigger: n.Trigger,
-			NodeID: n.NodeID, Subject: n.Subject, Severity: n.Severity, Title: n.Title, Message: n.Message,
-			Status: StatusPending, NextAttemptAt: time.Now(),
+			NodeID: n.NodeID, MonitorID: n.MonitorID, Subject: n.Subject, Severity: n.Severity, Title: n.Title,
+			Message: n.Message, Details: n.Details, Status: StatusPending, NextAttemptAt: time.Now(),
 		}
 	}
 	return inserted, nil

@@ -143,6 +143,9 @@ type Deps struct {
 	MonitorAllowPrivateTargets bool
 	MonitorTester              MonitorTester
 	MonitorTestLimiter         *notification.TestLimiter
+	// MonitorAlerts holds per-monitor alert rules and mutes; nil makes
+	// those endpoints answer 503.
+	MonitorAlerts MonitorAlertStore
 	// Users, Sessions and Authz back human-user authentication and
 	// authorization (see internal/core/user). Nil disables login and leaves
 	// every node-scoped read unauthenticated, the same convention as the
@@ -363,6 +366,13 @@ func (h *Handler) Mount(mux Registrar) {
 	mux.Handle("GET "+Prefix+"/monitors/{monitorID}/heartbeats", httpx.Handler(h.MonitorHeartbeats))
 	mux.Handle("GET "+Prefix+"/monitors/{monitorID}/history", httpx.Handler(h.MonitorHistory))
 	mux.Handle("GET "+Prefix+"/monitors/{monitorID}/events", httpx.Handler(h.MonitorEvents))
+	mux.Handle("GET "+Prefix+"/monitors/{monitorID}/channels", httpx.Handler(h.GetMonitorChannels))
+	mux.Handle("PUT "+Prefix+"/monitors/{monitorID}/channels", httpx.Handler(h.SetMonitorChannels))
+	mux.Handle("GET "+Prefix+"/monitors/{monitorID}/alert-rules", httpx.Handler(h.ListMonitorAlertRules))
+	mux.Handle("PUT "+Prefix+"/monitors/{monitorID}/alert-rules/{ruleKey}", httpx.Handler(h.SetMonitorAlertRule))
+	mux.Handle("DELETE "+Prefix+"/monitors/{monitorID}/alert-rules/{ruleKey}", httpx.Handler(h.ResetMonitorAlertRule))
+	mux.Handle("PUT "+Prefix+"/monitors/{monitorID}/mute", httpx.Handler(h.MuteMonitorAlerts))
+	mux.Handle("DELETE "+Prefix+"/monitors/{monitorID}/mute", httpx.Handler(h.UnmuteMonitorAlerts))
 	mux.Handle("GET "+Prefix+"/monitor-groups", httpx.Handler(h.ListMonitorGroups))
 	mux.Handle("POST "+Prefix+"/monitor-groups", httpx.Handler(h.CreateMonitorGroup))
 	mux.Handle("PUT "+Prefix+"/monitor-groups/{groupID}", httpx.Handler(h.UpdateMonitorGroup))

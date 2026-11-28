@@ -170,6 +170,13 @@ type EvaluatorOptions struct {
 	ContainerCollectorInterval time.Duration
 	ServiceCollectorInterval   time.Duration
 
+	// Monitors and MonitorStates make website monitors alert subjects; with
+	// either nil no monitor is evaluated. ProbeOffline reports whether the
+	// prober has lost its own connectivity; nil means it never has.
+	Monitors      MonitorSource
+	MonitorStates MonitorStateStore
+	ProbeOffline  func() bool
+
 	// LocalNodeID is this server's own node id — the same value
 	// internal/platform/hostid.Resolve already produces at startup and
 	// internal/app/app.go already threads into the local collection
@@ -200,6 +207,10 @@ type Evaluator struct {
 	containerInterval time.Duration
 	serviceInterval   time.Duration
 
+	monitors      MonitorSource
+	monitorStates MonitorStateStore
+	probeOffline  func() bool
+
 	mu     sync.Mutex
 	stopCh chan struct{}
 	wg     sync.WaitGroup
@@ -224,6 +235,7 @@ func NewEvaluator(opts EvaluatorOptions) *Evaluator {
 		logger: opts.Logger, now: opts.Now, interval: opts.Interval, ramInterval: opts.RAMCollectorInterval,
 		localNodeID:       opts.LocalNodeID,
 		containerInterval: opts.ContainerCollectorInterval, serviceInterval: opts.ServiceCollectorInterval,
+		monitors: opts.Monitors, monitorStates: opts.MonitorStates, probeOffline: opts.ProbeOffline,
 	}
 }
 
@@ -271,17 +283,25 @@ func (e *Evaluator) Stop() {
 // EvaluateOnce runs one full evaluation pass. Exported so a test can
 // trigger a deterministic tick instead of racing a timer.
 func (e *Evaluator) EvaluateOnce(ctx context.Context) {
-	nodes, err := e.nodes.ListNodes(ctx)
-	if err != nil {
-		e.logger.ErrorContext(ctx, "could not list nodes for notification evaluation", slog.String("error", err.Error()))
-		return
-	}
 	specs, err := e.rules.ListRules(ctx)
 	if err != nil {
 		e.logger.ErrorContext(ctx, "could not read notification rules", slog.String("error", err.Error()))
 		return
 	}
 	rules := newRuleSet(specs)
+	e.evaluateNodes(ctx, rules)
+	e.evaluateMonitors(ctx, rules)
+}
+
+func (e *Evaluator) evaluateNodes(ctx context.Context, rules ruleSet) {
+	if e.nodes == nil {
+		return
+	}
+	nodes, err := e.nodes.ListNodes(ctx)
+	if err != nil {
+		e.logger.ErrorContext(ctx, "could not list nodes for notification evaluation", slog.String("error", err.Error()))
+		return
+	}
 	activeStates, err := e.states.ListActiveStates(ctx)
 	if err != nil {
 		e.logger.ErrorContext(ctx, "could not read active notification states", slog.String("error", err.Error()))
@@ -556,7 +576,7 @@ func (e *Evaluator) evaluateThreshold(
 	}
 
 	v := value
-	e.evaluateSubjectWithTitle(ctx, rule, trigger, nodeID, subject, current, found, conditionTrue, &v, severityOf, now, titleMessage, nil)
+	e.evaluateSubjectWithTitle(ctx, rule, trigger, nodeRef(nodeID), subject, current, found, conditionTrue, &v, severityOf, now, titleMessage, nil)
 }
 
 // thresholdSeverity resolves warn vs critical for a true condition.
@@ -592,7 +612,7 @@ func (e *Evaluator) evaluateSubject(
 			slog.String("trigger", string(trigger)), slog.String("node_id", nodeID))
 		return StateOK // unknown; never suppress on the strength of an error we could not even read past
 	}
-	return e.evaluateSubjectWithTitle(ctx, rule, trigger, nodeID, subject, current, found, conditionTrue, value,
+	return e.evaluateSubjectWithTitle(ctx, rule, trigger, nodeRef(nodeID), subject, current, found, conditionTrue, value,
 		severityOf, now, titleMessage, nil)
 }
 
@@ -606,12 +626,12 @@ func (e *Evaluator) evaluateSubject(
 // this tick arrived at. A row that would be written back exactly as it was
 // read is not written.
 func (e *Evaluator) evaluateSubjectWithTitle(
-	ctx context.Context, rule Rule, trigger Trigger, nodeID, subject string, current State, found bool,
+	ctx context.Context, rule Rule, trigger Trigger, ref subjectRef, subject string, current State, found bool,
 	conditionTrue bool, value *float64, severityOf func(*float64) Severity, now time.Time,
 	titleMessage func(Kind, Severity) (string, string), track func(StateKind) map[string]any,
 ) StateKind {
 	next, kind, notifySeverity := computeTransition(rule, current, found, conditionTrue, value, severityOf, now)
-	next.Trigger, next.NodeID, next.Subject = trigger, nodeID, subject
+	next.Trigger, next.NodeID, next.MonitorID, next.Subject = trigger, ref.NodeID, ref.MonitorID, subject
 	if track != nil {
 		next.Baseline = track(next.State)
 	}
@@ -629,11 +649,12 @@ func (e *Evaluator) evaluateSubjectWithTitle(
 			// current, not next: see eventAnchor and the fix-round report's
 			// item 1 for why the id must be built only from a timestamp this
 			// tick did not just compute.
-			EventID: eventID(trigger, nodeID, subject, eventAnchor(kind, current), kind, notifySeverity),
-			Kind:    kind,
-			Trigger: trigger,
-			NodeID:  nodeID,
-			Subject: subject,
+			EventID:   eventID(trigger, ref.slot(), subject, eventAnchor(kind, current), kind, notifySeverity),
+			Kind:      kind,
+			Trigger:   trigger,
+			NodeID:    ref.NodeID,
+			MonitorID: ref.MonitorID,
+			Subject:   subject,
 			// notifySeverity, not next.Severity: a recovered notification
 			// follows the severity of the alert it resolves (the brief's
 			// own words), but the stored state's severity is already
@@ -644,9 +665,12 @@ func (e *Evaluator) evaluateSubjectWithTitle(
 			Title:    title,
 			Message:  message,
 		}
+		if ref.details != nil {
+			n.Details = ref.details(kind, current)
+		}
 		if err := e.notifier.Notify(ctx, n); err != nil {
 			e.logger.ErrorContext(ctx, "could not enqueue a notification",
-				slog.String("trigger", string(trigger)), slog.String("node_id", nodeID), slog.String("error", Redact(err.Error())))
+				slog.String("trigger", string(trigger)), ref.attr(), slog.String("error", Redact(err.Error())))
 			// Not saved: the next tick recomputes the same transition and
 			// retries with the same deterministic event id, which Enqueue's
 			// UNIQUE(event_id, channel_id) dedupes if the first attempt
@@ -663,7 +687,7 @@ func (e *Evaluator) evaluateSubjectWithTitle(
 	next.UpdatedAt = now
 	if err := e.states.UpsertState(ctx, next); err != nil {
 		e.logger.ErrorContext(ctx, "could not save notification state",
-			slog.String("trigger", string(trigger)), slog.String("node_id", nodeID))
+			slog.String("trigger", string(trigger)), ref.attr())
 		return current.State
 	}
 	// A first observation that lands in ok is a baseline, not a transition.
@@ -676,8 +700,35 @@ func (e *Evaluator) evaluateSubjectWithTitle(
 		level = slog.LevelInfo
 	}
 	e.logger.Log(ctx, level, "notification state transition",
-		slog.String("trigger", string(trigger)), slog.String("node_id", nodeID), slog.String("state", string(next.State)))
+		slog.String("trigger", string(trigger)), ref.attr(), slog.String("state", string(next.State)))
 	return next.State
+}
+
+// subjectRef is whose state evaluateSubjectWithTitle advances: a node, or a
+// monitor. details, for a monitor, supplies the facts its notification
+// carries, given the kind and the state before the transition.
+type subjectRef struct {
+	NodeID    string
+	MonitorID string
+	details   func(Kind, State) MonitorDetails
+}
+
+func nodeRef(nodeID string) subjectRef { return subjectRef{NodeID: nodeID} }
+
+// slot is what fills the node position of an event id: the node id
+// unchanged, or a monitor's [MonitorScope].
+func (r subjectRef) slot() string {
+	if r.MonitorID != "" {
+		return MonitorScope(r.MonitorID)
+	}
+	return r.NodeID
+}
+
+func (r subjectRef) attr() slog.Attr {
+	if r.MonitorID != "" {
+		return slog.String("monitor_id", r.MonitorID)
+	}
+	return slog.String("node_id", r.NodeID)
 }
 
 // flappingMessage keeps the condition text and says why this is not a

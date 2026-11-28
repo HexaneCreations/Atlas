@@ -11,8 +11,11 @@ import type {
   GrantPageAccessRequest,
   GrantRoleRequest,
   ListInstallCommandsResponse,
+  ListMonitorAlertRulesResponse,
   ListMonitorsResponse,
   Monitor,
+  MonitorChannelsResponse,
+  MonitorMuteResponse,
   MonitorDetail,
   MonitorEventsResponse,
   MonitorGroup,
@@ -523,6 +526,31 @@ export async function updateMonitor(id: string, body: MonitorRequest): Promise<M
 
 export async function setMonitorActive(id: string, active: boolean): Promise<Monitor> {
   return sendJSON<Monitor>(`${monitorPath(id)}/active`, "PUT", { active });
+}
+
+export async function setMonitorChannels(id: string, channelIDs: string[]): Promise<MonitorChannelsResponse> {
+  return sendJSON<MonitorChannelsResponse>(`${monitorPath(id)}/channels`, "PUT", { channel_ids: channelIDs });
+}
+
+export async function fetchMonitorAlertRules(id: string, signal?: AbortSignal): Promise<ListMonitorAlertRulesResponse> {
+  return apiGet<ListMonitorAlertRulesResponse>(`${monitorPath(id)}/alert-rules`, signal ? { signal } : {});
+}
+
+export async function setMonitorAlertRule(id: string, key: string, enabled: boolean): Promise<NodeAlertRule> {
+  return sendJSON<NodeAlertRule>(`${monitorPath(id)}/alert-rules/${encodeURIComponent(key)}`, "PUT", { enabled });
+}
+
+export async function resetMonitorAlertRule(id: string, key: string): Promise<void> {
+  await request(`${monitorPath(id)}/alert-rules/${encodeURIComponent(key)}`, { method: "DELETE" });
+}
+
+/** Mutes a monitor's alerts, replacing any mute it already has. */
+export async function muteMonitor(id: string, body: MuteNodeRequest): Promise<MonitorMuteResponse> {
+  return sendJSON<MonitorMuteResponse>(`${monitorPath(id)}/mute`, "PUT", body);
+}
+
+export async function unmuteMonitor(id: string): Promise<void> {
+  await request(`${monitorPath(id)}/mute`, { method: "DELETE" });
 }
 
 export async function deleteMonitor(id: string): Promise<void> {

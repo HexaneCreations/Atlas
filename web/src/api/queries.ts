@@ -22,7 +22,13 @@ import {
   fetchMonitorEvents,
   fetchMonitorHeartbeats,
   fetchMonitors,
+  fetchMonitorAlertRules,
+  muteMonitor,
+  resetMonitorAlertRule,
   setMonitorActive,
+  setMonitorAlertRule,
+  setMonitorChannels,
+  unmuteMonitor,
   updateMonitor,
   updateMonitorGroup,
   createUser,
@@ -55,7 +61,9 @@ import { emptyArray } from "./empty";
 import { useSelectedNodeID } from "../lib/selectedNode";
 import { applyOverride } from "../lib/alertRules";
 import type {
+  ListMonitorAlertRulesResponse,
   ListNodeAlertRulesResponse,
+  NodeAlertRule,
   PutUserAccessRequest,
   UserAccessResponse,
   CollectorsResponse,
@@ -842,24 +850,36 @@ export function useNodeAlertRules(nodeID: string) {
 /** The mutation behind [useSetNodeAlertRule], separate so it can be
  *  exercised against a bare QueryClient. */
 export function nodeAlertRuleMutation(queryClient: QueryClient, nodeID: string) {
-  const key = nodeAlertRuleKeys.node(nodeID);
+  return alertRuleMutation<ListNodeAlertRulesResponse>(queryClient, nodeAlertRuleKeys.node(nodeID), "node",
+    (key) => resetNodeAlertRule(nodeID, key), (key, enabled) => setNodeAlertRule(nodeID, key, enabled));
+}
+
+/** A subject's rule override change, applied to its cached list at once and
+ *  put back if the server refuses. */
+function alertRuleMutation<T extends { rules: NodeAlertRule[] }>(
+  queryClient: QueryClient,
+  key: readonly unknown[],
+  own: "node" | "monitor",
+  reset: (ruleKey: string) => Promise<unknown>,
+  set: (ruleKey: string, enabled: boolean) => Promise<unknown>,
+) {
   return {
     mutationFn: async ({ ruleKey, override }: { ruleKey: string; override: boolean | null }) => {
-      if (override === null) await resetNodeAlertRule(nodeID, ruleKey);
-      else await setNodeAlertRule(nodeID, ruleKey, override);
+      if (override === null) await reset(ruleKey);
+      else await set(ruleKey, override);
     },
     onMutate: async ({ ruleKey, override }: { ruleKey: string; override: boolean | null }) => {
       await queryClient.cancelQueries({ queryKey: key });
-      const previous = queryClient.getQueryData<ListNodeAlertRulesResponse>(key);
+      const previous = queryClient.getQueryData<T>(key);
       if (previous) {
-        queryClient.setQueryData<ListNodeAlertRulesResponse>(key, {
+        queryClient.setQueryData<T>(key, {
           ...previous,
-          rules: previous.rules.map((r) => (r.key === ruleKey ? applyOverride(r, override) : r)),
+          rules: previous.rules.map((r) => (r.key === ruleKey ? applyOverride(r, override, own) : r)),
         });
       }
       return { previous };
     },
-    onError: (_error: unknown, _vars: unknown, context: { previous: ListNodeAlertRulesResponse | undefined } | undefined) => {
+    onError: (_error: unknown, _vars: unknown, context: { previous: T | undefined } | undefined) => {
       if (context?.previous) queryClient.setQueryData(key, context.previous);
     },
     onSettled: () => queryClient.invalidateQueries({ queryKey: key }),
@@ -921,6 +941,7 @@ export const monitorKeys = {
   detail: (id: string) => ["monitors", "detail", id] as const,
   heartbeats: (id: string) => ["monitors", "heartbeats", id] as const,
   events: (id: string) => ["monitors", "events", id] as const,
+  alertRules: (id: string) => ["monitors", "alert-rules", id] as const,
 };
 
 export function useMonitors() {
@@ -977,6 +998,47 @@ export function useSetMonitorActive() {
   const invalidate = useInvalidateMonitors();
   return useMutation({
     mutationFn: ({ monitorID, active }: { monitorID: string; active: boolean }) => setMonitorActive(monitorID, active),
+    onSuccess: invalidate,
+  });
+}
+
+/** Every monitor alert rule with its effective value on one monitor. */
+export function useMonitorAlertRules(monitorID: string) {
+  return useQuery({
+    queryKey: monitorKeys.alertRules(monitorID),
+    queryFn: ({ signal }) => fetchMonitorAlertRules(monitorID, signal),
+  });
+}
+
+/** The mutation behind [useSetMonitorAlertRule]. */
+export function monitorAlertRuleMutation(queryClient: QueryClient, monitorID: string) {
+  return alertRuleMutation<ListMonitorAlertRulesResponse>(queryClient, monitorKeys.alertRules(monitorID), "monitor",
+    (key) => resetMonitorAlertRule(monitorID, key), (key, enabled) => setMonitorAlertRule(monitorID, key, enabled));
+}
+
+/** Sets (true/false) or clears (null) one rule's override on a monitor. */
+export function useSetMonitorAlertRule(monitorID: string) {
+  const queryClient = useQueryClient();
+  return useMutation(monitorAlertRuleMutation(queryClient, monitorID));
+}
+
+/** Mutes a monitor's alerts, or unmutes it when `duration` is null. */
+export function useMuteMonitor() {
+  const invalidate = useInvalidateMonitors();
+  return useMutation({
+    mutationFn: async ({ monitorID, duration }: { monitorID: string; duration: MuteDuration | null }) => {
+      if (duration) await muteMonitor(monitorID, { duration });
+      else await unmuteMonitor(monitorID);
+    },
+    onSuccess: invalidate,
+  });
+}
+
+/** Replaces a monitor's channel selection. */
+export function useSetMonitorChannels() {
+  const invalidate = useInvalidateMonitors();
+  return useMutation({
+    mutationFn: ({ monitorID, channelIDs }: { monitorID: string; channelIDs: string[] }) => setMonitorChannels(monitorID, channelIDs),
     onSuccess: invalidate,
   });
 }

@@ -124,10 +124,14 @@ type Monitor struct {
 	// HeaderNames are the custom header names; their values are secret.
 	HeaderNames      []string
 	SecretConfigured bool
-	CreatedAt        time.Time
-	CreatedBy        string
-	UpdatedAt        time.Time
-	UpdatedBy        string
+	// ChannelIDs are the notification channels the monitor alerts. Read
+	// back on every view; on create nil selects the channels flagged
+	// monitor_default, on update nil keeps the selection.
+	ChannelIDs []string
+	CreatedAt  time.Time
+	CreatedBy  string
+	UpdatedAt  time.Time
+	UpdatedBy  string
 }
 
 // Defaults fills every unset field of a new monitor's configuration.

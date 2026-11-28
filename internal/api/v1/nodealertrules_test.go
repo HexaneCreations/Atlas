@@ -150,6 +150,8 @@ func TestNodeAlertRuleValidation(t *testing.T) {
 	}{
 		{guardAction{"unknown key", http.MethodPut, "/nodes/node-1/alert-rules/cpu_pct", `{"enabled":true}`}, http.StatusNotFound},
 		{guardAction{"unknown key reset", http.MethodDelete, "/nodes/node-1/alert-rules/cpu_pct", ""}, http.StatusNotFound},
+		{guardAction{"monitor key", http.MethodPut, "/nodes/node-1/alert-rules/website_down", `{"enabled":false}`}, http.StatusNotFound},
+		{guardAction{"monitor key reset", http.MethodDelete, "/nodes/node-1/alert-rules/website_cert_expiry", ""}, http.StatusNotFound},
 		{guardAction{"no body", http.MethodPut, "/nodes/node-1/alert-rules/disk_pct", ""}, http.StatusBadRequest},
 		{guardAction{"missing enabled", http.MethodPut, "/nodes/node-1/alert-rules/disk_pct", `{}`}, http.StatusBadRequest},
 		{guardAction{"wrong type", http.MethodPut, "/nodes/node-1/alert-rules/disk_pct", `{"enabled":"false"}`}, http.StatusBadRequest},
@@ -189,10 +191,19 @@ func TestNodeAlertRuleListShowsEffectiveValueAndSource(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		t.Fatal(err)
 	}
-	if out.NodeID != "node-1" || len(out.Rules) != len(notification.Catalog) {
+	nodeEntries := 0
+	for _, e := range notification.Catalog {
+		if e.Kind == notification.SubjectNode {
+			nodeEntries++
+		}
+	}
+	if out.NodeID != "node-1" || len(out.Rules) != nodeEntries {
 		t.Fatalf("response = %+v", out)
 	}
 	for _, r := range out.Rules {
+		if key, _ := r["key"].(string); notification.Trigger(key).SubjectKind() != notification.SubjectNode {
+			t.Errorf("the node endpoint lists monitor rule %q", key)
+		}
 		for _, field := range []string{"key", "area", "title", "description", "default_severity", "default_enabled",
 			"global_enabled", "override", "enabled", "source"} {
 			if _, ok := r[field]; !ok {

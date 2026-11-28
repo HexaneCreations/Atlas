@@ -69,7 +69,7 @@ func TestSetRuleRejectsAGlobalChangeRacingAConcurrentOverride(t *testing.T) {
 	seedNode(t, pool, "race-node")
 
 	tracedCfg := pool.Config()
-	tracer := &delayingTracer{match: "node_id IS NULL FOR SHARE", delay: 300 * time.Millisecond, fired: make(chan struct{})}
+	tracer := &delayingTracer{match: "monitor_id IS NULL) FOR SHARE", delay: 300 * time.Millisecond, fired: make(chan struct{})}
 	tracedCfg.ConnConfig.Tracer = tracer
 	tracedPool, err := pgxpool.NewWithConfig(ctx, tracedCfg)
 	if err != nil {

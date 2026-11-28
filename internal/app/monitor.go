@@ -110,6 +110,9 @@ func (l lazyMonitorStore) SetMonitorActive(ctx context.Context, id string, activ
 func (l lazyMonitorStore) DeleteMonitor(ctx context.Context, id string) error {
 	return l.repo().DeleteMonitor(ctx, id)
 }
+func (l lazyMonitorStore) SetMonitorChannels(ctx context.Context, id string, channelIDs []string) ([]string, error) {
+	return l.repo().SetMonitorChannels(ctx, id, channelIDs)
+}
 func (l lazyMonitorStore) RecentHeartbeats(ctx context.Context, ids []string, n int) (map[string][]coremonitor.Heartbeat, error) {
 	return l.repo().RecentHeartbeats(ctx, ids, n)
 }

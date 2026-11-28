@@ -31,14 +31,15 @@ func NewRepository(pool *pgxpool.Pool, key *secretbox.Key) *Repository {
 	return &Repository{pool: pool, key: key}
 }
 
-const channelColumns = `id, name, type, enabled, min_severity, config, secret_ciphertext IS NOT NULL, created_at, updated_at`
+const channelColumns = `id, name, type, enabled, min_severity, config, secret_ciphertext IS NOT NULL, monitor_default,
+	created_at, updated_at`
 
 func scanChannel(row pgx.Row) (corenotification.Channel, error) {
 	var c corenotification.Channel
 	var typ, minSeverity string
 	var config []byte
 	if err := row.Scan(&c.ID, &c.Name, &typ, &c.Enabled, &minSeverity, &config,
-		&c.SecretConfigured, &c.CreatedAt, &c.UpdatedAt); err != nil {
+		&c.SecretConfigured, &c.MonitorDefault, &c.CreatedAt, &c.UpdatedAt); err != nil {
 		return corenotification.Channel{}, err
 	}
 	c.Type = corenotification.ChannelType(typ)
@@ -150,11 +151,12 @@ func (r *Repository) CreateChannel(ctx context.Context, in corenotification.Chan
 	}
 
 	const q = `
-		INSERT INTO notification_channels (id, name, type, enabled, min_severity, config, secret_ciphertext, secret_key_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		INSERT INTO notification_channels (id, name, type, enabled, min_severity, config, secret_ciphertext, secret_key_id,
+			monitor_default)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9, false))
 		RETURNING ` + channelColumns
 	c, err := scanChannel(r.pool.QueryRow(ctx, q, channelID, in.Name, string(in.Type), in.Enabled,
-		string(in.MinSeverity), config, ciphertext, keyID))
+		string(in.MinSeverity), config, ciphertext, keyID, in.MonitorDefault))
 	if err != nil {
 		return corenotification.Channel{}, channelWriteError(err, op, "create")
 	}
@@ -189,11 +191,12 @@ func (r *Repository) UpdateChannel(ctx context.Context, channelID string, in cor
 			name = $2, type = $3, enabled = $4, min_severity = $5, config = $6,
 			secret_ciphertext = CASE WHEN $7 THEN $8 ELSE secret_ciphertext END,
 			secret_key_id     = CASE WHEN $7 THEN $9 ELSE secret_key_id END,
+			monitor_default   = COALESCE($10, monitor_default),
 			updated_at = now()
 		WHERE id = $1
 		RETURNING ` + channelColumns
 	c, err := scanChannel(r.pool.QueryRow(ctx, q, channelID, in.Name, string(in.Type), in.Enabled,
-		string(in.MinSeverity), config, replaceSecret, ciphertext, keyID))
+		string(in.MinSeverity), config, replaceSecret, ciphertext, keyID, in.MonitorDefault))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return corenotification.Channel{}, errs.New(errs.CodeNotFound, "notification channel not found").WithOp(op).WithDetail("id", channelID)

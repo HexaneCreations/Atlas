@@ -112,6 +112,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*App, error) {
 	incidentPipe := newIncidentPipeline(logger, pool)
 	notificationPipe := newNotificationPipeline(logger, pool, notificationKey, identity.NodeID, cfg.Collection.DefaultInterval)
 	monitorPipe := newMonitorPipeline(logger, pool, notificationKey, cfg.Monitoring)
+	notificationPipe.probeOffline = func() bool { return monitorPipe.ProbeState().Offline }
 	if notificationKey != nil {
 		notificationTester = notificationPipe
 	}
@@ -170,6 +171,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*App, error) {
 		MonitorProbe:               monitorPipe,
 		MonitorAllowPrivateTargets: cfg.Monitoring.AllowPrivateTargets,
 		MonitorTester:              monitorPipe.Tester(),
+		MonitorAlerts:              lazyNotificationStore{pool: pool, key: notificationKey},
 
 		Users:          lazyUserStore{pool: pool},
 		Sessions:       lazyUserStore{pool: pool},

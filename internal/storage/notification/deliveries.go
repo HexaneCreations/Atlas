@@ -2,6 +2,7 @@ package notification
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -53,24 +54,28 @@ func sanitizeError(msg string) string {
 	return string(runes[:MaxLastErrorLen-utf8.RuneCountInString(ellipsis)]) + ellipsis
 }
 
-const deliveryColumns = `id, event_id, channel_id, channel_type, kind, trigger, node_id, subject, severity,
-	title, message, status, attempts, next_attempt_at, last_error, delivered_at, created_at, updated_at`
+const deliveryColumns = `id, event_id, channel_id, channel_type, kind, trigger, node_id, monitor_id, subject, severity,
+	title, message, details, status, attempts, next_attempt_at, last_error, delivered_at, created_at, updated_at`
 
 // deliveryColumnsQualified is deliveryColumns with every column prefixed
 // "d.", for ClaimDue's query, which joins notification_deliveries (there,
 // aliased d) against a CTE that also has an "id" column — an unqualified
 // "id" in that query's RETURNING clause would be ambiguous.
 const deliveryColumnsQualified = `d.id, d.event_id, d.channel_id, d.channel_type, d.kind, d.trigger, d.node_id,
-	d.subject, d.severity, d.title, d.message, d.status, d.attempts, d.next_attempt_at, d.last_error,
-	d.delivered_at, d.created_at, d.updated_at`
+	d.monitor_id, d.subject, d.severity, d.title, d.message, d.details, d.status, d.attempts, d.next_attempt_at,
+	d.last_error, d.delivered_at, d.created_at, d.updated_at`
 
 func scanDelivery(row pgx.Row) (corenotification.Delivery, error) {
 	var d corenotification.Delivery
 	var channelType, kind, trigger, severity, status string
-	if err := row.Scan(&d.ID, &d.EventID, &d.ChannelID, &channelType, &kind, &trigger, &d.NodeID, &d.Subject,
-		&severity, &d.Title, &d.Message, &status, &d.Attempts, &d.NextAttemptAt, &d.LastError, &d.DeliveredAt,
+	var details []byte
+	if err := row.Scan(&d.ID, &d.EventID, &d.ChannelID, &channelType, &kind, &trigger, &d.NodeID, &d.MonitorID, &d.Subject,
+		&severity, &d.Title, &d.Message, &details, &status, &d.Attempts, &d.NextAttemptAt, &d.LastError, &d.DeliveredAt,
 		&d.CreatedAt, &d.UpdatedAt); err != nil {
 		return corenotification.Delivery{}, err
+	}
+	if err := json.Unmarshal(details, &d.Details); err != nil {
+		return corenotification.Delivery{}, fmt.Errorf("decode delivery details: %w", err)
 	}
 	d.ChannelType = corenotification.ChannelType(channelType)
 	d.Kind = corenotification.Kind(kind)
@@ -94,9 +99,13 @@ func (r *Repository) Enqueue(ctx context.Context, n corenotification.Notificatio
 
 	const q = `
 		INSERT INTO notification_deliveries (id, event_id, channel_id, channel_type, kind, trigger, node_id,
-			subject, severity, title, message, status, next_attempt_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'pending', now())
+			subject, severity, title, message, status, next_attempt_at, monitor_id, details)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'pending', now(), $12, $13)
 		ON CONFLICT (event_id, channel_id) DO NOTHING`
+	details, err := json.Marshal(n.Details)
+	if err != nil {
+		return 0, errs.Wrap(err, errs.CodeInvalidArgument, "the notification details are not valid JSON").WithOp(op)
+	}
 
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
@@ -104,14 +113,15 @@ func (r *Repository) Enqueue(ctx context.Context, n corenotification.Notificatio
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	// An alert for a rule disabled on its node is never enqueued, even when
-	// the evaluator decided to send it before the rule was disabled: the
-	// shared lock orders this against the rule change (see lockRuleShared).
-	if n.Kind != corenotification.KindTest && n.Trigger != "" && n.NodeID != "" {
+	// An alert for a rule disabled on its node or monitor is never
+	// enqueued, even when the evaluator decided to send it before the rule
+	// was disabled: the shared lock orders this against the rule change
+	// (see lockRuleShared).
+	if n.Kind != corenotification.KindTest && n.Trigger != "" && (n.NodeID != "" || n.MonitorID != "") {
 		if _, err := tx.Exec(ctx, lockRuleShared, string(n.Trigger)); err != nil {
 			return 0, errs.Wrap(err, errs.CodeUnavailable, "could not lock the notification rule").WithOp(op)
 		}
-		enabled, err := ruleEnabled(ctx, tx, n.NodeID, n.Trigger)
+		enabled, err := ruleEnabled(ctx, tx, n.NodeID, n.MonitorID, n.Trigger)
 		if err != nil {
 			return 0, errs.Wrap(err, errs.CodeUnavailable, "could not read the notification rule").WithOp(op)
 		}
@@ -123,7 +133,7 @@ func (r *Repository) Enqueue(ctx context.Context, n corenotification.Notificatio
 	batch := &pgx.Batch{}
 	for _, c := range channels {
 		batch.Queue(q, id.New(), n.EventID, c.ID, string(c.Type), string(n.Kind), string(n.Trigger), n.NodeID,
-			n.Subject, string(n.Severity), n.Title, n.Message)
+			n.Subject, string(n.Severity), n.Title, n.Message, n.MonitorID, details)
 	}
 	br := tx.SendBatch(ctx, batch)
 	inserted := 0

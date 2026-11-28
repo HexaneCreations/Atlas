@@ -65,9 +65,15 @@ func adaptiveCard(d Delivery) map[string]any {
 	}
 	addFact("Severity", string(d.Severity))
 	addFact("Trigger", string(d.Trigger))
-	addFact("Node", nodeLabel(d.NodeID, d.NodeName))
-	addFact("Address", d.NodeAddress)
-	addFact("Subject", d.Subject)
+	if d.MonitorID != "" {
+		for _, f := range monitorFacts(d) {
+			addFact(f[0], f[1])
+		}
+	} else {
+		addFact("Node", nodeLabel(d.NodeID, d.NodeName))
+		addFact("Address", d.NodeAddress)
+		addFact("Subject", d.Subject)
+	}
 	if !d.CreatedAt.IsZero() {
 		addFact("Time", d.CreatedAt.UTC().Format(cardTimeFormat))
 	}
@@ -87,6 +93,40 @@ func adaptiveCard(d Delivery) map[string]any {
 		"version": "1.4",
 		"body":    body,
 	}
+}
+
+// monitorFacts are a monitor delivery's card facts, in order, as (title,
+// value) pairs; an empty value is left out by the caller. Only the URL's
+// host is ever shown.
+func monitorFacts(d Delivery) [][2]string {
+	name := d.MonitorName
+	if name == "" {
+		name = d.MonitorID
+	}
+	x := d.Details
+	facts := [][2]string{{"Website", name}, {"Host", d.MonitorHost}}
+	if x.Failure != "" {
+		facts = append(facts, [2]string{"Failure", x.Failure})
+	}
+	if x.StatusCode != nil {
+		facts = append(facts, [2]string{"Status code", fmt.Sprint(*x.StatusCode)})
+	}
+	if x.ResponseMS != nil {
+		facts = append(facts, [2]string{"Response time", fmt.Sprintf("%d ms", *x.ResponseMS)})
+	}
+	if x.DownSince != nil {
+		facts = append(facts, [2]string{"Down since", x.DownSince.UTC().Format(cardTimeFormat)})
+	}
+	if x.OutageSeconds != nil {
+		facts = append(facts, [2]string{"Outage", cooldownText(*x.OutageSeconds)})
+	}
+	if x.CertDaysLeft != nil {
+		facts = append(facts, [2]string{"Days remaining", fmt.Sprint(*x.CertDaysLeft)})
+	}
+	if x.CertExpiresAt != nil {
+		facts = append(facts, [2]string{"Expires", x.CertExpiresAt.UTC().Format(cardTimeFormat)})
+	}
+	return facts
 }
 
 // nodeLabel names a node for a reader: its hostname with a short id, or

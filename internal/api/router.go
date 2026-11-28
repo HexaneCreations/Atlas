@@ -70,6 +70,7 @@ type Deps struct {
 	MonitorAllowPrivateTargets bool
 	MonitorTester              v1.MonitorTester
 	MonitorTestLimiter         *corenotification.TestLimiter
+	MonitorAlerts              v1.MonitorAlertStore
 	// Users, Sessions and Authz back human-user authentication and
 	// authorization (see internal/core/user and internal/api/v1's auth
 	// endpoints). Nil disables login entirely rather than crashing it — the
@@ -141,6 +142,7 @@ func New(deps Deps) http.Handler {
 		MonitorAllowPrivateTargets: deps.MonitorAllowPrivateTargets,
 		MonitorTester:              deps.MonitorTester,
 		MonitorTestLimiter:         deps.MonitorTestLimiter,
+		MonitorAlerts:              deps.MonitorAlerts,
 
 		Users:          deps.Users,
 		Sessions:       deps.Sessions,

@@ -287,6 +287,15 @@ func (f *fakeRuleStore) setNodeEnabled(trigger Trigger, nodeID string, enabled *
 
 type stateKey struct{ trigger, nodeID, subject string }
 
+// keyOf keys a node state by its node id and a monitor state by its
+// MonitorScope, so the two never collide.
+func keyOf(s State) stateKey {
+	if s.MonitorID != "" {
+		return stateKey{string(s.Trigger), MonitorScope(s.MonitorID), s.Subject}
+	}
+	return stateKey{string(s.Trigger), s.NodeID, s.Subject}
+}
+
 type fakeStateStore struct {
 	mu      sync.Mutex
 	states  map[stateKey]State
@@ -317,7 +326,7 @@ func (f *fakeStateStore) UpsertState(_ context.Context, s State) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.upserts++
-	f.states[stateKey{string(s.Trigger), s.NodeID, s.Subject}] = s
+	f.states[keyOf(s)] = s
 	return nil
 }
 
@@ -336,7 +345,7 @@ func (f *fakeStateStore) ListNodeStates(_ context.Context, nodeID string, trigge
 func (f *fakeStateStore) BeginPending(_ context.Context, s State) (State, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	k := stateKey{string(s.Trigger), s.NodeID, s.Subject}
+	k := keyOf(s)
 	if stored, ok := f.states[k]; ok && stored.State != StateOK {
 		return stored, nil
 	}
@@ -357,7 +366,7 @@ func (f *fakeStateStore) ListActiveStates(context.Context) ([]State, error) {
 	defer f.mu.Unlock()
 	var out []State
 	for _, st := range f.states {
-		if st.State != StateOK {
+		if st.State != StateOK && st.MonitorID == "" {
 			out = append(out, st)
 		}
 	}

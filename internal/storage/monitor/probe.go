@@ -39,7 +39,8 @@ func (r *Repository) ClaimDue(ctx context.Context, limit int, lease time.Duratio
 		)
 		UPDATE monitor_status s SET next_check_at = now() + make_interval(secs => $2::float8)
 		FROM due WHERE s.monitor_id = due.monitor_id
-		RETURNING s.monitor_id, s.status, s.consecutive_failures, s.consecutive_successes, s.status_since, s.down_since`,
+		RETURNING s.monitor_id, s.status, s.consecutive_failures, s.consecutive_successes, s.status_since, s.down_since,
+			s.last_check_at, s.cert_expires_at`,
 		limit, lease.Seconds())
 	if err != nil {
 		return nil, errs.Wrap(err, errs.CodeUnavailable, "could not claim due checks").WithOp(op)
@@ -49,7 +50,8 @@ func (r *Repository) ClaimDue(ctx context.Context, limit int, lease time.Duratio
 	for rows.Next() {
 		var monitorID, status string
 		var c coremonitor.Counters
-		if err := rows.Scan(&monitorID, &status, &c.ConsecutiveFailures, &c.ConsecutiveSuccesses, &c.StatusSince, &c.DownSince); err != nil {
+		if err = rows.Scan(&monitorID, &status, &c.ConsecutiveFailures, &c.ConsecutiveSuccesses, &c.StatusSince, &c.DownSince,
+			&c.LastCheckAt, &c.CertExpiresAt); err != nil {
 			rows.Close()
 			return nil, errs.Wrap(err, errs.CodeInternal, "could not read a claimed check").WithOp(op)
 		}
@@ -130,11 +132,15 @@ func (r *Repository) RecordCheck(ctx context.Context, rec coremonitor.CheckRecor
 		rec.MonitorID, rec.At, string(rec.Heartbeat), code, ms, string(res.Failure)); err != nil {
 		return errs.Wrap(err, errs.CodeUnavailable, "could not record the heartbeat").WithOp(op)
 	}
-	if e := rec.Event; e != nil {
+	for _, e := range []*coremonitor.Event{rec.Event, rec.CertEvent} {
+		if e == nil {
+			continue
+		}
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO monitor_events (id, monitor_id, time, kind, status_code, failure, duration_seconds)
-			VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-			id.New(), rec.MonitorID, e.Time, string(e.Kind), e.StatusCode, string(e.Failure), e.DurationSeconds); err != nil {
+			INSERT INTO monitor_events (id, monitor_id, time, kind, status_code, failure, duration_seconds, cert_expires_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+			id.New(), rec.MonitorID, e.Time, string(e.Kind), e.StatusCode, string(e.Failure), e.DurationSeconds,
+			e.CertExpiresAt); err != nil {
 			return errs.Wrap(err, errs.CodeUnavailable, "could not record the monitor event").WithOp(op)
 		}
 	}

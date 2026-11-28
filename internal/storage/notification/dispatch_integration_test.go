@@ -154,7 +154,8 @@ func TestDispatchResolvesTheNodeAtSendTimeAndNeverStoresIt(t *testing.T) {
 		}
 		columns = append(columns, name)
 	}
-	want := "attempts,channel_id,channel_type,created_at,delivered_at,event_id,id,kind,last_error,message," +
+	// details holds a monitor alert's measurements, never a name or address.
+	want := "attempts,channel_id,channel_type,created_at,delivered_at,details,event_id,id,kind,last_error,message," +
 		"monitor_id,next_attempt_at,node_id,severity,status,subject,title,trigger,updated_at"
 	if got := strings.Join(columns, ","); got != want {
 		t.Errorf("notification_deliveries columns = %s, want %s (node details must not be stored)", got, want)

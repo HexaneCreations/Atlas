@@ -31,6 +31,8 @@ export interface ChannelDraft {
   headers: string;
   enabled: boolean;
   minSeverity: NotificationSeverity;
+  /** Pre-select for new website monitors. */
+  monitorDefault: boolean;
 }
 
 export type ChannelField = "name" | "url" | "template" | "headers";
@@ -47,6 +49,7 @@ export function toDraft(channel: NotificationChannel | null): ChannelDraft {
   if (!channel) {
     return {
       type: "teams", name: "", url: "", template: DEFAULT_TEMPLATE, headers: "", enabled: true, minSeverity: "warning",
+      monitorDefault: false,
     };
   }
   const { template } = channel.config;
@@ -60,6 +63,7 @@ export function toDraft(channel: NotificationChannel | null): ChannelDraft {
       : "",
     enabled: channel.enabled,
     minSeverity: channel.min_severity,
+    monitorDefault: channel.monitor_default,
   };
 }
 
@@ -207,6 +211,7 @@ export function toRequest(draft: ChannelDraft, channel: NotificationChannel | nu
     type: draft.type,
     enabled: draft.enabled,
     min_severity: draft.minSeverity,
+    monitor_default: draft.monitorDefault,
     config,
     ...(secret === undefined ? {} : { secret }),
   };

@@ -36,12 +36,15 @@ export function AlertRulesView({
   pendingKey,
   error,
   onChange,
+  subject = "node",
 }: {
   rules: NodeAlertRule[];
   pendingKey: string | null;
   error: string | null;
   /** override null resets the rule to inherit. */
   onChange: (ruleKey: string, override: boolean | null) => void;
+  /** What the rules are shown for, in the notes: "node" or "website". */
+  subject?: string;
 }) {
   return (
     <section aria-label="Alert rules" className="space-y-4">
@@ -50,7 +53,7 @@ export function AlertRulesView({
           <h3 className="mb-2 text-xs font-semibold tracking-wide text-text-muted uppercase">{group.label}</h3>
           <ul className="space-y-2">
             {group.rules.map((rule) => (
-              <AlertRuleRow key={rule.key} rule={rule} busy={pendingKey === rule.key} onChange={onChange} />
+              <AlertRuleRow key={rule.key} rule={rule} subject={subject} busy={pendingKey === rule.key} onChange={onChange} />
             ))}
           </ul>
         </div>
@@ -62,15 +65,17 @@ export function AlertRulesView({
 
 function AlertRuleRow({
   rule,
+  subject,
   busy,
   onChange,
 }: {
   rule: NodeAlertRule;
+  subject: string;
   busy: boolean;
   onChange: (ruleKey: string, override: boolean | null) => void;
 }) {
   const customised = isCustomised(rule);
-  const note = globalNote(rule);
+  const note = globalNote(rule, subject);
   const descriptionID = `alert-rule-${rule.key}-description`;
   return (
     <li className="rounded-lg border border-border p-3">

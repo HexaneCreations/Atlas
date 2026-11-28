@@ -13,13 +13,24 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-const ruleColumns = `trigger, COALESCE(node_id, ''), enabled, warn_threshold, crit_threshold, for_seconds,
-	recovery_seconds, hysteresis, cooldown_seconds, send_recovery, subject_excludes, updated_at, updated_by`
+const ruleColumns = `trigger, COALESCE(node_id, ''), COALESCE(monitor_id, ''), enabled, warn_threshold, crit_threshold,
+	for_seconds, recovery_seconds, hysteresis, cooldown_seconds, send_recovery, subject_excludes, updated_at, updated_by`
+
+// globalRule matches a trigger's global rule row; overrideRule any
+// override, of a node or a monitor.
+const (
+	globalRule   = `(node_id IS NULL AND monitor_id IS NULL)`
+	overrideRule = `(node_id IS NOT NULL OR monitor_id IS NOT NULL)`
+)
+
+// ruleScopeConflict is the ON CONFLICT target of every rule upsert: the
+// ux_notification_rules_subject_scope index.
+const ruleScopeConflict = `ON CONFLICT (trigger, (COALESCE(node_id, '')), (COALESCE(monitor_id, '')))`
 
 func scanRule(row pgx.Row) (corenotification.RuleSpec, error) {
 	var s corenotification.RuleSpec
 	var trigger string
-	if err := row.Scan(&trigger, &s.NodeID, &s.Enabled, &s.WarnThreshold, &s.CritThreshold, &s.ForSeconds,
+	if err := row.Scan(&trigger, &s.NodeID, &s.MonitorID, &s.Enabled, &s.WarnThreshold, &s.CritThreshold, &s.ForSeconds,
 		&s.RecoverySeconds, &s.Hysteresis, &s.CooldownSeconds, &s.SendRecovery, &s.SubjectExcludes,
 		&s.UpdatedAt, &s.UpdatedBy); err != nil {
 		return corenotification.RuleSpec{}, err
@@ -34,7 +45,7 @@ func (r *Repository) ListRules(ctx context.Context) ([]corenotification.RuleSpec
 	const op = "notification.Repository.ListRules"
 
 	rows, err := r.pool.Query(ctx, `SELECT `+ruleColumns+` FROM notification_rules
-		ORDER BY trigger, node_id IS NOT NULL, node_id`)
+		ORDER BY trigger, `+overrideRule+`, node_id, monitor_id`)
 	if err != nil {
 		return nil, errs.Wrap(err, errs.CodeUnavailable, "could not list notification rules").WithOp(op)
 	}
@@ -86,18 +97,18 @@ func (r *Repository) SetRule(ctx context.Context, spec corenotification.RuleSpec
 
 	if spec.IsGlobal() {
 		// Every existing override must still merge cleanly over the new global.
-		overrides, err := rulesWhere(ctx, tx, `trigger = $1 AND node_id IS NOT NULL FOR UPDATE`, string(spec.Trigger))
+		overrides, err := rulesWhere(ctx, tx, `trigger = $1 AND `+overrideRule+` FOR UPDATE`, string(spec.Trigger))
 		if err != nil {
 			return errs.Wrap(err, errs.CodeUnavailable, "could not read the node overrides").WithOp(op)
 		}
 		for _, o := range overrides {
 			if _, err := corenotification.MergeRule(spec, &o, o.NodeID); err != nil {
 				return errs.Wrap(err, errs.CodeInvalidArgument,
-					"the new default conflicts with the override for node %s", o.NodeID).WithOp(op)
+					"the new default conflicts with the override for %s", ruleScopeName(o)).WithOp(op)
 			}
 		}
 	} else {
-		global, err := rulesWhere(ctx, tx, `trigger = $1 AND node_id IS NULL FOR SHARE`, string(spec.Trigger))
+		global, err := rulesWhere(ctx, tx, `trigger = $1 AND `+globalRule+` FOR SHARE`, string(spec.Trigger))
 		if err != nil {
 			return errs.Wrap(err, errs.CodeUnavailable, "could not read the global rule").WithOp(op)
 		}
@@ -109,25 +120,21 @@ func (r *Repository) SetRule(ctx context.Context, spec corenotification.RuleSpec
 		}
 	}
 
-	var nodeID *string
-	if !spec.IsGlobal() {
-		nodeID = &spec.NodeID
-	}
 	const q = `
-		INSERT INTO notification_rules (id, trigger, node_id, enabled, warn_threshold, crit_threshold, for_seconds,
+		INSERT INTO notification_rules (id, trigger, node_id, monitor_id, enabled, warn_threshold, crit_threshold, for_seconds,
 			recovery_seconds, hysteresis, cooldown_seconds, send_recovery, subject_excludes, updated_at, updated_by)
-		VALUES ($13, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now(), $12)
-		ON CONFLICT (trigger, (COALESCE(node_id, ''))) DO UPDATE SET
+		VALUES ($13, $1, $2, $14, $3, $4, $5, $6, $7, $8, $9, $10, $11, now(), $12)
+		` + ruleScopeConflict + ` DO UPDATE SET
 			enabled = EXCLUDED.enabled, warn_threshold = EXCLUDED.warn_threshold,
 			crit_threshold = EXCLUDED.crit_threshold, for_seconds = EXCLUDED.for_seconds,
 			recovery_seconds = EXCLUDED.recovery_seconds, hysteresis = EXCLUDED.hysteresis,
 			cooldown_seconds = EXCLUDED.cooldown_seconds, send_recovery = EXCLUDED.send_recovery,
 			subject_excludes = EXCLUDED.subject_excludes, updated_at = now(), updated_by = EXCLUDED.updated_by`
-	if _, err := tx.Exec(ctx, q, string(spec.Trigger), nodeID, spec.Enabled, spec.WarnThreshold, spec.CritThreshold,
+	if _, err := tx.Exec(ctx, q, string(spec.Trigger), nullable(spec.NodeID), spec.Enabled, spec.WarnThreshold, spec.CritThreshold,
 		spec.ForSeconds, spec.RecoverySeconds, spec.Hysteresis, spec.CooldownSeconds, spec.SendRecovery,
-		spec.SubjectExcludes, updatedBy, id.New()); err != nil {
+		spec.SubjectExcludes, updatedBy, id.New(), nullable(spec.MonitorID)); err != nil {
 		if pgCode(err) == "23503" {
-			return errs.New(errs.CodeNotFound, "node %q is not known", spec.NodeID).WithOp(op)
+			return errs.New(errs.CodeNotFound, "%s is not known", ruleScopeName(spec)).WithOp(op)
 		}
 		return errs.Wrap(err, errs.CodeUnavailable, "could not save the notification rule").WithOp(op)
 	}
@@ -146,8 +153,9 @@ func (r *Repository) DeleteRule(ctx context.Context, trigger corenotification.Tr
 	q := `DELETE FROM notification_rules WHERE trigger = $1 AND node_id = $2`
 	args := []any{string(trigger), nodeID}
 	if nodeID == "" {
-		q = `DELETE FROM notification_rules WHERE trigger = $1 AND node_id IS NULL
-			AND NOT EXISTS (SELECT 1 FROM notification_rules o WHERE o.trigger = $1 AND o.node_id IS NOT NULL)`
+		q = `DELETE FROM notification_rules WHERE trigger = $1 AND ` + globalRule + `
+			AND NOT EXISTS (SELECT 1 FROM notification_rules o WHERE o.trigger = $1
+				AND (o.node_id IS NOT NULL OR o.monitor_id IS NOT NULL))`
 		args = args[:1]
 	}
 	tag, err := r.pool.Exec(ctx, q, args...)
@@ -159,9 +167,9 @@ func (r *Repository) DeleteRule(ctx context.Context, trigger corenotification.Tr
 	}
 	if nodeID == "" {
 		var exists bool
-		if err := r.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM notification_rules WHERE trigger = $1 AND node_id IS NULL)`,
+		if err := r.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM notification_rules WHERE trigger = $1 AND `+globalRule+`)`,
 			string(trigger)).Scan(&exists); err == nil && exists {
-			return errs.New(errs.CodeFailedPrecondition, "trigger %q still has node overrides; delete them first", trigger).WithOp(op)
+			return errs.New(errs.CodeFailedPrecondition, "trigger %q still has overrides; delete them first", trigger).WithOp(op)
 		}
 	}
 	return errs.New(errs.CodeNotFound, "notification rule not found").WithOp(op)
@@ -173,7 +181,7 @@ func (r *Repository) DeleteRule(ctx context.Context, trigger corenotification.Tr
 func (r *Repository) EffectiveRule(ctx context.Context, trigger corenotification.Trigger, nodeID string) (corenotification.Rule, error) {
 	const op = "notification.Repository.EffectiveRule"
 
-	specs, err := rulesWhere(ctx, r.pool, `trigger = $1 AND (node_id IS NULL OR node_id = $2)`, string(trigger), nodeID)
+	specs, err := rulesWhere(ctx, r.pool, `trigger = $1 AND (`+globalRule+` OR node_id = $2)`, string(trigger), nodeID)
 	if err != nil {
 		return corenotification.Rule{}, errs.Wrap(err, errs.CodeUnavailable, "could not read the notification rules").WithOp(op)
 	}
@@ -189,6 +197,22 @@ func (r *Repository) EffectiveRule(ctx context.Context, trigger corenotification
 		return corenotification.Rule{}, errs.New(errs.CodeNotFound, "trigger %q has no global rule", trigger).WithOp(op)
 	}
 	return corenotification.MergeRule(*global, override, nodeID)
+}
+
+// nullable is s, or NULL when it is empty.
+func nullable(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
+}
+
+// ruleScopeName names a rule override's subject in an error.
+func ruleScopeName(s corenotification.RuleSpec) string {
+	if s.MonitorID != "" {
+		return "monitor " + s.MonitorID
+	}
+	return "node " + s.NodeID
 }
 
 type querier interface {
@@ -212,14 +236,14 @@ func rulesWhere(ctx context.Context, q querier, where string, args ...any) ([]co
 	return out, rows.Err()
 }
 
-const stateColumns = `trigger, node_id, subject, state, severity, value, condition_since, state_since,
+const stateColumns = `trigger, COALESCE(node_id, ''), COALESCE(monitor_id, ''), subject, state, severity, value, condition_since, state_since,
 	last_notified_at, last_notified_kind, flap_count, flap_window_start, baseline, updated_at`
 
 func scanState(row pgx.Row) (corenotification.State, error) {
 	var s corenotification.State
 	var trigger, state, severity, kind string
 	var baseline []byte
-	if err := row.Scan(&trigger, &s.NodeID, &s.Subject, &state, &severity, &s.Value, &s.ConditionSince,
+	if err := row.Scan(&trigger, &s.NodeID, &s.MonitorID, &s.Subject, &state, &severity, &s.Value, &s.ConditionSince,
 		&s.StateSince, &s.LastNotifiedAt, &kind, &s.FlapCount, &s.FlapWindowStart, &baseline, &s.UpdatedAt); err != nil {
 		return corenotification.State{}, err
 	}
@@ -295,7 +319,12 @@ func (r *Repository) BeginPending(ctx context.Context, s corenotification.State)
 	if err := r.upsertState(ctx, op, s, ` WHERE notification_state.state = 'ok'`); err != nil {
 		return corenotification.State{}, err
 	}
-	stored, found, err := r.GetState(ctx, s.Trigger, s.NodeID, s.Subject)
+	get := r.GetState
+	key := s.NodeID
+	if s.MonitorID != "" {
+		get, key = r.GetMonitorState, s.MonitorID
+	}
+	stored, found, err := get(ctx, s.Trigger, key, s.Subject)
 	if err != nil {
 		return corenotification.State{}, err
 	}
@@ -321,17 +350,23 @@ func (r *Repository) upsertState(ctx context.Context, op string, s corenotificat
 	if err != nil {
 		return errs.Wrap(err, errs.CodeInvalidArgument, "the state baseline is not valid JSON").WithOp(op)
 	}
-	const q = `
-		INSERT INTO notification_state (trigger, node_id, subject, state, severity, value, condition_since, state_since,
+	// A node row keeps the exact statement the previous release ran; a
+	// monitor row conflicts on ux_notification_state_monitor instead.
+	subjectColumn, conflict, subjectID := "node_id", "(trigger, node_id, subject)", s.NodeID
+	if s.MonitorID != "" {
+		subjectColumn, conflict, subjectID = "monitor_id", "(trigger, monitor_id, subject) WHERE monitor_id IS NOT NULL", s.MonitorID
+	}
+	q := `
+		INSERT INTO notification_state (trigger, ` + subjectColumn + `, subject, state, severity, value, condition_since, state_since,
 			last_notified_at, last_notified_kind, flap_count, flap_window_start, baseline, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now())
-		ON CONFLICT (trigger, node_id, subject) DO UPDATE SET
+		ON CONFLICT ` + conflict + ` DO UPDATE SET
 			state = EXCLUDED.state, severity = EXCLUDED.severity, value = EXCLUDED.value,
 			condition_since = EXCLUDED.condition_since, state_since = EXCLUDED.state_since,
 			last_notified_at = EXCLUDED.last_notified_at, last_notified_kind = EXCLUDED.last_notified_kind,
 			flap_count = EXCLUDED.flap_count, flap_window_start = EXCLUDED.flap_window_start,
 			baseline = EXCLUDED.baseline, updated_at = now()`
-	if _, err := r.pool.Exec(ctx, q+guard, string(s.Trigger), s.NodeID, s.Subject, string(s.State), string(s.Severity),
+	if _, err := r.pool.Exec(ctx, q+guard, string(s.Trigger), subjectID, s.Subject, string(s.State), string(s.Severity),
 		s.Value, s.ConditionSince, s.StateSince, s.LastNotifiedAt, string(s.LastNotifiedKind), s.FlapCount,
 		s.FlapWindowStart, raw); err != nil {
 		return errs.Wrap(err, errs.CodeUnavailable, "could not record the notification state").WithOp(op)

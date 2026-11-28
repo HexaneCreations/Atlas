@@ -9,6 +9,10 @@ type Counters struct {
 	ConsecutiveSuccesses int
 	StatusSince          time.Time
 	DownSince            *time.Time
+	// LastCheckAt and CertExpiresAt are what the previous check saw; they
+	// decide whether this one crossed a certificate threshold.
+	LastCheckAt   *time.Time
+	CertExpiresAt *time.Time
 }
 
 // EventKind is a recorded up/down transition.
@@ -17,6 +21,11 @@ type EventKind string
 const (
 	EventDown EventKind = "down"
 	EventUp   EventKind = "up"
+	// EventCertWarn and EventCertCrit: the certificate entered the warning
+	// or critical window. EventCertRenewed: it left them, renewed.
+	EventCertWarn    EventKind = "cert_warn"
+	EventCertCrit    EventKind = "cert_crit"
+	EventCertRenewed EventKind = "cert_renewed"
 )
 
 // Event is one up/down transition.
@@ -28,6 +37,54 @@ type Event struct {
 	StatusCode      *int
 	Failure         Failure
 	DurationSeconds *int // for EventUp: how long the monitor was down
+	// CertExpiresAt is the certificate's expiry, for the cert events.
+	CertExpiresAt *time.Time
+}
+
+// certBand is where a certificate expiring at expires stands at now: 0
+// outside the warning window, 1 inside it, 2 inside the critical one.
+func certBand(m Monitor, expires *time.Time, now time.Time) int {
+	if expires == nil {
+		return 0
+	}
+	left := expires.Sub(now)
+	switch {
+	case left <= time.Duration(m.CertCritDays)*24*time.Hour:
+		return 2
+	case left <= time.Duration(m.CertWarnDays)*24*time.Hour:
+		return 1
+	}
+	return 0
+}
+
+// CertEvent is the certificate transition, if any, between the previous
+// check (c) and this one, which saw expires at now. A check that saw no
+// certificate (plain http, or a failed handshake) changes nothing, and
+// neither does a monitor whose certificate is not watched.
+func CertEvent(m Monitor, c Counters, expires *time.Time, now time.Time) *Event {
+	if !m.CertNotify || expires == nil {
+		return nil
+	}
+	prevAt := now
+	if c.LastCheckAt != nil {
+		prevAt = *c.LastCheckAt
+	}
+	before, after := certBand(m, c.CertExpiresAt, prevAt), certBand(m, expires, now)
+	if c.CertExpiresAt == nil {
+		before = 0
+	}
+	at := expires.UTC()
+	switch {
+	case after == before:
+		return nil
+	case after == 2:
+		return &Event{Kind: EventCertCrit, Time: now, CertExpiresAt: &at}
+	case after == 1 && before == 0:
+		return &Event{Kind: EventCertWarn, Time: now, CertExpiresAt: &at}
+	case after == 0:
+		return &Event{Kind: EventCertRenewed, Time: now, CertExpiresAt: &at}
+	}
+	return nil // critical back to warning: renewed, but not out of the window
 }
 
 // Apply advances c by one check result r at now.

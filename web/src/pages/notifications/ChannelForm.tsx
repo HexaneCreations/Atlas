@@ -261,6 +261,22 @@ export function ChannelFields({
         </p>
       </div>
 
+      <div>
+        <label className="flex items-center gap-2 text-sm text-text">
+          <input
+            type="checkbox"
+            checked={draft.monitorDefault}
+            aria-describedby="channel-monitor-default-help"
+            onChange={(e) => { onChange({ monitorDefault: e.target.checked }); }}
+          />
+          Select for new websites
+        </label>
+        <p id="channel-monitor-default-help" className="mt-1 text-xs text-text-muted">
+          Website alerts go only to the channels each website selects. When on, new websites start with this channel
+          selected; existing websites are not changed.
+        </p>
+      </div>
+
       <Field id="channel-severity" label="Minimum severity">
         <select
           id="channel-severity"

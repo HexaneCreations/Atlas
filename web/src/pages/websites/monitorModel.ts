@@ -10,6 +10,7 @@ import type {
   MonitorMethod,
   MonitorRequest,
   MonitorStatus,
+  NotificationChannel,
   TestMonitorRequest,
   TestMonitorResponse,
 } from "../../api/types";
@@ -183,6 +184,9 @@ export interface MonitorDraft {
   certCritDays: string;
   body: string;
   bodyEncoding: MonitorBodyEncoding;
+  /** The selected channels; null on a new monitor until changed, which
+   *  leaves the server to select every monitor_default channel. */
+  channelIDs: string[] | null;
 }
 
 /** Error keys are the API's field names, so a server error lands on the
@@ -206,7 +210,7 @@ export function toMonitorDraft(m: Monitor | null): MonitorDraft {
       name: "", url: "", groupID: "", description: "", tags: "", method: "GET", interval: "60", retries: "3",
       retryInterval: "60", timeout: "30", maxRedirects: "10", acceptedStatus: "200-299", keyword: "", authType: "none",
       basicUsername: "", basicPassword: "", bearerToken: "", headers: [], certNotify: true, certWarnDays: "14",
-      certCritDays: "3", body: "", bodyEncoding: "json",
+      certCritDays: "3", body: "", bodyEncoding: "json", channelIDs: null,
     };
   }
   return {
@@ -228,6 +232,7 @@ export function toMonitorDraft(m: Monitor | null): MonitorDraft {
     basicPassword: "",
     bearerToken: "",
     headers: (m.header_names ?? []).map((name) => ({ name, value: "", stored: true })),
+    channelIDs: m.channel_ids ?? [],
     certNotify: m.cert_notify,
     certWarnDays: String(m.cert_warn_days),
     certCritDays: String(m.cert_crit_days),
@@ -445,12 +450,19 @@ export function toMonitorRequest(d: MonitorDraft, m: Monitor | null): MonitorReq
   if (d.body !== "") req.body = d.body;
   // A stored body is only sent with POST: leaving POST drops it.
   else if (m?.method === "POST" && d.method !== "POST") req.body = "";
+  if (d.channelIDs !== null) req.channel_ids = d.channelIDs;
   return req;
+}
+
+/** The channels shown as selected: the draft's own choice, or, on a new
+ *  monitor not yet changed, every channel flagged monitor_default. */
+export function selectedChannels(d: Pick<MonitorDraft, "channelIDs">, channels: readonly NotificationChannel[]): string[] {
+  return d.channelIDs ?? channels.filter((c) => c.monitor_default).map((c) => c.id);
 }
 
 /** The test request: the draft as it stands, on top of the saved monitor. */
 export function toTestRequest(d: MonitorDraft, m: Monitor | null): TestMonitorRequest {
-  const { name, ...rest } = toMonitorRequest(d, m);
+  const { name, channel_ids: _channels, ...rest } = toMonitorRequest(d, m);
   return { ...rest, ...(name ? { name } : {}), ...(m ? { monitor_id: m.id } : {}) };
 }
 

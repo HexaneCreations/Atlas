@@ -29,6 +29,8 @@ type fakeMonitors struct {
 	groups  []monitor.Group
 	calls   int
 	next    int
+	// defaultChannels stand in for the channels flagged monitor_default.
+	defaultChannels []string
 }
 
 func newFakeMonitors() *fakeMonitors {
@@ -75,6 +77,9 @@ func (f *fakeMonitors) CreateMonitor(_ context.Context, m monitor.Monitor, s mon
 	f.next++
 	m.ID = "mon-" + string(rune('0'+f.next))
 	m.SecretConfigured, m.CreatedBy, m.UpdatedBy = !s.Empty(), by, by
+	if m.ChannelIDs == nil {
+		m.ChannelIDs = append([]string{}, f.defaultChannels...)
+	}
 	v := monitor.View{Monitor: m, Live: monitor.Live{Status: monitor.StatusUnknown}}
 	f.views[m.ID], f.secrets[m.ID] = v, s
 	return v, nil
@@ -92,6 +97,9 @@ func (f *fakeMonitors) UpdateMonitor(_ context.Context, id string, apply monitor
 		return monitor.View{}, err
 	}
 	m.ID, m.SecretConfigured, m.UpdatedBy = id, !s.Empty(), by
+	if m.ChannelIDs == nil {
+		m.ChannelIDs = v.ChannelIDs
+	}
 	v.Monitor = m
 	f.views[id], f.secrets[id] = v, s
 	return v, nil
@@ -117,6 +125,18 @@ func (f *fakeMonitors) DeleteMonitor(_ context.Context, id string) error {
 	}
 	delete(f.views, id)
 	return nil
+}
+func (f *fakeMonitors) SetMonitorChannels(_ context.Context, id string, ids []string) ([]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.touch()
+	v, err := f.get(id)
+	if err != nil {
+		return nil, err
+	}
+	v.ChannelIDs = append([]string{}, ids...)
+	f.views[id] = v
+	return v.ChannelIDs, nil
 }
 func (f *fakeMonitors) RecentHeartbeats(context.Context, []string, int) (map[string][]monitor.Heartbeat, error) {
 	return map[string][]monitor.Heartbeat{}, nil

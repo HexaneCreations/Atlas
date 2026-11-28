@@ -58,8 +58,11 @@ func TestNodeRulesReadsOnlyThatNodesOverride(t *testing.T) {
 	for _, r := range NodeRules(specs, "n1") {
 		got[r.Key] = r
 	}
-	if len(got) != len(Catalog) {
-		t.Fatalf("got %d rules, want every catalog entry", len(got))
+	if len(got) != len(Catalog)-2 {
+		t.Fatalf("got %d rules, want every node catalog entry", len(got))
+	}
+	if _, ok := got[TriggerWebsiteDown]; ok {
+		t.Error("NodeRules lists a monitor rule")
 	}
 	if r := got[TriggerDiskPct]; r.Enabled || r.Source != SourceNode {
 		t.Errorf("disk_pct = %+v, want disabled by the node", r)

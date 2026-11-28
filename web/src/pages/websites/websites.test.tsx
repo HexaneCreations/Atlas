@@ -11,7 +11,12 @@ import { ToastProvider } from "../../components/Toast";
 import { canSeeNavPage } from "../../shell/pageAccess";
 import { NAV_PAGES } from "../../shell/pages";
 import { WebsitesPage } from "../WebsitesPage";
-import { MonitorFields } from "./MonitorForm";
+import { applyOverride, globalNote } from "../../lib/alertRules";
+import { notificationKeys } from "../../api/queries";
+import type { NodeAlertRule, NotificationChannel } from "../../api/types";
+import { AlertRulesView } from "../nodes/AlertRules";
+import { EventRows } from "./MonitorDetail";
+import { ChannelPicker, MonitorFields } from "./MonitorForm";
 import {
   NO_FILTERS,
   filterMonitors,
@@ -19,6 +24,7 @@ import {
   groupMonitors,
   hasQueryString,
   runMonitorTest,
+  selectedChannels,
   testSummary,
   toMonitorDraft,
   toMonitorRequest,
@@ -39,7 +45,7 @@ function monitor(over: Partial<Monitor> = {}): Monitor {
     accepted_status: ["200-299"], body_encoding: "json", keyword: "", recovery_successes: 1, cert_notify: true,
     cert_warn_days: 14, cert_crit_days: 3, group_id: "", description: "", tags: [], active: true,
     alerts_muted_until: null, auth_type: "bearer", header_names: ["X-Api-Key"], secret_configured: true,
-    created_at: at, updated_at: at, redacted: false, uptime_24h: 99.5,
+    created_at: at, updated_at: at, redacted: false, uptime_24h: 99.5, notifications_configured: true, channel_ids: ["c1"],
     live: {
       status: "up", status_since: at, down_since: null, consecutive_failures: 0, last_check_at: at, last_status_code: 200,
       last_response_ms: 87, last_failure: "", next_check_at: at, cert_expires_at: "2027-01-01T00:00:00Z",
@@ -50,7 +56,7 @@ function monitor(over: Partial<Monitor> = {}): Monitor {
 }
 
 function viewerCopy(m: Monitor): Monitor {
-  const { auth_type: _a, header_names: _h, secret_configured: _s, ...rest } = m;
+  const { auth_type: _a, header_names: _h, secret_configured: _s, channel_ids: _c, ...rest } = m;
   return { ...rest, url: "https://shop.example.com/health", redacted: true };
 }
 
@@ -63,16 +69,24 @@ function user(over: Partial<CurrentUser> = {}): CurrentUser {
   };
 }
 
+function channelOf(id: string, monitorDefault: boolean): NotificationChannel {
+  return {
+    id, name: `channel ${id}`, type: "teams", enabled: true, min_severity: "warning", config: {}, secret_configured: true,
+    monitor_default: monitorDefault, destination_host: "x.webhook.office.com", header_names: [], created_at: at, updated_at: at,
+  };
+}
+
 function renderPage(me: CurrentUser, list: ListMonitorsResponse, detail?: MonitorDetail): string {
   const client = new QueryClient({ defaultOptions: { queries: { retryOnMount: false, staleTime: Infinity } } });
   client.setQueryData(["auth", "me"], me);
+  client.setQueryData(notificationKeys.channels, { channels: [channelOf("c1", true), channelOf("c2", false)], total: 2 });
   client.setQueryData(monitorKeys.list, list);
   if (detail) {
     client.setQueryData(monitorKeys.detail(detail.id), detail);
     client.setQueryData(monitorKeys.heartbeats(detail.id), { monitor_id: detail.id, heartbeats: detail.heartbeats ?? [] });
     client.setQueryData(monitorKeys.events(detail.id), {
       monitor_id: detail.id,
-      events: [{ id: "e1", time: at, kind: "down", status_code: 503, failure: "http_status", duration_seconds: null }],
+      events: [{ id: "e1", time: at, kind: "down", status_code: 503, failure: "http_status", duration_seconds: null, cert_expires_at: null }],
     });
   }
   return renderToStaticMarkup(
@@ -316,5 +330,87 @@ describe("the Websites nav entry", () => {
     expect(render(user())).toContain('href="/websites"');
     expect(main(render(user()))).toContain("animate-pulse");
     expect(main(render(user({ page_access: [] })))).not.toContain("animate-pulse");
+  });
+});
+
+describe("monitor notifications", () => {
+  const channels = [channelOf("c1", true), channelOf("c2", false)];
+
+  it("starts a new monitor with the monitor_default channels and leaves the server to apply them", () => {
+    const fresh = toMonitorDraft(null);
+    expect(selectedChannels(fresh, channels)).toEqual(["c1"]);
+    expect(toMonitorRequest({ ...fresh, name: "A", url: "https://a.example.com/" }, null)).not.toHaveProperty("channel_ids");
+    expect(toMonitorRequest({ ...fresh, channelIDs: [] }, null).channel_ids).toEqual([]);
+  });
+
+  it("keeps a saved monitor's selection, including an empty one", () => {
+    expect(toMonitorDraft(monitor({ channel_ids: ["c2"] })).channelIDs).toEqual(["c2"]);
+    expect(toMonitorDraft(monitor({ channel_ids: [] })).channelIDs).toEqual([]);
+    const saved = monitor({ channel_ids: ["c2"] });
+    expect(toMonitorRequest(toMonitorDraft(saved), saved).channel_ids).toEqual(["c2"]);
+  });
+
+  it("never sends a selection with a test", () => {
+    const saved = monitor({ channel_ids: ["c2"] });
+    expect(toTestRequest(toMonitorDraft(saved), saved)).not.toHaveProperty("channel_ids");
+  });
+
+  it("says when nothing is selected", () => {
+    const none = renderToStaticMarkup(<ChannelPicker channels={channels} unavailable={false} selected={[]} onChange={() => undefined} />);
+    expect(none).toContain("No notifications configured");
+    const some = renderToStaticMarkup(<ChannelPicker channels={channels} unavailable={false} selected={["c1"]} onChange={() => undefined} />);
+    expect(some).not.toContain("No notifications configured");
+    expect(some).toContain("channel c2");
+  });
+
+  it("marks a list row and the detail of a monitor that notifies no one", () => {
+    const quiet = monitor({ notifications_configured: false, channel_ids: [] });
+    const html = renderPage(user(), { monitors: [quiet], groups: [], probe: offline }, detailOf(quiet));
+    expect(html).toContain('<span class="sr-only">No notifications configured</span>'); // the list row
+    expect(html).toContain("No notifications configured.<"); // the detail, which a viewer cannot fix
+    const loud = renderPage(user(), { monitors: [monitor()], groups: [], probe: offline }, detailOf(monitor()));
+    expect(loud).not.toContain("No notifications configured");
+  });
+
+  it("gives a manager the alert rules tab, channel choice and mute; a viewer none of them", () => {
+    const m = monitor();
+    const manager = renderPage(user({ can_manage_notifications: true }), { monitors: [m], groups: [], probe: offline }, detailOf(m));
+    for (const text of ["Overview", "Alert rules", "Choose channels", "Alerts go to channel c1", "Mute alerts: 4 hours", "Until I unmute"]) {
+      expect(manager).toContain(text);
+    }
+    const viewer = renderPage(user(), { monitors: [viewerCopy(m)], groups: [], probe: offline }, detailOf(viewerCopy(m)));
+    for (const text of ["Alert rules", "Choose channels", "Mute alerts"]) {
+      expect(viewer).not.toContain(text);
+    }
+  });
+
+  it("shows a mute in force", () => {
+    const m = monitor({ alerts_muted_until: "9999-01-01T00:00:00Z" });
+    const html = renderPage(user({ can_manage_notifications: true }), { monitors: [m], groups: [], probe: offline }, detailOf(m));
+    expect(html).toContain("until unmuted");
+    expect(html).toContain("Unmute");
+  });
+
+  it("lists certificate events", () => {
+    const html = renderToStaticMarkup(<EventRows events={[
+      { id: "e1", time: at, kind: "cert_warn", status_code: null, failure: "", duration_seconds: null, cert_expires_at: at },
+      { id: "e2", time: at, kind: "cert_renewed", status_code: null, failure: "", duration_seconds: null, cert_expires_at: at },
+    ]} />);
+    expect(html).toContain("Certificate expiring");
+    expect(html).toContain("Certificate renewed");
+    expect(html).toContain("expires ");
+  });
+
+  it("reuses the alert rules view with the website wording", () => {
+    const rule: NodeAlertRule = {
+      key: "website_down", area: "websites", title: "Website down", description: "d", default_severity: "critical",
+      default_enabled: true, global_enabled: false, override: true, enabled: true, source: "monitor",
+    };
+    expect(globalNote(rule, "website")).toBe("Off globally, on for this website only.");
+    expect(applyOverride({ ...rule, override: null, source: "global" }, false, "monitor").source).toBe("monitor");
+    const html = renderToStaticMarkup(<AlertRulesView rules={[rule]} subject="website" pendingKey={null} error={null} onChange={() => undefined} />);
+    for (const text of ["Websites", "Website down", "customised", "on for this website only"]) {
+      expect(html).toContain(text);
+    }
   });
 });

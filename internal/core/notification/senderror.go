@@ -20,7 +20,7 @@ const (
 	categoryTLS         = "the TLS connection to the destination failed"
 	categoryConnect     = "could not connect to the destination"
 	categoryRequest     = "the request to the destination failed"
-	categoryTemplate    = "the template could not be rendered; it may only use msg, eventJSON, nodeJSON and ruleJSON"
+	categoryTemplate    = "the template could not be rendered; it may only use msg, eventJSON, nodeJSON, monitorJSON and ruleJSON"
 	categoryConfig      = "the channel's destination, headers or template are not valid"
 	categorySecret      = "the stored channel secret cannot be decrypted with the configured encryption key"
 	categoryNoSecret    = "the channel has no secret configured"

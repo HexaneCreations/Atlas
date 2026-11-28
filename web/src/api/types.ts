@@ -894,6 +894,8 @@ export interface NotificationChannel {
   /** The non-secret settings: `template` and `content_type` for a webhook. */
   config: Record<string, unknown>;
   secret_configured: boolean;
+  /** Pre-selected for new website monitors. */
+  monitor_default: boolean;
   destination_host: string;
   header_names: string[];
   created_at: string;
@@ -917,6 +919,8 @@ export interface NotificationChannelRequest {
    *  one is kept; with an empty url the stored url is kept and so is the value
    *  of any header left empty. */
   secret?: string;
+  /** Omitted on update keeps the stored value. */
+  monitor_default?: boolean;
 }
 
 /** POST /api/v1/notifications/channels/test */
@@ -966,9 +970,9 @@ export interface MuteNodeRequest {
 }
 
 /** Where a node's effective alert rule value comes from. */
-export type AlertRuleSource = "node" | "global" | "catalog";
+export type AlertRuleSource = "node" | "monitor" | "global" | "catalog";
 
-/** One catalog alert rule as it applies to a node. */
+/** One catalog alert rule as it applies to a node, or to a website monitor. */
 export interface NodeAlertRule {
   key: string;
   area: string;
@@ -1112,6 +1116,10 @@ export interface Monitor {
   updated_at: string;
   updated_by?: string;
   redacted: boolean;
+  /** False when no channel is selected: the monitor notifies no one. */
+  notifications_configured: boolean;
+  /** The selected channels; only for readers who manage notifications. */
+  channel_ids?: string[];
   live: MonitorLive;
   /** Absent when nothing was counted in the last day. */
   uptime_24h?: number | null;
@@ -1147,13 +1155,17 @@ export interface MonitorHeartbeatsResponse {
   heartbeats: MonitorHeartbeat[];
 }
 
+export type MonitorEventKind = "down" | "up" | "cert_warn" | "cert_crit" | "cert_renewed";
+
 export interface MonitorEvent {
   id: string;
   time: string;
-  kind: "down" | "up";
+  kind: MonitorEventKind;
   status_code: number | null;
   failure: MonitorFailure;
   duration_seconds: number | null;
+  /** Set on the certificate events. */
+  cert_expires_at: string | null;
 }
 
 export interface MonitorEventsResponse {
@@ -1196,6 +1208,27 @@ export interface MonitorRequest {
   basic_password?: string;
   bearer_token?: string;
   body?: string;
+  /** Omitted on create selects the monitor_default channels; on update,
+   *  keeps the selection. */
+  channel_ids?: string[];
+}
+
+/** PUT /api/v1/monitors/{id}/channels */
+export interface MonitorChannelsResponse {
+  monitor_id: string;
+  channel_ids: string[];
+}
+
+/** GET /api/v1/monitors/{id}/alert-rules */
+export interface ListMonitorAlertRulesResponse {
+  monitor_id: string;
+  rules: NodeAlertRule[];
+}
+
+/** The answer to PUT /api/v1/monitors/{id}/mute. */
+export interface MonitorMuteResponse {
+  monitor_id: string;
+  alerts_muted_until: string | null;
 }
 
 /** POST /api/v1/monitors/test: a draft, plus the saved monitor whose

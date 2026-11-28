@@ -20,18 +20,21 @@ const defaultWebhookContentType = "application/json"
 // type to send it as. The destination URL and any additional headers are
 // deliberately not here; see [WebhookSecret].
 type WebhookConfig struct {
-	// Template is a text/template body rendered with four variables —
-	// msg, eventJSON, nodeJSON, and ruleJSON — each already a ready-to-embed
-	// JSON fragment: msg is a JSON string literal (quotes included), the
-	// other three are JSON object literals. A template writes
-	// {"text": {{.msg}}, "event": {{.eventJSON}}} with no extra quoting or
-	// escaping of its own.
+	// Template is a text/template body rendered with five variables —
+	// msg, eventJSON, nodeJSON, monitorJSON and ruleJSON — each already a
+	// ready-to-embed JSON fragment: msg is a JSON string literal (quotes
+	// included), the others are JSON object literals or null. A template
+	// writes {"text": {{.msg}}, "event": {{.eventJSON}}} with no extra
+	// quoting or escaping of its own.
 	//
 	// nodeJSON is {"node_id": "...", "name": "...", "address": "..."}:
 	// name is the node's hostname and address its observed public
 	// address, both resolved at send time and "" when unknown (or for a
-	// test). ruleJSON is {"trigger": "..."}. The full Node and Rule rows
-	// are not available at Send time.
+	// test). It is null for a website monitor's notification, and
+	// monitorJSON is null for every other one; see [webhookMonitor] for
+	// its shape. eventJSON carries node_id or monitor_id, whichever the
+	// subject is. ruleJSON is {"trigger": "..."}. The full Node and Rule
+	// rows are not available at Send time.
 	Template    string
 	ContentType string
 }
@@ -90,7 +93,9 @@ func (c WebhookConfig) Masked() map[string]any {
 // four variables it is given — and "missingkey=error", so a template
 // referencing anything other than msg, eventJSON, nodeJSON, or ruleJSON
 // fails loudly at render time instead of silently rendering Go's
-// "<no value>" into what is otherwise meant to be valid JSON.
+// "<no value>" into what is otherwise meant to be valid JSON. The fifth,
+// monitorJSON, came later; a template written before it simply never
+// references it.
 func parseWebhookTemplate(body string) (*template.Template, error) {
 	return template.New("webhook").Option("missingkey=error").Parse(body)
 }
@@ -142,14 +147,15 @@ func (s WebhookSecret) Masked() map[string]any {
 // webhookEvent is the eventJSON template variable: the notification event
 // itself, as far as a Delivery carries it.
 type webhookEvent struct {
-	EventID  string `json:"event_id"`
-	Kind     string `json:"kind"`
-	Trigger  string `json:"trigger"`
-	NodeID   string `json:"node_id,omitempty"`
-	Subject  string `json:"subject,omitempty"`
-	Severity string `json:"severity,omitempty"`
-	Title    string `json:"title"`
-	Message  string `json:"message"`
+	EventID   string `json:"event_id"`
+	Kind      string `json:"kind"`
+	Trigger   string `json:"trigger"`
+	NodeID    string `json:"node_id,omitempty"`
+	MonitorID string `json:"monitor_id,omitempty"`
+	Subject   string `json:"subject,omitempty"`
+	Severity  string `json:"severity,omitempty"`
+	Title     string `json:"title"`
+	Message   string `json:"message"`
 }
 
 // webhookNode is the nodeJSON template variable.
@@ -157,6 +163,20 @@ type webhookNode struct {
 	NodeID  string `json:"node_id"`
 	Name    string `json:"name"`
 	Address string `json:"address"`
+}
+
+// webhookMonitor is the monitorJSON template variable: a website monitor
+// notification's subject. name and host are resolved at send time ("" when
+// unknown); host is the URL's host only, never its path, query or
+// credentials. The remaining fields are present when they apply:
+// failure, status_code, response_ms and down_since for website_down,
+// outage_seconds on its recovery, cert_expires_at and cert_days_left for
+// website_cert_expiry.
+type webhookMonitor struct {
+	MonitorID string `json:"monitor_id"`
+	Name      string `json:"name"`
+	Host      string `json:"host"`
+	MonitorDetails
 }
 
 // jsonFragment marshals v and returns it as a string, ready to embed
@@ -214,15 +234,25 @@ func (s *WebhookSender) Send(ctx context.Context, channel Channel, secret string
 		return fmt.Errorf("encode msg: %w", err)
 	}
 	eventJSON, err := jsonFragment(webhookEvent{
-		EventID: d.EventID, Kind: string(d.Kind), Trigger: string(d.Trigger), NodeID: d.NodeID,
+		EventID: d.EventID, Kind: string(d.Kind), Trigger: string(d.Trigger), NodeID: d.NodeID, MonitorID: d.MonitorID,
 		Subject: d.Subject, Severity: string(d.Severity), Title: d.Title, Message: d.Message,
 	})
 	if err != nil {
 		return fmt.Errorf("encode eventJSON: %w", err)
 	}
-	nodeJSON, err := jsonFragment(webhookNode{NodeID: d.NodeID, Name: d.NodeName, Address: d.NodeAddress})
+	var node, mon any
+	if d.MonitorID != "" {
+		mon = webhookMonitor{MonitorID: d.MonitorID, Name: d.MonitorName, Host: d.MonitorHost, MonitorDetails: d.Details}
+	} else {
+		node = webhookNode{NodeID: d.NodeID, Name: d.NodeName, Address: d.NodeAddress}
+	}
+	nodeJSON, err := jsonFragment(node)
 	if err != nil {
 		return fmt.Errorf("encode nodeJSON: %w", err)
+	}
+	monitorJSON, err := jsonFragment(mon)
+	if err != nil {
+		return fmt.Errorf("encode monitorJSON: %w", err)
 	}
 	ruleJSON, err := jsonFragment(map[string]string{"trigger": string(d.Trigger)})
 	if err != nil {
@@ -231,7 +261,7 @@ func (s *WebhookSender) Send(ctx context.Context, channel Channel, secret string
 
 	var buf bytes.Buffer
 	if err := tmpl.Execute(&buf, map[string]string{
-		"msg": msg, "eventJSON": eventJSON, "nodeJSON": nodeJSON, "ruleJSON": ruleJSON,
+		"msg": msg, "eventJSON": eventJSON, "nodeJSON": nodeJSON, "monitorJSON": monitorJSON, "ruleJSON": ruleJSON,
 	}); err != nil {
 		return &SendError{msg: "render webhook template: " + err.Error(), category: categoryTemplate}
 	}

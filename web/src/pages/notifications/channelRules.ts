@@ -13,7 +13,7 @@ export const MAX_HEADER_VALUE_LENGTH = 4096;
 export const MAX_TEMPLATE_LENGTH = 16 * 1024;
 
 /** What a webhook body may refer to: each is a ready-made JSON fragment. */
-export const TEMPLATE_VARIABLES = ["msg", "eventJSON", "nodeJSON", "ruleJSON"];
+export const TEMPLATE_VARIABLES = ["msg", "eventJSON", "nodeJSON", "monitorJSON", "ruleJSON"];
 
 export const DEFAULT_TEMPLATE = `{
   "text": {{.msg}},
